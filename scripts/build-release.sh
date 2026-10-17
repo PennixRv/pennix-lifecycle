@@ -40,7 +40,7 @@ cleanup() {
   [[ -z "${temporary}" ]] || rm -f -- "${temporary}"
 }
 trap cleanup EXIT
-git -C "${repository}" archive --format=tar --prefix=pennix-lifecycle/ "${commit}" \
+git -C "${repository}" archive --format=tar --mtime='@0' --prefix=pennix-lifecycle/ "${commit}" \
   config pennix scripts references templates | gzip -n > "${temporary}"
 python3 - "${temporary}" <<'PY'
 import sys
