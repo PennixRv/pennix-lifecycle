@@ -100,9 +100,9 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             continue
         status = _component_status(args, component_id, component)
         if component_id in selected:
-            action = "keep" if status["state"] == "match" else "install"
+            action = "keep" if status["state"] in {"match", "current", "present"} else "install"
         else:
-            action = "uninstall" if status["state"] == "match" else "keep"
+            action = "uninstall" if status["state"] in {"match", "current", "present"} else "keep"
             if action == "uninstall" and component.get("delivery") == "collection" and not owner_engine.collection_owned(component, args.codex_home):
                 action = "keep"
                 status["ownership"] = "external"
