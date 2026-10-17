@@ -81,9 +81,13 @@ set -eu
 action=$1
 server_id=$2
 map=/etc/nginx/conf.d/snippets/paseo-relay-allowed-servers.map
-line="$server_id 1;"
+escaped=$(printf '%s' "$server_id" | sed 's/\./\\./g')
+plain_line="$server_id 1;"
+regex_line="~^${escaped}$ 1;"
 test -f "$map" || { echo missing; exit 43; }
-count=$(grep -F -x -- "$line" "$map" | wc -l)
+plain_count=$(grep -F -x -- "$plain_line" "$map" | wc -l)
+regex_count=$(grep -F -x -- "$regex_line" "$map" | wc -l)
+count=$((plain_count + regex_count))
 test "$count" -le 1 || { echo duplicate; exit 44; }
 if [ "$action" = inspect ]; then
   [ "$count" -eq 1 ] && echo present || echo absent
@@ -95,10 +99,10 @@ trap 'rm -f "$tmp"' EXIT
 cp -p "$map" "$tmp"
 if [ "$action" = add ]; then
   if [ "$count" -eq 1 ]; then echo present; exit 0; fi
-  printf '%s\n' "$line" >> "$tmp"
+  printf '%s\n' "$regex_line" >> "$tmp"
 elif [ "$action" = remove ]; then
   if [ "$count" -eq 0 ]; then echo absent; exit 0; fi
-  awk -v wanted="$line" '$0 != wanted { print }' "$map" > "$tmp"
+  awk -v plain="$plain_line" -v regex="$regex_line" '$0 != plain && $0 != regex { print }' "$map" > "$tmp"
 else
   echo invalid >&2
   exit 45
