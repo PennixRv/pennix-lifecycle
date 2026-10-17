@@ -1,0 +1,205 @@
+mainmenu "Pennix 工作流生命周期"
+
+config PENNIX_CONFIG_FORMAT
+	string "配置格式主版本"
+	default "1"
+	help
+		由工具写入的格式主版本。变更主版本时必须明确拒绝旧配置，不能自动迁移。
+
+menu "运行路径"
+
+config PENNIX_CODEX_HOME
+	string "Codex 家目录"
+	default "$HOME/.codex"
+	help
+		Codex 原生配置和认证所在目录。
+
+config PENNIX_NPM_PREFIX
+	string "npm 用户全局 prefix"
+	default "$HOME/.local"
+	help
+		用户级 npm 全局安装位置。路径必须为绝对路径或以 $HOME 开头。
+
+endmenu
+
+menu "核心工具"
+
+config PENNIX_COMPONENT_CODEX_CLI
+	bool "Codex CLI"
+	default y
+
+config PENNIX_COMPONENT_TRELLIS_CLI
+	bool "Trellis CLI"
+	default y
+
+config PENNIX_COMPONENT_PNPM
+	bool "pnpm"
+	default y
+
+config PENNIX_COMPONENT_FASTCTX
+	bool "FastCtx"
+	default y
+
+config PENNIX_COMPONENT_CODEGRAPH_CLI
+	bool "CodeGraph CLI"
+	default y
+
+config PENNIX_COMPONENT_PASEO_CLI
+	bool "Paseo CLI"
+	default y
+
+config PENNIX_COMPONENT_PONYTAIL_PLUGIN
+	bool "Ponytail 插件"
+	default y
+
+config PENNIX_COMPONENT_CCH_STATUS
+	bool "CCH 状态组件"
+	default y
+
+config PENNIX_COMPONENT_TMUX
+	bool "tmux"
+	default y
+
+config PENNIX_COMPONENT_TMUX_CONFIG
+	bool "tmux 配置"
+	depends on PENNIX_COMPONENT_TMUX
+	default y
+
+config PENNIX_COMPONENT_AOE
+	bool "AOE"
+	default y
+
+config PENNIX_COMPONENT_TAVILY_HIKARI
+	bool "Tavily Hikari"
+	default y
+
+config PENNIX_COMPONENT_CODEX_CONFIG
+	bool "Codex 配置"
+	default y
+
+config PENNIX_COMPONENT_CODEX_AGENTS
+	bool "Codex AGENTS.md"
+	default y
+
+config PENNIX_COMPONENT_PENNIX_SKILLS_EXTRA
+	bool "pennix-skills-extra"
+	default y
+
+config PENNIX_COMPONENT_PENNIX_SKILLS
+	bool "pennix-skills"
+	default y
+
+endmenu
+
+menu "Codex 工作流偏好"
+
+config PENNIX_CODEX_REMOTE_COMPACTION
+	bool "启用远程压缩"
+	default y
+
+config PENNIX_CODEX_HOOKS
+	bool "启用 hooks"
+	default y
+
+config PENNIX_CODEX_GOALS
+	bool "启用 goals"
+	default y
+
+config PENNIX_CODEX_MEMORIES
+	bool "允许生命周期工具启用 memories"
+	default n
+
+config PENNIX_CODEX_AGENTS_ENABLED
+	bool "启用 Codex agents"
+	default n
+
+config PENNIX_CODEX_CONFIG_MODE_NATIVE
+	bool "保留 Codex 原生配置"
+	default y
+
+endmenu
+
+menu "连接目标"
+
+config PENNIX_TARGET_SIYUAN
+	bool "启用思源连接"
+	default n
+
+config PENNIX_TARGET_CCH
+	bool "启用 CCH 连接"
+	default n
+
+config PENNIX_TARGET_HIKARI
+	bool "启用 Hikari 连接"
+	default n
+
+config PENNIX_TARGET_GROK
+	bool "启用 Grok Search 连接"
+	default n
+
+config PENNIX_TARGET_GROK_TAVILY
+	bool "启用 Grok Tavily 扩展"
+	default n
+
+config PENNIX_TARGET_WINDSURF
+	bool "启用 Windsurf Code Search 连接"
+	default n
+
+endmenu
+
+menu "Paseo 与服务"
+
+choice
+	prompt "Paseo 自启动"
+	default PENNIX_PASEO_AUTOSTART_OFF
+
+config PENNIX_PASEO_AUTOSTART_OFF
+	bool "关闭"
+
+config PENNIX_PASEO_AUTOSTART_LOGIN
+	bool "用户登录时启动"
+
+config PENNIX_PASEO_AUTOSTART_LINGER
+	bool "无登录时启动（需要显式启用 linger）"
+
+endchoice
+
+config PENNIX_PASEO_RELAY
+	bool "登记现有 NAS relay"
+	default n
+	help
+		仅登记既有受信 SSH 路径；不创建镜像、修改 Compose 或配置 SSH 密钥。
+
+config PENNIX_PASEO_RELAY_ENDPOINT
+	string "Paseo relay 内部 endpoint"
+	default ""
+	depends on PENNIX_PASEO_RELAY
+
+config PENNIX_PASEO_RELAY_PUBLIC_ENDPOINT
+	string "Paseo relay 公网 endpoint"
+	default ""
+	depends on PENNIX_PASEO_RELAY
+
+config PENNIX_PASEO_RELAY_TLS
+	bool "relay 使用 TLS"
+	default y
+	depends on PENNIX_PASEO_RELAY
+
+config PENNIX_PASEO_RELAY_PUBLIC_TLS
+	bool "relay 公网使用 TLS"
+	default y
+	depends on PENNIX_PASEO_RELAY
+
+config PENNIX_UPDATE_COMPONENTS
+	bool "apply 时更新已选组件"
+	default n
+
+config PENNIX_SYSTEM_UPGRADE
+	bool "执行完整系统升级"
+	default n
+
+config PENNIX_REAL_SMOKE_TEST
+	bool "运行真实功能 smoke test"
+	default n
+
+endmenu

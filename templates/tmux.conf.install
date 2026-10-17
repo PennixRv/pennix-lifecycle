@@ -1,0 +1,4 @@
+set -g default-terminal "xterm-256color"
+set-option -ga terminal-overrides ",xterm-256color:Tc"
+set -g window-style "fg=#F5F5F5,bg=#1E1E1E"
+set -g window-active-style "fg=#F5F5F5,bg=#1E1E1E"
