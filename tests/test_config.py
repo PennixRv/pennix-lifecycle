@@ -12,7 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import codex_config
 import config_model
+import _engine as owner_engine
 import path_env
+import relay_owner
 
 
 class ConfigModelTests(unittest.TestCase):
@@ -117,6 +119,21 @@ class CliTests(unittest.TestCase):
             self.assertEqual(path_env.remove(), "changed")
         finally:
             Path.home = original_home  # type: ignore[method-assign]
+
+    def test_external_collection_is_preserved(self) -> None:
+        catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references" / "catalog.json")
+        component = catalog["components"]["pennix-skills-extra"]
+        destination = self.home / "codex" / "skills" / "pennix-skills-extra"
+        for name in component["collection_contract"]["skills"]:
+            (destination / name).mkdir(parents=True, exist_ok=True)
+        self.assertFalse(owner_engine.collection_owned(component, self.home / "codex"))
+        self.assertEqual(owner_engine._operate_collection(component, self.home / "codex", "uninstall"), "preserved")
+        self.assertTrue(destination.is_dir())
+
+    def test_relay_endpoint_requires_host_and_port(self) -> None:
+        relay_owner.validate_config("relay.example:9999", "relay.example:9999")
+        with self.assertRaises(relay_owner.RelayError):
+            relay_owner.validate_config("https://relay.example:9999", "relay.example:9999")
 
 
 if __name__ == "__main__":

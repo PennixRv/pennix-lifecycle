@@ -1,8 +1,4 @@
-"""Owner operations for the versioned lifecycle tool.
-
-This module deliberately has one storage model: the current catalog, current
-templates and current collection manifest.
-"""
+"""Owner operations for the versioned lifecycle tool."""
 
 from __future__ import annotations
 
@@ -226,12 +222,68 @@ def _collection_destination(component: dict[str, Any], codex_home: Path) -> Path
     return codex_home / "skills" / name
 
 
+def _collection_state_path() -> Path:
+    base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")).expanduser()
+    return base / "pennix-lifecycle" / "collections.json"
+
+
 def _collection_names(component: dict[str, Any]) -> set[str]:
     contract = component.get("collection_contract")
     names = contract.get("skills") if isinstance(contract, dict) else None
     if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
         raise BootstrapError("collection skills are missing")
     return set(names)
+
+
+def _collection_key(component: dict[str, Any]) -> str:
+    key = component.get("adapter")
+    if not isinstance(key, str) or not key:
+        raise BootstrapError("collection adapter is missing")
+    return key
+
+
+def _collection_manifest() -> dict[str, Any]:
+    path = _collection_state_path()
+    if not path.exists():
+        return {"schema": 1, "collections": {}}
+    if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
+        raise BootstrapError("collection ownership record is unsafe")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BootstrapError("collection ownership record is invalid") from error
+    if not isinstance(value, dict) or value.get("schema") != 1 or not isinstance(value.get("collections"), dict):
+        raise BootstrapError("collection ownership record version is unsupported")
+    return value
+
+
+def _write_collection_manifest(value: dict[str, Any]) -> None:
+    path = _collection_state_path()
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if path.parent.is_symlink() or not path.parent.is_dir():
+        raise BootstrapError("collection ownership directory is unsafe")
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def collection_owned(component: dict[str, Any], codex_home: Path) -> bool:
+    destination = _collection_destination(component, codex_home)
+    record = _collection_manifest().get("collections", {}).get(_collection_key(component))
+    return (
+        isinstance(record, dict)
+        and record.get("destination") == str(destination)
+        and record.get("skills") == sorted(_collection_names(component))
+    )
 
 
 def _collection_state(component: dict[str, Any], codex_home: Path) -> str:
@@ -278,6 +330,8 @@ def _operate_collection(component: dict[str, Any], codex_home: Path, operation: 
             return "no-op"
         if state != "match":
             raise BootstrapError(f"refusing {state} collection")
+        if not collection_owned(component, codex_home):
+            return "preserved"
         for name in names:
             target = destination / name
             if target.is_symlink() or not target.is_dir():
@@ -287,6 +341,12 @@ def _operate_collection(component: dict[str, Any], codex_home: Path, operation: 
             destination.rmdir()
         except OSError:
             pass
+        manifest = _collection_manifest()
+        manifest["collections"].pop(_collection_key(component), None)
+        if manifest["collections"]:
+            _write_collection_manifest(manifest)
+        else:
+            _collection_state_path().unlink(missing_ok=True)
         return "changed"
     if state == "match":
         return "no-op"
@@ -295,19 +355,35 @@ def _operate_collection(component: dict[str, Any], codex_home: Path, operation: 
     contract = component["collection_contract"]
     source = contract["source"]
     staging = _git_tree(source, source.get("paths", []))
+    temporary_destination: Path | None = None
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.mkdir(mode=0o755)
+        if destination.parent.is_symlink() or not destination.parent.is_dir():
+            raise BootstrapError("collection parent is unsafe")
+        temporary_destination = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent))
         for relative in source["paths"]:
             source_path = staging / relative
             name = Path(relative).name
             if name not in names or not source_path.is_dir():
                 raise BootstrapError(f"collection source path is invalid: {relative}")
-            shutil.copytree(source_path, destination / name)
+            shutil.copytree(source_path, temporary_destination / name)
+        if destination.exists() or destination.is_symlink():
+            raise BootstrapError("collection destination changed during install")
+        os.replace(temporary_destination, destination)
+        temporary_destination = None
     finally:
+        if temporary_destination is not None:
+            shutil.rmtree(temporary_destination, ignore_errors=True)
         shutil.rmtree(staging, ignore_errors=True)
     if _collection_state(component, codex_home) != "match":
         raise BootstrapError("collection postcondition failed")
+    manifest = _collection_manifest()
+    manifest["collections"][_collection_key(component)] = {
+        "destination": str(destination),
+        "skills": sorted(names),
+        "source_ref": source.get("ref"),
+    }
+    _write_collection_manifest(manifest)
     return "changed"
 
 

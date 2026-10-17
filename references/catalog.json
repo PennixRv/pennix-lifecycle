@@ -447,11 +447,7 @@
         "reconcile": "not-applicable"
       },
       "project_init": "not-applicable",
-      "adapter": "codex-config",
-      "template": {
-        "name": "config.toml.install",
-        "revision": "sha256:e9838db2d11bb78173a714172b8a228812e1939530e768ef811f8678c785e5a0"
-      }
+      "adapter": "codex-config"
     },
     "codex-agents": {
       "delivery": "static",

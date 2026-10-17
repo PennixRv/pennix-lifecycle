@@ -166,6 +166,7 @@ endchoice
 
 config PENNIX_PASEO_RELAY
 	bool "登记现有 NAS relay"
+	depends on PENNIX_COMPONENT_PASEO_CLI
 	default n
 	help
 		仅登记既有受信 SSH 路径；不创建镜像、修改 Compose 或配置 SSH 密钥。

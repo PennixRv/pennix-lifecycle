@@ -18,6 +18,7 @@ import codex_config
 import config_model
 import path_env
 import paseo_service
+import relay_owner
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +66,28 @@ def _component_status(args: argparse.Namespace, component_id: str, component: di
     return {"state": state, "detail": detail}
 
 
+def _relay_plan(args: argparse.Namespace, kconf: config_model.StrictKconfig) -> dict[str, Any] | None:
+    paseo_home = args.codex_home.parent / ".paseo"
+    selected = bool(kconf.syms["PENNIX_PASEO_RELAY"].tri_value)
+    if not selected:
+        if not relay_owner.local_owned():
+            return None
+        return {"selected": False, "action": "uninstall", "state": "owned", "detail": "本工具登记项待撤回"}
+    endpoint = config_model.config_value(kconf, "PENNIX_PASEO_RELAY_ENDPOINT")
+    public_endpoint = config_model.config_value(kconf, "PENNIX_PASEO_RELAY_PUBLIC_ENDPOINT")
+    try:
+        relay_owner.validate_config(endpoint, public_endpoint)
+        state = relay_owner.inspect(paseo_home)
+        return {
+            "selected": True,
+            "action": "keep" if state == "present" else "install",
+            "state": state,
+            "detail": "既有登记项" if state == "present" else "等待登记",
+        }
+    except relay_owner.RelayError as error:
+        return {"selected": True, "action": "blocked", "state": "blocked", "detail": str(error)}
+
+
 def _plan(args: argparse.Namespace) -> dict[str, Any]:
     kconf, path, catalog = _load(args)
     args.kconf = kconf
@@ -80,6 +103,9 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             action = "keep" if status["state"] == "match" else "install"
         else:
             action = "uninstall" if status["state"] == "match" else "keep"
+            if action == "uninstall" and component.get("delivery") == "collection" and not owner_engine.collection_owned(component, args.codex_home):
+                action = "keep"
+                status["ownership"] = "external"
         components[component_id] = {"selected": component_id in selected, "action": action, **status}
     prefix = Path(os.path.expanduser(config_model.config_value(kconf, "PENNIX_NPM_PREFIX")))
     paseo = prefix / "bin" / "paseo"
@@ -95,11 +121,9 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
     components["paseo-autostart"] = {
         "selected": mode != "off", "mode": mode, "action": service_action, "state": service_state,
     }
-    if kconf.syms["PENNIX_PASEO_RELAY"].tri_value:
-        components["paseo-relay"] = {
-            "selected": True, "action": "blocked", "state": "blocked",
-            "detail": "受信 SSH/nginx 登记 owner 尚未接入新生命周期工具",
-        }
+    relay = _relay_plan(args, kconf)
+    if relay is not None:
+        components["paseo-relay"] = relay
     return {"config": str(path), "codex_home": str(args.codex_home), "components": components}
 
 
@@ -176,23 +200,29 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_check(args: argparse.Namespace) -> int:
     value = _plan(args)
     _emit(value, args.json)
-    bad = [item for item in value["components"].values() if item["selected"] and item["state"] not in {"match", "current"}]
+    bad = [item for item in value["components"].values() if item["selected"] and item["state"] not in {"match", "current", "present"}]
     return 1 if bad else 0
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
     value = _plan(args)
     _, _, catalog = _load(args)
-    args.kconf, _, _ = _load(args)
     selected = {key for key, item in value["components"].items() if item["selected"]}
     relay = value["components"].get("paseo-relay")
-    if relay and relay["selected"]:
-        raise CliError("Paseo relay 已选择，但远端 nginx/SSH owner 尚未完成接入；未执行任何动作")
+    if relay and relay["selected"] and relay["state"] == "blocked":
+        raise CliError(f"Paseo relay 预检失败：{relay.get('detail', '未知错误')}；未执行任何动作")
     for component_id in selected:
         if component_id in catalog["components"]:
             _ensure_dependencies(selected, component_id)
     if value["components"]["paseo-autostart"]["mode"] != "off" and "paseo-cli" not in selected:
         raise CliError("Paseo 自启动需要选择 paseo-cli")
+    relay_home = args.codex_home.parent / ".paseo"
+    relay_result = None
+    if relay and relay["action"] == "uninstall":
+        try:
+            relay_result = relay_owner.remove(relay_home)
+        except relay_owner.RelayError as error:
+            raise CliError(f"Paseo relay 撤回失败，未执行本地收敛：{error}") from error
     order = [
         "codex-cli", "trellis-cli", "pnpm", "fastctx", "codegraph-cli", "paseo-cli",
         "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "tavily-hikari",
@@ -229,6 +259,21 @@ def cmd_apply(args: argparse.Namespace) -> int:
         if result.returncode:
             raise CliError(f"完整系统升级失败: {result.returncode}")
         results["system-upgrade"] = "changed"
+    if relay and relay["selected"]:
+        try:
+            if relay["action"] == "install":
+                relay_owner.ensure(relay_home)
+            endpoint = config_model.config_value(args.kconf, "PENNIX_PASEO_RELAY_ENDPOINT")
+            public_endpoint = config_model.config_value(args.kconf, "PENNIX_PASEO_RELAY_PUBLIC_ENDPOINT")
+            results["paseo-relay"] = relay_owner.configure_daemon(
+                paseo, relay_home, endpoint, public_endpoint,
+                bool(args.kconf.syms["PENNIX_PASEO_RELAY_TLS"].tri_value),
+                bool(args.kconf.syms["PENNIX_PASEO_RELAY_PUBLIC_TLS"].tri_value),
+            )
+        except relay_owner.RelayError as error:
+            raise CliError(f"Paseo relay 应用失败：{error}") from error
+    elif relay_result is not None:
+        results["paseo-relay"] = relay_result
     _emit({"operation": "apply", "results": results}, args.json)
     return 0
 
@@ -257,12 +302,27 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     kconf, _, catalog = _load(args)
     args.kconf = kconf
     args.codex_home = Path(os.path.expanduser(config_model.config_value(kconf, "PENNIX_CODEX_HOME")))
+    if args.component == "paseo-relay":
+        if args.confirm != args.component:
+            raise CliError("relay 卸载必须使用 --confirm paseo-relay")
+        try:
+            result = relay_owner.remove(args.codex_home.parent / ".paseo")
+        except relay_owner.RelayError as error:
+            raise CliError(f"Paseo relay 撤回失败：{error}") from error
+        _emit({"operation": "uninstall", "config_unchanged": True, "results": {"paseo-relay": result}}, args.json)
+        return 0
     if args.all:
         if args.confirm_all != "ALL":
             raise CliError("全量卸载必须使用 --confirm-all ALL")
         relay = _plan(args)["components"].get("paseo-relay")
-        if relay and relay["selected"]:
-            raise CliError("relay 远端登记无法完成撤回预检；未执行任何本地卸载")
+        relay_result = None
+        if relay_owner.local_owned():
+            try:
+                relay_result = relay_owner.remove(args.codex_home.parent / ".paseo")
+            except relay_owner.RelayError as error:
+                raise CliError(f"relay 远端撤回预检失败，未执行任何本地卸载：{error}") from error
+        elif relay and relay["selected"] and relay["state"] == "blocked":
+            raise CliError(f"relay 远端撤回预检失败，未执行任何本地卸载：{relay.get('detail', '未知错误')}")
         targets = _reverse_uninstall_order(catalog)
     else:
         if not args.component or args.confirm != args.component:
@@ -276,6 +336,8 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         if dependents.get(args.component, set()) & selected:
             raise CliError(f"卸载 {args.component} 会破坏已选择依赖；请先修改配置并 apply")
     results: dict[str, str] = {}
+    if args.all and relay_result is not None:
+        results["paseo-relay"] = relay_result
     for component_id in targets:
         try:
             results[component_id] = _run_component(args, catalog, component_id, "uninstall")
@@ -289,15 +351,17 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 
 def cmd_secrets_edit(args: argparse.Namespace) -> int:
     base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")).expanduser() / "pennix"
-    path = base / "secrets.toml"
+    path = Path(args.secrets_file).expanduser() if args.secrets_file else base / "secrets.toml"
+    if not path.is_absolute():
+        raise CliError("secrets.toml 路径必须是绝对路径")
     base.mkdir(parents=True, mode=0o700, exist_ok=True)
     if not path.exists():
-        path.write_text(
-            "# 明文编辑，保存前请核对；此文件不会进入 JSON 输出或 Git。\n"
-            "# [siyuan]\n# token = \"\"\n",
-            encoding="utf-8",
-        )
+        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        example = ROOT / "templates" / "secrets.example.toml"
+        path.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
         path.chmod(0o600)
+    elif path.is_symlink() or not path.is_file():
+        raise CliError("secrets.toml 不是安全的普通文件")
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
     result = subprocess.run([editor, str(path)], check=False)
     if result.returncode:
@@ -361,6 +425,7 @@ def parser() -> argparse.ArgumentParser:
     secrets = sub.add_parser("secrets", help="编辑私有明文 secrets.toml")
     secrets_sub = secrets.add_subparsers(dest="secrets_command", required=True)
     secret_edit = secrets_sub.add_parser("edit")
+    secret_edit.add_argument("--secrets-file")
     secret_edit.set_defaults(function=cmd_secrets_edit)
 
     cache = sub.add_parser("cache", help="管理工具自有缓存")
@@ -376,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
         return args.function(args)
-    except (CliError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError) as error:
+    except (CliError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, relay_owner.RelayError) as error:
         print(f"pennix: {error}", file=sys.stderr)
         return 2
 
