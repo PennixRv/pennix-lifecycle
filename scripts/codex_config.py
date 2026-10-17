@@ -13,12 +13,13 @@ from tomlkit import document, parse
 
 
 OWNED = {
-    "remote_compaction_v2": "PENNIX_CODEX_REMOTE_COMPACTION",
-    "hooks": "PENNIX_CODEX_HOOKS",
-    "goals": "PENNIX_CODEX_GOALS",
-    "memories": "PENNIX_CODEX_MEMORIES",
+    "features.remote_compaction_v2": "PENNIX_CODEX_REMOTE_COMPACTION",
+    "features.hooks": "PENNIX_CODEX_HOOKS",
+    "features.goals": "PENNIX_CODEX_GOALS",
+    "features.memories": "PENNIX_CODEX_MEMORIES",
 }
 AGENTS_ENABLED = "PENNIX_CODEX_AGENTS_ENABLED"
+STATE_SCHEMA = 2
 
 
 class CodexConfigError(RuntimeError):
@@ -68,7 +69,7 @@ def _record(path: Path, before: dict[str, Any], after: dict[str, Any]) -> None:
     state = _state_path()
     state.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     state.parent.chmod(0o700)
-    payload = {"schema": 1, "path": str(path), "before": before, "after": after}
+    payload = {"schema": STATE_SCHEMA, "path": str(path), "before": before, "after": after}
     descriptor, name = tempfile.mkstemp(prefix=f".{state.name}.", dir=state.parent)
     temporary = Path(name)
     try:
@@ -93,7 +94,7 @@ def _load_record() -> dict[str, Any] | None:
         value = json.loads(state.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise CodexConfigError("Codex 配置归属记录无效") from error
-    if not isinstance(value, dict) or value.get("schema") != 1:
+    if not isinstance(value, dict) or value.get("schema") != STATE_SCHEMA:
         raise CodexConfigError("Codex 配置归属记录版本不受支持")
     return value
 
@@ -104,12 +105,44 @@ def expected(values: dict[str, str]) -> dict[str, bool]:
     }
 
 
+def _get(doc: Any, path: str) -> Any:
+    value = doc
+    for part in path.split("."):
+        value = value.get(part) if isinstance(value, dict) else None
+    return value
+
+
+def _set(doc: Any, path: str, value: Any) -> None:
+    parts = path.split(".")
+    target = doc
+    for part in parts[:-1]:
+        if part not in target or not isinstance(target[part], dict):
+            target[part] = {}
+        target = target[part]
+    target[parts[-1]] = value
+
+
+def _delete(doc: Any, path: str) -> None:
+    parts = path.split(".")
+    parents: list[tuple[Any, str]] = []
+    target = doc
+    for part in parts[:-1]:
+        if not isinstance(target, dict) or part not in target or not isinstance(target[part], dict):
+            return
+        parents.append((target, part))
+        target = target[part]
+    if isinstance(target, dict):
+        target.pop(parts[-1], None)
+    for parent, part in reversed(parents):
+        if isinstance(parent.get(part), dict) and not parent[part]:
+            parent.pop(part, None)
+
+
 def inspect(path: Path, values: dict[str, str]) -> dict[str, Any]:
     doc, _ = _read(path)
     want = expected(values)
-    observed_raw = {key: doc.get(key) for key in OWNED}
-    agents = doc.get("agents")
-    observed_raw["agents.enabled"] = agents.get("enabled") if hasattr(agents, "get") else None
+    observed_raw = {key: _get(doc, key) for key in OWNED}
+    observed_raw["agents.enabled"] = _get(doc, "agents.enabled")
     state = "current" if all(observed_raw[key] == value for key, value in want.items()) else (
         "missing" if all(value is None for value in observed_raw.values()) else "drifted"
     )
@@ -123,16 +156,10 @@ def inspect(path: Path, values: dict[str, str]) -> dict[str, Any]:
 def apply(path: Path, values: dict[str, str]) -> str:
     doc, _ = _read(path)
     want = expected(values)
-    before = {key: doc.get(key) for key in OWNED}
-    agents = doc.get("agents")
-    before["agents.enabled"] = agents.get("enabled") if isinstance(agents, dict) else None
+    before = {key: _get(doc, key) for key in OWNED}
+    before["agents.enabled"] = _get(doc, "agents.enabled")
     for key, value in want.items():
-        if key == "agents.enabled":
-            if "agents" not in doc or not isinstance(doc["agents"], dict):
-                doc["agents"] = {}
-            doc["agents"]["enabled"] = value
-        else:
-            doc[key] = value
+        _set(doc, key, value)
     if before == want:
         return "no-op"
     _write(path, doc)
@@ -150,20 +177,11 @@ def uninstall(path: Path) -> str:
     for key in OWNED:
         value = record["before"].get(key)
         if value is None:
-            doc.pop(key, None)
+            _delete(doc, key)
         else:
-            doc[key] = value
+            _set(doc, key, value)
     value = record["before"].get("agents.enabled")
-    if value is None:
-        agents = doc.get("agents")
-        if isinstance(agents, dict):
-            agents.pop("enabled", None)
-            if not agents:
-                doc.pop("agents", None)
-    else:
-        if "agents" not in doc or not isinstance(doc["agents"], dict):
-            doc["agents"] = {}
-        doc["agents"]["enabled"] = value
+    _delete(doc, "agents.enabled") if value is None else _set(doc, "agents.enabled", value)
     _write(path, doc)
     _state_path().unlink(missing_ok=True)
     return "changed"

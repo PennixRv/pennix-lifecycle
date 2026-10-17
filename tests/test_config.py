@@ -73,7 +73,7 @@ class ConfigModelTests(unittest.TestCase):
     def test_codex_writer_preserves_unowned_toml_and_redacts_status(self) -> None:
         config = self.home / "codex" / "config.toml"
         config.parent.mkdir(parents=True)
-        config.write_text("custom = \"preserve\"\n[agents]\nother = true\n", encoding="utf-8")
+        config.write_text("custom = \"preserve\"\n[features]\ncustom = true\n[hooks]\nstate = {}\n[agents]\nother = true\n", encoding="utf-8")
         values = {
             "PENNIX_CODEX_REMOTE_COMPACTION": "y",
             "PENNIX_CODEX_HOOKS": "y",
@@ -83,6 +83,7 @@ class ConfigModelTests(unittest.TestCase):
         }
         self.assertEqual(codex_config.apply(config, values), "changed")
         self.assertIn('custom = "preserve"', config.read_text(encoding="utf-8"))
+        self.assertIn("custom = true", config.read_text(encoding="utf-8"))
         status = codex_config.inspect(config, values)
         self.assertEqual(status["state"], "current")
         self.assertNotIn("other", str(status))
