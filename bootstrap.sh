@@ -4,7 +4,7 @@ set -euo pipefail
 version="0.1.7"
 release_name="pennix-lifecycle-${version}.tar.gz"
 release_url="https://github.com/PennixRv/pennix-lifecycle/releases/download/v${version}/${release_name}"
-release_sha256="e988f7f5aadf67e5c5d1a7f42adfe5d8f2da310a22f1afe8bb2462f15aca3809"
+release_sha256="d2681a98ceeb6d4376fc0b2436cbd490ea880cef7aa8460ed48323f4da4b2309"
 data_root="${XDG_DATA_HOME:-$HOME/.local/share}/pennix-lifecycle"
 release_root="${data_root}/releases/${version}"
 owner_marker="${data_root}/.pennix-lifecycle-owner"
