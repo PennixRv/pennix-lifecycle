@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="0.1.0"
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)"
-source_dir="${script_dir}"
+version="0.1.1"
+if [[ -n "${BASH_SOURCE[0]-}" && -f "${BASH_SOURCE[0]}" ]]; then
+  source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+else
+  source_dir="${PWD}"
+fi
 install_root="${XDG_DATA_HOME:-$HOME/.local/share}/pennix-lifecycle/releases/${version}"
 bin_dir="${HOME}/.local/bin"
 
