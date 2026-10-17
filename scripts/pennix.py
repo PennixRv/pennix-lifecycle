@@ -244,7 +244,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         for key, item in value["components"].items()
         if key in catalog["components"]
     )
-    prefix = config_model.config_value(args.kconf, "PENNIX_NPM_PREFIX")
+    prefix = Path(os.path.expanduser(config_model.config_value(args.kconf, "PENNIX_NPM_PREFIX")))
     results["zshrc-npm-path"] = path_env.apply(prefix) if npm_selected else path_env.remove()
     mode = value["components"]["paseo-autostart"]["mode"]
     paseo = prefix / "bin" / "paseo"
