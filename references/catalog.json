@@ -467,7 +467,7 @@
       "adapter": "codex-agents",
       "template": {
         "name": "AGENTS.md.install",
-        "revision": "sha256:bc6b0ab4d5f5ee4d01952341a6b8fdd6685e949981ac6b5acd92540e9c5bae68"
+        "revision": "sha256:a4f819b862319b3999d783c4ec2f271f3ef56822f0e846a9c32ac2a15eb4242c"
       }
     },
     "pennix-skills-extra": {
@@ -528,7 +528,7 @@
         "install": "native-owner",
         "configure": "not-applicable",
         "upgrade": "native-owner",
-        "uninstall": "managed",
+        "uninstall": "native-owner",
         "verify": "managed",
         "reconcile": "not-applicable"
       },

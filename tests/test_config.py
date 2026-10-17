@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import sys
 
@@ -15,6 +16,7 @@ import config_model
 import _engine as owner_engine
 import path_env
 import relay_owner
+import pennix
 
 
 class ConfigModelTests(unittest.TestCase):
@@ -47,7 +49,7 @@ class ConfigModelTests(unittest.TestCase):
     def test_incompatible_header_is_rejected(self) -> None:
         path = config_model.init()
         path.write_text(path.read_text(encoding="utf-8").replace(
-            "# Pennix workflow.config format: 1\n", "# Pennix workflow.config format: 2\n", 1
+            "# Pennix workflow.config format: 2\n", "# Pennix workflow.config format: 1\n", 1
         ), encoding="utf-8")
         with self.assertRaises(config_model.ConfigError):
             config_model.load()
@@ -56,6 +58,19 @@ class ConfigModelTests(unittest.TestCase):
         path = config_model.init()
         path.write_text(path.read_text(encoding="utf-8") + "CONFIG_PENNIX_CODEX_GOALS=y\n", encoding="utf-8")
         with self.assertRaises(config_model.ConfigError):
+            config_model.load()
+
+    def test_choice_with_two_explicit_values_is_rejected(self) -> None:
+        path = config_model.init()
+        text = path.read_text(encoding="utf-8").replace(
+            "# CONFIG_PENNIX_PASEO_AUTOSTART_LOGIN is not set\n", ""
+        ).replace(
+            "CONFIG_PENNIX_PASEO_AUTOSTART_OFF=y\n",
+            "CONFIG_PENNIX_PASEO_AUTOSTART_OFF=y\nCONFIG_PENNIX_PASEO_AUTOSTART_LOGIN=y\n",
+            1,
+        )
+        path.write_text(text, encoding="utf-8")
+        with self.assertRaisesRegex(config_model.ConfigError, "choice"):
             config_model.load()
 
     def test_disabled_relay_fields_remain_editable(self) -> None:
@@ -76,6 +91,7 @@ class ConfigModelTests(unittest.TestCase):
         config.parent.mkdir(parents=True)
         config.write_text("custom = \"preserve\"\n[features]\ncustom = true\n[hooks]\nstate = {}\n[agents]\nother = true\n", encoding="utf-8")
         values = {
+            "PENNIX_CODEX_PROVIDER_URL": "https://api.openai.com/v1",
             "PENNIX_CODEX_REMOTE_COMPACTION": "y",
             "PENNIX_CODEX_HOOKS": "y",
             "PENNIX_CODEX_GOALS": "y",
@@ -85,11 +101,94 @@ class ConfigModelTests(unittest.TestCase):
         self.assertEqual(codex_config.apply(config, values), "changed")
         self.assertIn('custom = "preserve"', config.read_text(encoding="utf-8"))
         self.assertIn("custom = true", config.read_text(encoding="utf-8"))
+        self.assertNotIn("openai_base_url", config.read_text(encoding="utf-8"))
+        self.assertIn('model_provider = "pennix"', config.read_text(encoding="utf-8"))
         status = codex_config.inspect(config, values)
         self.assertEqual(status["state"], "current")
         self.assertNotIn("other", str(status))
         self.assertEqual(codex_config.uninstall(config), "changed")
         self.assertIn('custom = "preserve"', config.read_text(encoding="utf-8"))
+
+    def test_codex_writer_keeps_initial_baseline_across_reapply(self) -> None:
+        config = self.home / "codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text('model_provider = "user"\ncustom = "preserve"\n', encoding="utf-8")
+        values = {
+            "PENNIX_CODEX_PROVIDER_URL": "https://api.openai.com/v1",
+            "PENNIX_CODEX_REMOTE_COMPACTION": "y",
+            "PENNIX_CODEX_HOOKS": "y",
+            "PENNIX_CODEX_GOALS": "y",
+            "PENNIX_CODEX_MEMORIES": "n",
+            "PENNIX_CODEX_AGENTS_ENABLED": "n",
+        }
+        changed = dict(values, PENNIX_CODEX_REMOTE_COMPACTION="n")
+        self.assertEqual(codex_config.apply(config, values), "changed")
+        self.assertEqual(codex_config.apply(config, changed), "changed")
+        self.assertEqual(codex_config.uninstall(config), "changed")
+        restored = config.read_text(encoding="utf-8")
+        self.assertIn('model_provider = "user"', restored)
+        self.assertIn('custom = "preserve"', restored)
+
+    def test_codex_writer_rejects_drift_before_apply_or_uninstall(self) -> None:
+        config = self.home / "codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        values = {
+            "PENNIX_CODEX_PROVIDER_URL": "https://api.openai.com/v1",
+            "PENNIX_CODEX_REMOTE_COMPACTION": "y",
+            "PENNIX_CODEX_HOOKS": "y",
+            "PENNIX_CODEX_GOALS": "y",
+            "PENNIX_CODEX_MEMORIES": "n",
+            "PENNIX_CODEX_AGENTS_ENABLED": "n",
+        }
+        codex_config.apply(config, values)
+        config.write_text(config.read_text(encoding="utf-8").replace(
+            'model_provider = "pennix"', 'model_provider = "user"', 1
+        ), encoding="utf-8")
+        with self.assertRaisesRegex(codex_config.CodexConfigError, "偏离"):
+            codex_config.apply(config, values)
+        with self.assertRaisesRegex(codex_config.CodexConfigError, "偏离"):
+            codex_config.uninstall(config)
+
+    def test_codex_writer_rejects_broken_symlink(self) -> None:
+        config = self.home / "codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.symlink_to(self.home / "missing-config.toml")
+        values = {
+            "PENNIX_CODEX_PROVIDER_URL": "https://api.openai.com/v1",
+            "PENNIX_CODEX_REMOTE_COMPACTION": "y",
+            "PENNIX_CODEX_HOOKS": "y",
+            "PENNIX_CODEX_GOALS": "y",
+            "PENNIX_CODEX_MEMORIES": "n",
+            "PENNIX_CODEX_AGENTS_ENABLED": "n",
+        }
+        with self.assertRaises(codex_config.CodexConfigError):
+            codex_config.apply(config, values)
+
+    def test_unknown_key_is_rejected_without_kconfiglib_shape_error(self) -> None:
+        path = config_model.init()
+        path.write_text(path.read_text(encoding="utf-8") + "CONFIG_UNKNOWN_KEY=y\n", encoding="utf-8")
+        with self.assertRaisesRegex(config_model.ConfigError, "UNKNOWN_KEY"):
+            config_model.load()
+
+    def test_menuconfig_uses_installed_module_entrypoint(self) -> None:
+        path = config_model.init()
+
+        def fake_menuconfig(command, *, cwd, env, check):
+            self.assertEqual(command[1:3], ["-m", "menuconfig"])
+            self.assertEqual(env["KCONFIG_CONFIG"], str(Path(cwd) / ".config"))
+            Path(env["KCONFIG_CONFIG"]).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0)
+
+        with mock.patch.object(config_model.subprocess, "run", side_effect=fake_menuconfig):
+            self.assertEqual(config_model.edit(), path)
+
+    def test_enabled_connection_without_owner_inputs_is_blocked(self) -> None:
+        config_model.init()
+        kconf, _ = config_model.load()
+        kconf.syms["PENNIX_TARGET_CCH"].set_value("y")
+        plans = pennix._connection_plans(kconf)
+        self.assertEqual(plans["integration-cch"]["state"], "blocked")
+        self.assertIn("endpoint:PENNIX_CCH_URL", plans["integration-cch"]["detail"])
 
 
 class CliTests(unittest.TestCase):
@@ -132,10 +231,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(owner_engine._operate_collection(component, self.home / "codex", "uninstall"), "preserved")
         self.assertTrue(destination.is_dir())
 
+    def test_pennix_skills_native_owner_is_never_scheduled_for_lifecycle_mutation(self) -> None:
+        catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references" / "catalog.json")
+        component = catalog["components"]["pennix-skills"]
+        self.assertEqual(pennix._planned_action(component, "install"), ("native-owner", "install"))
+        self.assertEqual(pennix._planned_action(component, "uninstall"), ("native-owner", "uninstall"))
+        self.assertNotIn("pennix-skills", pennix._reverse_uninstall_order(catalog))
+        with self.assertRaises(pennix.CliError):
+            pennix._run_component(None, catalog, "pennix-skills", "install")
+
     def test_relay_endpoint_requires_host_and_port(self) -> None:
         relay_owner.validate_config("relay.example:9999", "relay.example:9999")
         with self.assertRaises(relay_owner.RelayError):
             relay_owner.validate_config("https://relay.example:9999", "relay.example:9999")
+
+    def test_secrets_path_resolves_user_paths(self) -> None:
+        previous = os.environ.get("HOME")
+        os.environ["HOME"] = str(self.home)
+        try:
+            self.assertEqual(pennix._secrets_path("$HOME/private/secrets.toml"), self.home / "private/secrets.toml")
+            with self.assertRaises(pennix.CliError):
+                pennix._secrets_path("relative/secrets.toml")
+        finally:
+            if previous is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = previous
 
 
 if __name__ == "__main__":

@@ -17,9 +17,12 @@ OWNED = {
     "features.hooks": "PENNIX_CODEX_HOOKS",
     "features.goals": "PENNIX_CODEX_GOALS",
     "features.memories": "PENNIX_CODEX_MEMORIES",
+    "model_provider": None,
+    "model_providers.pennix": None,
 }
 AGENTS_ENABLED = "PENNIX_CODEX_AGENTS_ENABLED"
-STATE_SCHEMA = 2
+PROVIDER_ID = "pennix"
+STATE_SCHEMA = 3
 
 
 class CodexConfigError(RuntimeError):
@@ -32,9 +35,11 @@ def _state_path() -> Path:
 
 
 def _read(path: Path) -> tuple[Any, bytes | None]:
+    if path.is_symlink():
+        raise CodexConfigError("Codex config.toml 不是安全的普通文件")
     if not path.exists():
         return document(), None
-    if path.is_symlink() or not path.is_file():
+    if not path.is_file():
         raise CodexConfigError("Codex config.toml 不是安全的普通文件")
     try:
         raw = path.read_bytes()
@@ -49,6 +54,8 @@ def _write(path: Path, doc: Any) -> None:
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     if path.parent.is_symlink() or not path.parent.is_dir():
         raise CodexConfigError("Codex 配置目录不安全")
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise CodexConfigError("Codex config.toml 不是安全的普通文件")
     mode = 0o600
     if path.exists():
         mode = stat.S_IMODE(path.lstat().st_mode)
@@ -86,9 +93,11 @@ def _record(path: Path, before: dict[str, Any], after: dict[str, Any]) -> None:
 
 def _load_record() -> dict[str, Any] | None:
     state = _state_path()
+    if state.is_symlink():
+        raise CodexConfigError("Codex 配置归属记录不安全")
     if not state.exists():
         return None
-    if state.is_symlink() or not state.is_file() or stat.S_IMODE(state.stat().st_mode) != 0o600:
+    if not state.is_file() or stat.S_IMODE(state.stat().st_mode) != 0o600:
         raise CodexConfigError("Codex 配置归属记录不安全")
     try:
         value = json.loads(state.read_text(encoding="utf-8"))
@@ -99,9 +108,39 @@ def _load_record() -> dict[str, Any] | None:
     return value
 
 
-def expected(values: dict[str, str]) -> dict[str, bool]:
-    return {key: values[symbol] == "y" for key, symbol in OWNED.items()} | {
-        "agents.enabled": values[AGENTS_ENABLED] == "y"
+def _pennix_command() -> str:
+    configured = os.environ.get("PENNIX_COMMAND")
+    if configured:
+        return configured
+    return str(Path.home() / ".local" / "bin" / "pennix")
+
+
+def _plain(value: Any) -> Any:
+    if hasattr(value, "unwrap"):
+        value = value.unwrap()
+    if isinstance(value, dict):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_plain(item) for item in value]
+    return value
+
+
+def expected(values: dict[str, str]) -> dict[str, Any]:
+    provider_url = values["PENNIX_CODEX_PROVIDER_URL"]
+    return {key: values[symbol] == "y" for key, symbol in OWNED.items() if symbol is not None} | {
+        "model_provider": PROVIDER_ID,
+        "model_providers.pennix": {
+            "name": "Pennix OpenAI-compatible provider",
+            "base_url": provider_url,
+            "wire_api": "responses",
+            "auth": {
+                "command": _pennix_command(),
+                "args": ["secrets", "get", "codex.api_key"],
+                "timeout_ms": 5000,
+                "refresh_interval_ms": 0,
+            },
+        },
+        "agents.enabled": values[AGENTS_ENABLED] == "y",
     }
 
 
@@ -138,11 +177,16 @@ def _delete(doc: Any, path: str) -> None:
             parent.pop(part, None)
 
 
+def _snapshot(doc: Any) -> dict[str, Any]:
+    snapshot = {key: _plain(_get(doc, key)) for key in OWNED}
+    snapshot["agents.enabled"] = _plain(_get(doc, "agents.enabled"))
+    return snapshot
+
+
 def inspect(path: Path, values: dict[str, str]) -> dict[str, Any]:
     doc, _ = _read(path)
     want = expected(values)
-    observed_raw = {key: _get(doc, key) for key in OWNED}
-    observed_raw["agents.enabled"] = _get(doc, "agents.enabled")
+    observed_raw = {key: _plain(_get(doc, key)) for key in want}
     state = "current" if all(observed_raw[key] == value for key, value in want.items()) else (
         "missing" if all(value is None for value in observed_raw.values()) else "drifted"
     )
@@ -156,12 +200,24 @@ def inspect(path: Path, values: dict[str, str]) -> dict[str, Any]:
 def apply(path: Path, values: dict[str, str]) -> str:
     doc, _ = _read(path)
     want = expected(values)
-    before = {key: _get(doc, key) for key in OWNED}
-    before["agents.enabled"] = _get(doc, "agents.enabled")
+    current = _snapshot(doc)
+    record = _load_record()
+    if record is not None:
+        if (
+            record.get("path") != str(path)
+            or not isinstance(record.get("before"), dict)
+            or not isinstance(record.get("after"), dict)
+        ):
+            raise CodexConfigError("Codex 配置归属记录目标不匹配")
+        if current != record["after"]:
+            raise CodexConfigError("Codex 配置已偏离生命周期记录，拒绝覆盖")
+        before = record["before"]
+    else:
+        before = current
+    if current == want:
+        return "no-op"
     for key, value in want.items():
         _set(doc, key, value)
-    if before == want:
-        return "no-op"
     _write(path, doc)
     _record(path, before, want)
     return "changed"
@@ -171,9 +227,15 @@ def uninstall(path: Path) -> str:
     record = _load_record()
     if record is None:
         return "no-op"
-    if record.get("path") != str(path) or not isinstance(record.get("before"), dict):
+    if (
+        record.get("path") != str(path)
+        or not isinstance(record.get("before"), dict)
+        or not isinstance(record.get("after"), dict)
+    ):
         raise CodexConfigError("Codex 配置归属记录目标不匹配")
     doc, _ = _read(path)
+    if _snapshot(doc) != record["after"]:
+        raise CodexConfigError("Codex 配置已偏离生命周期记录，拒绝卸载")
     for key in OWNED:
         value = record["before"].get(key)
         if value is None:

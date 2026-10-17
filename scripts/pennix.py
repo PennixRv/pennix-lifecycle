@@ -7,18 +7,22 @@ import argparse
 import copy
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import _engine as owner_engine
 import codex_config
 import config_model
+import credential_import
 import path_env
 import paseo_service
 import relay_owner
+import secret_store
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,9 +33,13 @@ class CliError(RuntimeError):
     """A user-facing lifecycle error."""
 
 
+def _expand_path(value: str) -> Path:
+    return Path(os.path.expanduser(os.path.expandvars(value)))
+
+
 def _args_for_engine(args: argparse.Namespace, command: str) -> argparse.Namespace:
     args.command = command
-    args.codex_home = Path(os.path.expanduser(args.codex_home))
+    args.codex_home = _expand_path(args.codex_home)
     args.home_directory = Path.home()
     args.destination = None
     args.yes = True
@@ -66,8 +74,75 @@ def _component_status(args: argparse.Namespace, component_id: str, component: di
     return {"state": state, "detail": detail}
 
 
+def _planned_action(component: dict[str, Any], action: str) -> tuple[str, str | None]:
+    if action not in {"install", "uninstall"}:
+        return action, None
+    owner = component.get("actions", {}).get(action)
+    if owner == "native-owner":
+        return "native-owner", action
+    if owner != "managed":
+        return "keep", None
+    return action, None
+
+
+def _valid_endpoint(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.hostname) and parsed.username is None and parsed.password is None
+
+
+def _connection_plans(kconf: config_model.StrictKconfig) -> dict[str, dict[str, Any]]:
+    try:
+        configured = secret_store.load()
+        secret_error = None
+    except secret_store.SecretError as error:
+        configured = {}
+        secret_error = str(error)
+    definitions = (
+        ("siyuan", "PENNIX_TARGET_SIYUAN", "PENNIX_SIYUAN_URL", "siyuan.api_token", None),
+        ("cch", "PENNIX_TARGET_CCH", "PENNIX_CCH_URL", "cch.admin_token", "cch-status"),
+        ("hikari", "PENNIX_TARGET_HIKARI", "PENNIX_HIKARI_URL", "hikari.api_token", "tavily-hikari"),
+        ("grok", "PENNIX_TARGET_GROK", "PENNIX_GROK_URL", "grok.api_key", "pennix-skills"),
+        ("grok-tavily", "PENNIX_TARGET_GROK_TAVILY", "PENNIX_GROK_TAVILY_URL", "grok.tavily_api_key", "pennix-skills"),
+        ("windsurf", "PENNIX_TARGET_WINDSURF", None, "windsurf.api_key", "pennix-skills"),
+    )
+    result: dict[str, dict[str, Any]] = {}
+    for name, flag, endpoint_key, secret, component in definitions:
+        selected = bool(kconf.syms[flag].tri_value)
+        item: dict[str, Any] = {
+            "selected": selected,
+            "action": "ignored" if not selected else "blocked",
+            "state": "disabled" if not selected else "blocked",
+        }
+        if not selected:
+            result[f"integration-{name}"] = item
+            continue
+        missing: list[str] = []
+        if component:
+            component_symbol = next(
+                (symbol for symbol, component_id in config_model.COMPONENT_IDS.items() if component_id == component),
+                None,
+            )
+            if component_symbol is None or not bool(kconf.syms[component_symbol].tri_value):
+                missing.append(f"component:{component}")
+        endpoint = config_model.config_value(kconf, endpoint_key) if endpoint_key else ""
+        if endpoint_key and not _valid_endpoint(endpoint):
+            missing.append(f"endpoint:{endpoint_key}")
+        if secret_error:
+            missing.append("secrets.toml")
+        elif secret not in configured:
+            missing.append(f"secret:{secret}")
+        if missing:
+            item["detail"] = ", ".join(missing)
+        else:
+            item["action"] = "native-owner"
+            item["state"] = "native-owner-required"
+            item["detail"] = "目标连接由对应组件原生入口完成"
+        result[f"integration-{name}"] = item
+    return result
+
+
 def _relay_plan(args: argparse.Namespace, kconf: config_model.StrictKconfig) -> dict[str, Any] | None:
-    paseo_home = args.codex_home.parent / ".paseo"
+    paseo_home = _expand_path(config_model.config_value(kconf, "PENNIX_PASEO_HOME"))
     selected = bool(kconf.syms["PENNIX_PASEO_RELAY"].tri_value)
     if not selected:
         if not relay_owner.local_owned():
@@ -91,7 +166,8 @@ def _relay_plan(args: argparse.Namespace, kconf: config_model.StrictKconfig) -> 
 def _plan(args: argparse.Namespace) -> dict[str, Any]:
     kconf, path, catalog = _load(args)
     args.kconf = kconf
-    args.codex_home = Path(os.path.expanduser(config_model.config_value(kconf, "PENNIX_CODEX_HOME")))
+    args.codex_home = _expand_path(config_model.config_value(kconf, "PENNIX_CODEX_HOME"))
+    args.paseo_home = _expand_path(config_model.config_value(kconf, "PENNIX_PASEO_HOME"))
     selected = config_model.selected_components(kconf)
     components: dict[str, Any] = {}
     for component_id, component in catalog["components"].items():
@@ -106,21 +182,25 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             if action == "uninstall" and component.get("delivery") == "collection" and not owner_engine.collection_owned(component, args.codex_home):
                 action = "keep"
                 status["ownership"] = "external"
+        action, owner_operation = _planned_action(component, action)
+        if owner_operation:
+            status["owner_action"] = owner_operation
         components[component_id] = {"selected": component_id in selected, "action": action, **status}
-    prefix = Path(os.path.expanduser(config_model.config_value(kconf, "PENNIX_NPM_PREFIX")))
+    prefix = _expand_path(config_model.config_value(kconf, "PENNIX_NPM_PREFIX"))
     paseo = prefix / "bin" / "paseo"
     if not paseo.is_file():
         paseo = Path(shutil.which("paseo") or paseo)
     mode = "linger" if kconf.syms["PENNIX_PASEO_AUTOSTART_LINGER"].tri_value else (
         "login" if kconf.syms["PENNIX_PASEO_AUTOSTART_LOGIN"].tri_value else "off"
     )
-    service_state = paseo_service.inspect(paseo, Path.home() / ".paseo")
+    service_state = paseo_service.inspect(paseo, args.paseo_home)
     service_action = "keep" if (mode == "off" and service_state == "absent") or (mode != "off" and service_state == "current") else (
         "uninstall" if mode == "off" else "install"
     )
     components["paseo-autostart"] = {
         "selected": mode != "off", "mode": mode, "action": service_action, "state": service_state,
     }
+    components.update(_connection_plans(kconf))
     relay = _relay_plan(args, kconf)
     if relay is not None:
         components["paseo-relay"] = relay
@@ -159,6 +239,8 @@ def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_
             return codex_config.uninstall(args.codex_home / "config.toml")
         values = config_model.values(args.kconf)
         return codex_config.apply(args.codex_home / "config.toml", values)
+    if component.get("actions", {}).get(operation) != "managed":
+        raise CliError(f"{component_id} {operation} 不归 pennix-lifecycle 管理")
     engine_args = _args_for_engine(args, operation)
     try:
         if component.get("delivery") in {"static", "collection"}:
@@ -169,7 +251,11 @@ def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_
 
 
 def cmd_config_init(args: argparse.Namespace) -> int:
-    path = config_model.init(args.config, force=args.force)
+    path = (
+        config_model.init_from_defconfig(args.defconfig, args.config, force=args.force)
+        if args.defconfig
+        else config_model.init(args.config, force=args.force)
+    )
     print(path)
     return 0
 
@@ -208,6 +294,22 @@ def cmd_apply(args: argparse.Namespace) -> int:
     value = _plan(args)
     _, _, catalog = _load(args)
     selected = {key for key, item in value["components"].items() if item["selected"]}
+    blocked_connections = [
+        key for key, item in value["components"].items()
+        if key.startswith("integration-") and item["selected"]
+    ]
+    if blocked_connections:
+        details = "; ".join(
+            f"{key}: {value['components'][key].get('detail', value['components'][key]['state'])}"
+            for key in blocked_connections
+        )
+        raise CliError(f"连接目标不能由当前生命周期入口直接应用，已停止：{details}")
+    if "codex-config" in selected:
+        try:
+            if "codex.api_key" not in secret_store.load():
+                raise CliError("Codex 配置需要 secrets.toml 中的 codex.api_key")
+        except secret_store.SecretError as error:
+            raise CliError(f"Codex 秘密文件预检失败: {error}") from error
     relay = value["components"].get("paseo-relay")
     if relay and relay["selected"] and relay["state"] == "blocked":
         raise CliError(f"Paseo relay 预检失败：{relay.get('detail', '未知错误')}；未执行任何动作")
@@ -216,7 +318,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
             _ensure_dependencies(selected, component_id)
     if value["components"]["paseo-autostart"]["mode"] != "off" and "paseo-cli" not in selected:
         raise CliError("Paseo 自启动需要选择 paseo-cli")
-    relay_home = args.codex_home.parent / ".paseo"
+    relay_home = args.paseo_home
     relay_result = None
     if relay and relay["action"] == "uninstall":
         try:
@@ -231,10 +333,16 @@ def cmd_apply(args: argparse.Namespace) -> int:
     results: dict[str, str] = {}
     for component_id in order:
         item = value["components"][component_id]
-        if item["selected"] and item["action"] == "install":
+        if item["action"] == "native-owner":
+            results[component_id] = f"requires-native-owner:{item['owner_action']}"
+        elif item["selected"] and item["action"] == "install":
             results[component_id] = _run_component(args, catalog, component_id, "install")
         elif item["selected"] and item["state"] in {"match", "current"} and config_model.config_value(args.kconf, "PENNIX_UPDATE_COMPONENTS") == "y":
-            results[component_id] = _run_component(args, catalog, component_id, "upgrade")
+            owner = catalog["components"][component_id].get("actions", {}).get("upgrade")
+            if owner == "managed":
+                results[component_id] = _run_component(args, catalog, component_id, "upgrade")
+            elif owner == "native-owner":
+                results[component_id] = "requires-native-owner:upgrade"
         elif not item["selected"] and item["action"] == "uninstall":
             results[component_id] = _run_component(args, catalog, component_id, "uninstall")
     npm_selected = any(
@@ -244,14 +352,14 @@ def cmd_apply(args: argparse.Namespace) -> int:
         for key, item in value["components"].items()
         if key in catalog["components"]
     )
-    prefix = Path(os.path.expanduser(config_model.config_value(args.kconf, "PENNIX_NPM_PREFIX")))
+    prefix = _expand_path(config_model.config_value(args.kconf, "PENNIX_NPM_PREFIX"))
     results["zshrc-npm-path"] = path_env.apply(prefix) if npm_selected else path_env.remove()
     mode = value["components"]["paseo-autostart"]["mode"]
     paseo = prefix / "bin" / "paseo"
     if not paseo.is_file():
         paseo = Path(shutil.which("paseo") or paseo)
     try:
-        results["paseo-autostart"] = paseo_service.apply(mode, paseo, args.codex_home.parent / ".paseo")
+        results["paseo-autostart"] = paseo_service.apply(mode, paseo, args.paseo_home)
     except paseo_service.PaseoServiceError as error:
         raise CliError(str(error)) from error
     if config_model.config_value(args.kconf, "PENNIX_SYSTEM_UPGRADE") == "y":
@@ -281,9 +389,12 @@ def cmd_apply(args: argparse.Namespace) -> int:
 def cmd_repair(args: argparse.Namespace) -> int:
     kconf, _, catalog = _load(args)
     args.kconf = kconf
-    args.codex_home = Path(os.path.expanduser(config_model.config_value(kconf, "PENNIX_CODEX_HOME")))
+    args.codex_home = _expand_path(config_model.config_value(kconf, "PENNIX_CODEX_HOME"))
+    args.paseo_home = _expand_path(config_model.config_value(kconf, "PENNIX_PASEO_HOME"))
     if args.component not in catalog["components"]:
         raise CliError(f"未知组件: {args.component}")
+    if catalog["components"][args.component].get("actions", {}).get("upgrade") != "managed":
+        raise CliError(f"{args.component} upgrade 不归 pennix-lifecycle 管理")
     result = _run_component(args, catalog, args.component, "upgrade")
     _emit({"operation": "repair", "component": args.component, "status": result}, args.json)
     return 0
@@ -295,18 +406,19 @@ def _reverse_uninstall_order(catalog: dict[str, Any]) -> list[str]:
         "aoe", "tmux-config", "tmux", "cch-status", "ponytail-plugin", "paseo-cli",
         "codegraph-cli", "fastctx", "pnpm", "trellis-cli", "codex-cli",
     ]
-    return [key for key in order if key in catalog["components"] and catalog["components"][key].get("delivery") != "native"]
+    return [key for key in order if key in catalog["components"] and catalog["components"][key].get("actions", {}).get("uninstall") == "managed"]
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
     kconf, _, catalog = _load(args)
     args.kconf = kconf
-    args.codex_home = Path(os.path.expanduser(config_model.config_value(kconf, "PENNIX_CODEX_HOME")))
+    args.codex_home = _expand_path(config_model.config_value(kconf, "PENNIX_CODEX_HOME"))
+    args.paseo_home = _expand_path(config_model.config_value(kconf, "PENNIX_PASEO_HOME"))
     if args.component == "paseo-relay":
         if args.confirm != args.component:
             raise CliError("relay 卸载必须使用 --confirm paseo-relay")
         try:
-            result = relay_owner.remove(args.codex_home.parent / ".paseo")
+            result = relay_owner.remove(args.paseo_home)
         except relay_owner.RelayError as error:
             raise CliError(f"Paseo relay 撤回失败：{error}") from error
         _emit({"operation": "uninstall", "config_unchanged": True, "results": {"paseo-relay": result}}, args.json)
@@ -318,7 +430,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         relay_result = None
         if relay_owner.local_owned():
             try:
-                relay_result = relay_owner.remove(args.codex_home.parent / ".paseo")
+                relay_result = relay_owner.remove(args.paseo_home)
             except relay_owner.RelayError as error:
                 raise CliError(f"relay 远端撤回预检失败，未执行任何本地卸载：{error}") from error
         elif relay and relay["selected"] and relay["state"] == "blocked":
@@ -328,6 +440,10 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         if not args.component or args.confirm != args.component:
             raise CliError("单组件卸载必须使用 --confirm <component-id>")
         targets = [args.component]
+        if args.component not in catalog["components"]:
+            raise CliError(f"未知组件: {args.component}")
+        if catalog["components"][args.component].get("actions", {}).get("uninstall") != "managed":
+            raise CliError(f"{args.component} uninstall 不归 pennix-lifecycle 管理")
         selected = config_model.selected_components(kconf)
         dependents = {
             "codex-cli": {"ponytail-plugin", "codex-config", "codex-agents"},
@@ -350,23 +466,59 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 
 
 def cmd_secrets_edit(args: argparse.Namespace) -> int:
-    base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")).expanduser() / "pennix"
-    path = Path(args.secrets_file).expanduser() if args.secrets_file else base / "secrets.toml"
-    if not path.is_absolute():
-        raise CliError("secrets.toml 路径必须是绝对路径")
-    base.mkdir(parents=True, mode=0o700, exist_ok=True)
-    if not path.exists():
-        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        example = ROOT / "templates" / "secrets.example.toml"
-        path.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
-        path.chmod(0o600)
-    elif path.is_symlink() or not path.is_file():
-        raise CliError("secrets.toml 不是安全的普通文件")
+    path = _secrets_path(args.secrets_file)
+    template = (ROOT / "templates" / "secrets.example.toml").read_text(encoding="utf-8")
+    secret_store.ensure(path, template)
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
-    result = subprocess.run([editor, str(path)], check=False)
+    result = subprocess.run([*shlex.split(editor), str(path)], check=False)
     if result.returncode:
         raise CliError(f"编辑器退出码: {result.returncode}")
     print(path)
+    return 0
+
+
+def _secrets_path(value: str | None) -> Path:
+    path = _expand_path(value) if value else secret_store.default_path()
+    if not path.is_absolute():
+        raise CliError("secrets.toml 路径必须是绝对路径")
+    return path
+
+
+def cmd_secrets_set(args: argparse.Namespace) -> int:
+    value = input(f"{args.field}: ")
+    try:
+        changed = secret_store.update(_secrets_path(args.secrets_file), {args.field: value})
+    except secret_store.SecretError as error:
+        raise CliError(str(error)) from error
+    print("changed" if changed else "no-op")
+    return 0
+
+
+def cmd_secrets_get(args: argparse.Namespace) -> int:
+    try:
+        print(secret_store.get(args.field, _secrets_path(args.secrets_file)))
+    except secret_store.SecretError as error:
+        raise CliError(str(error)) from error
+    return 0
+
+
+def cmd_secrets_check(args: argparse.Namespace) -> int:
+    try:
+        values = secret_store.load(_secrets_path(args.secrets_file))
+    except secret_store.SecretError as error:
+        raise CliError(str(error)) from error
+    _emit({"configured": sorted(values)}, args.json)
+    return 0
+
+
+def cmd_secrets_import_ssh(args: argparse.Namespace) -> int:
+    try:
+        changed = credential_import.import_fields(
+            args.alias, args.fields, _secrets_path(args.secrets_file)
+        )
+    except credential_import.CredentialImportError as error:
+        raise CliError(str(error)) from error
+    _emit({"changed": sorted(changed), "source": args.alias}, args.json)
     return 0
 
 
@@ -399,6 +551,7 @@ def parser() -> argparse.ArgumentParser:
         child.add_argument("--json", action="store_true")
         if name == "init":
             child.add_argument("--force", action="store_true")
+            child.add_argument("--defconfig")
         child.set_defaults(function=function)
 
     for name, function in (("plan", cmd_plan), ("status", cmd_status), ("check", cmd_check), ("apply", cmd_apply)):
@@ -422,11 +575,29 @@ def parser() -> argparse.ArgumentParser:
     uninstall.add_argument("--json", action="store_true")
     uninstall.set_defaults(function=cmd_uninstall)
 
-    secrets = sub.add_parser("secrets", help="编辑私有明文 secrets.toml")
+    secrets = sub.add_parser("secrets", help="管理私有明文 secrets.toml")
     secrets_sub = secrets.add_subparsers(dest="secrets_command", required=True)
     secret_edit = secrets_sub.add_parser("edit")
     secret_edit.add_argument("--secrets-file")
     secret_edit.set_defaults(function=cmd_secrets_edit)
+    secret_set = secrets_sub.add_parser("set")
+    secret_set.add_argument("field", choices=sorted(secret_store.FIELDS))
+    secret_set.add_argument("--secrets-file")
+    secret_set.set_defaults(function=cmd_secrets_set)
+    secret_get = secrets_sub.add_parser("get")
+    secret_get.add_argument("field", choices=sorted(secret_store.FIELDS))
+    secret_get.add_argument("--secrets-file")
+    secret_get.set_defaults(function=cmd_secrets_get)
+    secret_check = secrets_sub.add_parser("check")
+    secret_check.add_argument("--secrets-file")
+    secret_check.add_argument("--json", action="store_true")
+    secret_check.set_defaults(function=cmd_secrets_check)
+    secret_import = secrets_sub.add_parser("import-ssh")
+    secret_import.add_argument("alias")
+    secret_import.add_argument("fields", nargs="+", choices=sorted(credential_import.SOURCES))
+    secret_import.add_argument("--secrets-file")
+    secret_import.add_argument("--json", action="store_true")
+    secret_import.set_defaults(function=cmd_secrets_import_ssh)
 
     cache = sub.add_parser("cache", help="管理工具自有缓存")
     cache_sub = cache.add_subparsers(dest="cache_command", required=True)
@@ -441,7 +612,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
         return args.function(args)
-    except (CliError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, relay_owner.RelayError) as error:
+    except (CliError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, relay_owner.RelayError, secret_store.SecretError) as error:
         print(f"pennix: {error}", file=sys.stderr)
         return 2
 

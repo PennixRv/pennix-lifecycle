@@ -2,7 +2,7 @@ mainmenu "Pennix 工作流生命周期"
 
 config PENNIX_CONFIG_FORMAT
 	string "配置格式主版本"
-	default "1"
+	default "2"
 	help
 		由工具写入的格式主版本。变更主版本时必须明确拒绝旧配置，不能自动迁移。
 
@@ -13,6 +13,18 @@ config PENNIX_CODEX_HOME
 	default "$HOME/.codex"
 	help
 		Codex 原生配置和认证所在目录。
+
+config PENNIX_PASEO_HOME
+	string "Paseo 数据目录"
+	default "$HOME/.paseo"
+	help
+		Paseo daemon 的原生用户数据目录；不从 Codex 家目录推导。
+
+config PENNIX_CODEX_PROVIDER_URL
+	string "Codex provider URL"
+	default "https://api.openai.com/v1"
+	help
+		Codex Responses provider 的普通 URL。API Key 由独立秘密文件提供。
 
 config PENNIX_NPM_PREFIX
 	string "npm 用户全局 prefix"
@@ -54,7 +66,7 @@ config PENNIX_COMPONENT_PONYTAIL_PLUGIN
 
 config PENNIX_COMPONENT_CCH_STATUS
 	bool "CCH 状态组件"
-	default y
+	default n
 
 config PENNIX_COMPONENT_TMUX
 	bool "tmux"
@@ -71,7 +83,7 @@ config PENNIX_COMPONENT_AOE
 
 config PENNIX_COMPONENT_TAVILY_HIKARI
 	bool "Tavily Hikari"
-	default y
+	default n
 
 config PENNIX_COMPONENT_CODEX_CONFIG
 	bool "Codex 配置"
@@ -113,13 +125,41 @@ config PENNIX_CODEX_AGENTS_ENABLED
 	bool "启用 Codex agents"
 	default n
 
-config PENNIX_CODEX_CONFIG_MODE_NATIVE
-	bool "保留 Codex 原生配置"
-	default y
-
 endmenu
 
 menu "连接目标"
+
+config PENNIX_SIYUAN_URL
+	string "思源 MCP URL"
+	default ""
+	help
+		思源 MCP 的普通 URL；凭据保存在独立秘密文件。
+
+config PENNIX_SIYUAN_NOTEBOOK
+	string "思源默认笔记本 ID"
+	default ""
+
+config PENNIX_CCH_URL
+	string "CCH URL"
+	default ""
+	help
+		CCH 状态服务的普通 URL；管理员令牌保存在独立秘密文件。
+
+config PENNIX_HIKARI_URL
+	string "Tavily Hikari URL"
+	default ""
+	help
+		Hikari 服务的普通 URL；访问令牌保存在独立秘密文件。
+
+config PENNIX_GROK_URL
+	string "Grok API URL"
+	default ""
+	help
+		Grok Search 的普通 API URL；Key 保存在独立秘密文件。
+
+config PENNIX_GROK_TAVILY_URL
+	string "Grok Tavily API URL"
+	default ""
 
 config PENNIX_TARGET_SIYUAN
 	bool "启用思源连接"
@@ -174,22 +214,18 @@ config PENNIX_PASEO_RELAY
 config PENNIX_PASEO_RELAY_ENDPOINT
 	string "Paseo relay 内部 endpoint"
 	default ""
-	depends on PENNIX_PASEO_RELAY
 
 config PENNIX_PASEO_RELAY_PUBLIC_ENDPOINT
 	string "Paseo relay 公网 endpoint"
 	default ""
-	depends on PENNIX_PASEO_RELAY
 
 config PENNIX_PASEO_RELAY_TLS
 	bool "relay 使用 TLS"
 	default y
-	depends on PENNIX_PASEO_RELAY
 
 config PENNIX_PASEO_RELAY_PUBLIC_TLS
 	bool "relay 公网使用 TLS"
 	default y
-	depends on PENNIX_PASEO_RELAY
 
 config PENNIX_UPDATE_COMPONENTS
 	bool "apply 时更新已选组件"
