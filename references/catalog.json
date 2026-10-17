@@ -561,7 +561,7 @@
         "bootstrap_skill": "pennix-component-lifecycle",
         "source": {
           "repo": "PennixRv/pennix-skills",
-          "ref": "41fbb51ce01220e3c3f6f63f77a34730b4ba4580",
+          "ref": "50f8eb393b10d81ae00b1893a09e851f56561436",
           "paths": [
             "skills/pennix-chinese-tech-writing",
             "skills/pennix-decision-grill",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 import tempfile
 from pathlib import Path
@@ -32,6 +33,12 @@ COMPONENT_IDS = {
     "PENNIX_COMPONENT_CODEX_AGENTS": "codex-agents",
     "PENNIX_COMPONENT_PENNIX_SKILLS_EXTRA": "pennix-skills-extra",
     "PENNIX_COMPONENT_PENNIX_SKILLS": "pennix-skills",
+}
+PRESERVE_HIDDEN_VALUES = {
+    "PENNIX_PASEO_RELAY_ENDPOINT",
+    "PENNIX_PASEO_RELAY_PUBLIC_ENDPOINT",
+    "PENNIX_PASEO_RELAY_TLS",
+    "PENNIX_PASEO_RELAY_PUBLIC_TLS",
 }
 
 
@@ -111,7 +118,12 @@ def _validate(kconf: StrictKconfig) -> None:
     for symbol in kconf.unique_defined_syms:
         if symbol.user_value is None:
             continue
-        if symbol.visibility == 0 and symbol.user_value not in (None, "n"):
+        if (
+            symbol.visibility == 0
+            and symbol.name not in PRESERVE_HIDDEN_VALUES
+            and symbol.type in {kconfiglib.BOOL, kconfiglib.TRISTATE}
+            and symbol.user_value not in (None, "n")
+        ):
             raise ConfigError(f"配置选项依赖未满足: {symbol.name}")
     if kconf.syms["PENNIX_CONFIG_FORMAT"].str_value != FORMAT_VERSION:
         raise ConfigError("workflow.config 格式主版本不兼容")
@@ -125,6 +137,14 @@ def _read(path: Path) -> str:
     except (OSError, UnicodeDecodeError) as error:
         raise ConfigError("配置无法读取") from error
     _validate_header(text)
+    assignments: set[str] = set()
+    for line in text.splitlines():
+        match = re.match(r"^(?:CONFIG_)?([A-Za-z_][A-Za-z0-9_]*)=", line)
+        if match:
+            name = match.group(1)
+            if name in assignments:
+                raise ConfigError(f"配置包含重复赋值: {name}")
+            assignments.add(name)
     return text
 
 
@@ -146,6 +166,19 @@ def write(kconf: StrictKconfig, path: Path) -> None:
         os.close(descriptor)
         kconf.write_config(str(temporary))
         body = temporary.read_text(encoding="utf-8")
+        assignments = set(re.findall(r"^(?:CONFIG_)?([A-Za-z_][A-Za-z0-9_]*)=", body, re.MULTILINE))
+        preserved: list[str] = []
+        for name in PRESERVE_HIDDEN_VALUES:
+            symbol = kconf.syms[name]
+            if symbol.user_value is None or name in assignments:
+                continue
+            if symbol.type == kconfiglib.STRING:
+                value = symbol.user_value.replace("\\", "\\\\").replace('"', '\\"')
+                preserved.append(f'CONFIG_{name}="{value}"')
+            else:
+                preserved.append(f"CONFIG_{name}={symbol.str_value}")
+        if preserved:
+            body = body.rstrip("\n") + "\n" + "\n".join(preserved) + "\n"
         _atomic_write(path, HEADER + body)
     finally:
         temporary.unlink(missing_ok=True)
@@ -188,7 +221,7 @@ def edit(explicit: str | None = None) -> Path:
 
 
 def values(kconf: StrictKconfig) -> dict[str, str]:
-    return {symbol.name: symbol.str_value for symbol in kconf.unique_defined_syms}
+    return {symbol.name: _effective_value(symbol) for symbol in kconf.unique_defined_syms}
 
 
 def selected_components(kconf: StrictKconfig) -> set[str]:
@@ -199,4 +232,12 @@ def config_value(kconf: StrictKconfig, name: str) -> str:
     symbol = kconf.syms.get(name)
     if symbol is None:
         raise ConfigError(f"未知配置键: {name}")
+    return _effective_value(symbol)
+
+
+def _effective_value(symbol: kconfiglib.Symbol) -> str:
+    if symbol.name in PRESERVE_HIDDEN_VALUES and symbol.user_value is not None:
+        if symbol.type == kconfiglib.STRING:
+            return str(symbol.user_value)
+        return "y" if symbol.user_value == kconfiglib.y else "n"
     return symbol.str_value

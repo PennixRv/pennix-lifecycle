@@ -250,7 +250,7 @@ def _reverse_uninstall_order(catalog: dict[str, Any]) -> list[str]:
         "aoe", "tmux-config", "tmux", "cch-status", "ponytail-plugin", "paseo-cli",
         "codegraph-cli", "fastctx", "pnpm", "trellis-cli", "codex-cli",
     ]
-    return [key for key in order if key in catalog["components"]]
+    return [key for key in order if key in catalog["components"] and catalog["components"][key].get("delivery") != "native"]
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
@@ -260,6 +260,9 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     if args.all:
         if args.confirm_all != "ALL":
             raise CliError("全量卸载必须使用 --confirm-all ALL")
+        relay = _plan(args)["components"].get("paseo-relay")
+        if relay and relay["selected"]:
+            raise CliError("relay 远端登记无法完成撤回预检；未执行任何本地卸载")
         targets = _reverse_uninstall_order(catalog)
     else:
         if not args.component or args.confirm != args.component:

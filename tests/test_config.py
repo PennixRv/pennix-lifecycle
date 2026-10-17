@@ -50,6 +50,24 @@ class ConfigModelTests(unittest.TestCase):
         with self.assertRaises(config_model.ConfigError):
             config_model.load()
 
+    def test_duplicate_assignment_is_rejected(self) -> None:
+        path = config_model.init()
+        path.write_text(path.read_text(encoding="utf-8") + "CONFIG_PENNIX_CODEX_GOALS=y\n", encoding="utf-8")
+        with self.assertRaises(config_model.ConfigError):
+            config_model.load()
+
+    def test_disabled_relay_fields_remain_editable(self) -> None:
+        path = config_model.init()
+        kconf, _ = config_model.load()
+        kconf.syms["PENNIX_PASEO_RELAY"].set_value("y")
+        kconf.syms["PENNIX_PASEO_RELAY_ENDPOINT"].set_value("relay.example:9999")
+        config_model.write(kconf, path)
+        kconf, _ = config_model.load()
+        kconf.syms["PENNIX_PASEO_RELAY"].set_value("n")
+        config_model.write(kconf, path)
+        kconf, _ = config_model.load()
+        self.assertEqual(config_model.config_value(kconf, "PENNIX_PASEO_RELAY_ENDPOINT"), "relay.example:9999")
+
     def test_codex_writer_preserves_unowned_toml_and_redacts_status(self) -> None:
         config = self.home / "codex" / "config.toml"
         config.parent.mkdir(parents=True)
