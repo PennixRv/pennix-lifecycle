@@ -64,6 +64,7 @@ class ConfigModelTests(unittest.TestCase):
         kconf.syms["PENNIX_PASEO_RELAY"].set_value("y")
         kconf.syms["PENNIX_PASEO_RELAY_ENDPOINT"].set_value("relay.example:9999")
         config_model.write(kconf, path)
+        self.assertEqual(config_model.values(kconf)["PENNIX_PASEO_RELAY_TLS"], "y")
         kconf, _ = config_model.load()
         kconf.syms["PENNIX_PASEO_RELAY"].set_value("n")
         config_model.write(kconf, path)

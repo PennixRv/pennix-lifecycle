@@ -239,5 +239,5 @@ def _effective_value(symbol: kconfiglib.Symbol) -> str:
     if symbol.name in PRESERVE_HIDDEN_VALUES and symbol.user_value is not None:
         if symbol.type == kconfiglib.STRING:
             return str(symbol.user_value)
-        return "y" if symbol.user_value == kconfiglib.y else "n"
+        return "y" if symbol.user_value in (2, "y") else "n"
     return symbol.str_value
