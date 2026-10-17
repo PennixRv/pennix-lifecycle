@@ -36,12 +36,36 @@ git -C "${repository}" ls-tree -r "${commit}" -- config pennix scripts reference
   }
 
 temporary="$(mktemp "$(dirname -- "${output}")/.pennix-release.XXXXXX")"
+raw_archive="$(mktemp "$(dirname -- "${output}")/.pennix-release-raw.XXXXXX")"
 cleanup() {
   [[ -z "${temporary}" ]] || rm -f -- "${temporary}"
+  [[ -z "${raw_archive}" ]] || rm -f -- "${raw_archive}"
 }
 trap cleanup EXIT
 git -C "${repository}" archive --format=tar --mtime='@0' --prefix=pennix-lifecycle/ "${commit}" \
-  config pennix scripts references templates | gzip -n > "${temporary}"
+  config pennix scripts references templates > "${raw_archive}"
+python3 - "${raw_archive}" "${temporary}" <<'PY'
+import gzip
+import sys
+import tarfile
+
+source_path, destination_path = sys.argv[1:]
+with tarfile.open(source_path, "r:") as source, open(destination_path, "wb") as output:
+    with gzip.GzipFile(filename="", fileobj=output, mode="wb", mtime=0) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as destination:
+            for member in source.getmembers():
+                if member.issym() or member.islnk() or member.isdev():
+                    raise SystemExit("release archive contains an unsafe member")
+                member.mtime = 0
+                member.uid = 0
+                member.gid = 0
+                member.uname = ""
+                member.gname = ""
+                member.pax_headers = {}
+                content = source.extractfile(member) if member.isfile() else None
+                destination.addfile(member, content)
+PY
+raw_archive=""
 python3 - "${temporary}" <<'PY'
 import sys
 import tarfile
