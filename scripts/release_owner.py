@@ -14,6 +14,7 @@ import owned_files
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ("pennix", "scripts", "references", "config", "templates", "VERSION")
+OLD_RELEASE_CONTENTS = {".gitignore", "README.md", "bootstrap.sh", "config", "pennix", "references", "scripts", "templates", "tests"}
 VERSION_NAME = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
 
 
@@ -81,21 +82,39 @@ def _active_target(entry: Path, releases: Path) -> Path | None:
     target = entry.resolve(strict=True)
     if target.parent.parent != releases or target.name != "pennix":
         raise ReleaseError(f"现有入口未指向本工具发行目录: {entry}")
-    current_digest = _runtime_digest(target.parent)
+    current_digest = _installed_digest(target.parent)
     stored = _receipt(owned_files.read(_receipt_path(), private=True))
+    if stored is None and {item.name for item in target.parent.iterdir()} == OLD_RELEASE_CONTENTS:
+        return target.parent
     if stored != {"schema": 1, "version": target.parent.name, "path": str(target.parent), "digest": current_digest}:
         raise ReleaseError("当前发行与唯一归属记录不匹配；拒绝覆盖或删除")
     return target.parent
 
 
-def _assert_release_tree(releases: Path, *allowed: Path | None) -> None:
+def _installed_digest(path: Path) -> str:
+    if path.is_symlink() or not path.is_dir() or not VERSION_NAME.fullmatch(path.name):
+        raise ReleaseError(f"非受管发行目录: {path}")
+    contents = {item.name for item in path.iterdir()}
+    if contents == OLD_RELEASE_CONTENTS:
+        # Only recognize complete old installations for removal, never run or copy them.
+        if not os.access(path / "pennix", os.X_OK):
+            raise ReleaseError("旧发行缺少可执行入口")
+        return owned_files.digest(path)
+    if contents != set(RUNTIME) or _version(path) != path.name:
+        raise ReleaseError(f"发行目录包含非发行资源，拒绝自动清理: {path}")
+    return _runtime_digest(path)
+
+
+def _assert_release_tree(releases: Path, *allowed: Path | None) -> dict[Path, str]:
     allowed_paths = {path for path in allowed if path is not None}
+    inactive = {}
     for item in releases.iterdir():
         if item in allowed_paths:
             continue
         if item.is_symlink() or not item.is_dir() or not VERSION_NAME.fullmatch(item.name):
             raise ReleaseError(f"发行目录包含未知或不安全资源，拒绝自动清理: {item}")
-        raise ReleaseError(f"发行目录包含非当前归属版本，拒绝自动清理: {item}")
+        inactive[item] = _installed_digest(item)
+    return inactive
 
 
 def _install(source: Path) -> str:
@@ -113,19 +132,24 @@ def _install(source: Path) -> str:
         raise ReleaseError("入口目录不属于当前用户")
 
     current = _active_target(entry, releases)
+    current_digest = _installed_digest(current) if current else None
     receipt_path = _receipt_path()
     previous_receipt = owned_files.read(receipt_path, private=True)
     if current is None and previous_receipt is not None:
         raise ReleaseError("存在无活动入口的发行归属记录；拒绝覆盖")
     target = releases / version
-    _assert_release_tree(releases, current, target)
+    inactive = _assert_release_tree(releases, current, target)
     if current and current != target:
         stored = _receipt(previous_receipt)
-        if stored is None or _runtime_digest(current) != stored["digest"]:
+        if _installed_digest(current) != current_digest or (stored is not None and current_digest != stored["digest"]):
             raise ReleaseError("旧发行内容发生变化；拒绝切换发行")
     if target.exists():
         if current != target or _runtime_digest(target) != source_digest:
             raise ReleaseError(f"目标发行目录已存在且不能安全复用: {target}")
+        for item, expected in inactive.items():
+            if _installed_digest(item) != expected:
+                raise ReleaseError("非活动发行在清理前发生变化")
+            shutil.rmtree(item)
         return f"current {version}"
     else:
         staging = Path(tempfile.mkdtemp(prefix=f".{version}.", dir=releases))
@@ -176,18 +200,14 @@ def _install(source: Path) -> str:
         raise
 
     if current and current != target:
+        inactive[current] = current_digest
+    for item, expected in inactive.items():
         try:
-            shutil.rmtree(current)
+            if _installed_digest(item) != expected:
+                raise ReleaseError("旧发行在清理前发生变化")
+            shutil.rmtree(item)
         except BaseException as error:
-            try:
-                restore = entry.parent / f".pennix.{os.getpid()}.restore"
-                restore.symlink_to(previous)
-                os.replace(restore, entry)
-                owned_files.replace(receipt_path, previous_receipt, owned_files.read(receipt_path, private=True))
-                shutil.rmtree(target)
-            except BaseException as rollback:
-                raise ReleaseError("旧发行清理失败且恢复失败；新发行仍处于活动状态") from rollback
-            raise ReleaseError("旧发行清理失败；已恢复原发行") from error
+            raise ReleaseError("新发行已生效，旧发行清理未完成；保留现场") from error
     return f"installed {version}"
 
 
@@ -198,7 +218,9 @@ def _uninstall() -> str:
         return "absent"
     receipt_path = _receipt_path()
     previous_receipt = owned_files.read(receipt_path, private=True)
-    _assert_release_tree(releases, current)
+    inactive = _assert_release_tree(releases, current)
+    if inactive:
+        raise ReleaseError("存在非活动发行；先安装当前发行收敛后再卸载")
     previous_link = entry.readlink()
     tombstone = releases / f".remove.{os.getpid()}"
     if tombstone.exists() or tombstone.is_symlink():

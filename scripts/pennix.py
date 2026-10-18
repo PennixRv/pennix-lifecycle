@@ -71,11 +71,10 @@ def _component_status(args: argparse.Namespace, component_id: str, component: di
         return status
     native = component.get("native_config")
     if native:
-        tier = config_model.choice_value(args.kconf, "PENNIX_FASTCTX_TIER_")
         try:
             # Inspect the real native state even when the Kconfig selection is off;
             # disabling a component must not orphan an external or drifted MCP entry.
-            return native_integrations.inspect(native["owner"], args.codex_home, enabled=True, tier=tier)
+            return native_integrations.inspect(native["owner"], args.codex_home, enabled=True)
         except native_integrations.NativeIntegrationError as error:
             return {"state": "blocked", "owned": False, "detail": str(error)}
     try:
@@ -299,10 +298,11 @@ def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_
     component = catalog["components"][component_id]
     native = component.get("native_config")
     if native and operation in {"configure", "unconfigure"}:
-        tier = config_model.choice_value(args.kconf, "PENNIX_FASTCTX_TIER_")
         if operation == "unconfigure":
-            return native_integrations.unconfigure(native["owner"], args.codex_home, tier=tier)
-        return native_integrations.apply(native["owner"], args.codex_home, tier=tier)
+            return native_integrations.unconfigure(native["owner"], args.codex_home)
+        return native_integrations.apply(native["owner"], args.codex_home)
+    if native and operation == "uninstall":
+        native_integrations.unconfigure(native["owner"], args.codex_home)
     if component_id == "codex-config":
         if operation == "uninstall":
             return codex_config.uninstall(args.codex_home / "config.toml")
@@ -394,7 +394,8 @@ def cmd_apply(args: argparse.Namespace) -> int:
     service = value["components"]["paseo-autostart"]
     if service["action"] == "blocked":
         raise CliError(f"Paseo 服务预检失败，未执行任何动作：{service.get('detail', '配置不一致')}")
-    blocked = [key for key in selected if value["components"].get(key, {}).get("action") == "blocked"]
+    blocked = [key for key, item in value["components"].items()
+               if item.get("action") == "blocked" and (key in selected or item.get("native_action") == "blocked")]
     if blocked:
         details = "; ".join(f"{key}: {value['components'][key].get('detail', 'owner 预检失败')}" for key in sorted(blocked))
         raise CliError(f"组件预检失败，未执行任何动作：{details}")
@@ -419,7 +420,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         except relay_owner.RelayError as error:
             raise CliError(f"Paseo relay 撤回失败，未执行本地收敛：{error}") from error
     order = [
-        "codex-cli", "trellis-cli", "pnpm", "fastctx", "codegraph-cli", "paseo-cli",
+        "codex-cli", "trellis-cli", "pnpm", "context-mode", "codegraph-cli", "paseo-cli",
         "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "tavily-hikari",
         "codex-config", "codex-agents", "pennix-skills-extra", "pennix-skills",
     ]
@@ -502,6 +503,8 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
 
 def cmd_repair(args: argparse.Namespace) -> int:
+    if args.expected_sha256 is not None and args.component != "codex-agents":
+        raise CliError("--expected-sha256 只用于审阅后的 codex-agents 升级")
     kconf, _, catalog = _load(args)
     args.kconf = kconf
     args.codex_home = Path(os.path.expanduser(config_model.config_value(kconf, "PENNIX_CODEX_HOME")))
@@ -520,9 +523,9 @@ def cmd_repair(args: argparse.Namespace) -> int:
 
 def _reverse_uninstall_order(catalog: dict[str, Any]) -> list[str]:
     order = [
-        "pennix-skills", "pennix-skills-extra", "codex-agents", "codex-config", "tavily-hikari",
+        "pennix-skills", "pennix-skills-extra", "context-mode", "codegraph-cli", "codex-agents", "codex-config", "tavily-hikari",
         "aoe", "tmux-config", "tmux", "cch-status", "ponytail-plugin", "paseo-cli",
-        "codegraph-cli", "fastctx", "pnpm", "trellis-cli", "codex-cli",
+        "pnpm", "trellis-cli", "codex-cli",
     ]
     return [key for key in order if key in catalog["components"] and catalog["components"][key].get("delivery") != "native"]
 
@@ -567,7 +570,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         targets = [args.component]
         selected = config_model.selected_components(kconf)
         dependents = {
-            "codex-cli": {"ponytail-plugin", "codex-config", "codex-agents"},
+            "codex-cli": {"ponytail-plugin", "codex-config", "codex-agents", "context-mode"},
             "tmux": {"tmux-config"},
         }
         if dependents.get(args.component, set()) & selected:
@@ -707,6 +710,7 @@ def parser() -> argparse.ArgumentParser:
     repair.add_argument("component")
     repair.add_argument("--config")
     repair.add_argument("--json", action="store_true")
+    repair.add_argument("--expected-sha256", help="仅当 AGENTS.md 与已审阅的完整摘要相符时升级")
     repair.set_defaults(function=cmd_repair)
 
     tool = sub.add_parser("tool", help="管理生命周期工具自身")

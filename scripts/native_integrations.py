@@ -1,9 +1,12 @@
-"""Ownership-aware adapters for native MCP integration owners."""
+"""Ownership-aware adapters for native MCP integrations and shared hooks."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tomllib
@@ -15,11 +18,7 @@ class NativeIntegrationError(RuntimeError):
     pass
 
 
-TIER_LIMITS = {
-    "compact": (20_000, 18_000, {"FASTCTX_GREP_TOKEN_BUDGET": 9_000, "FASTCTX_GLOB_TOKEN_BUDGET": 4_500, "FASTCTX_RUN_TOKEN_BUDGET": 9_000, "FASTCTX_JOB_OUTPUT_TOKEN_BUDGET": 4_500}),
-    "standard": (60_000, 54_000, {"FASTCTX_GREP_TOKEN_BUDGET": 10_800, "FASTCTX_GLOB_TOKEN_BUDGET": 5_400, "FASTCTX_RUN_TOKEN_BUDGET": 10_800, "FASTCTX_JOB_OUTPUT_TOKEN_BUDGET": 5_400}),
-    "high": (100_000, 90_000, {"FASTCTX_GREP_TOKEN_BUDGET": 10_800, "FASTCTX_GLOB_TOKEN_BUDGET": 5_400, "FASTCTX_RUN_TOKEN_BUDGET": 10_800, "FASTCTX_JOB_OUTPUT_TOKEN_BUDGET": 5_400}),
-}
+EVENTS = {"PreToolUse", "PostToolUse", "SessionStart", "PreCompact", "UserPromptSubmit", "Stop"}
 
 
 def _receipt_path(key: str) -> Path:
@@ -30,174 +29,269 @@ def _digest(value: dict) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _desired(key: str, codex_home: Path, *, enabled: bool, tier: str) -> dict:
-    if key == "fastctx":
-        if tier not in TIER_LIMITS:
-            raise NativeIntegrationError(f"未知 FastCtx tier: {tier}")
-        return {"key": key, "enabled": enabled, "tier": tier, "codex_home": str(codex_home)}
-    if key == "codegraph":
-        return {"key": key, "enabled": enabled, "codex_home": str(codex_home)}
-    raise NativeIntegrationError(f"未知 native integration: {key}")
+def _toml(path: Path) -> dict:
+    raw = owned_files.read(path)
+    try:
+        return tomllib.loads(raw.decode("utf-8")) if raw is not None else {}
+    except (UnicodeError, tomllib.TOMLDecodeError) as error:
+        raise NativeIntegrationError(f"native owner 配置不是有效 TOML: {path}") from error
+
+
+def _hooks(codex_home: Path) -> tuple[dict, bytes | None]:
+    raw = owned_files.read(codex_home / "hooks.json")
+    try:
+        value = json.loads(raw, object_pairs_hook=owned_files.unique_pairs) if raw is not None else {}
+    except (ValueError, UnicodeError) as error:
+        raise NativeIntegrationError("hooks.json 不是有效 JSON") from error
+    if (not isinstance(value, dict) or not isinstance(value.get("hooks", {}), dict)
+            or any(not isinstance(entries, list) for entries in value.get("hooks", {}).values())):
+        raise NativeIntegrationError("hooks.json 结构无效")
+    return value, raw
+
+
+def _marked(entry: object) -> bool:
+    return isinstance(entry, dict) and isinstance(entry.get("hooks"), list) and any(
+        isinstance(hook, dict) and "context-mode" in str(hook.get("command", ""))
+        for hook in entry["hooks"]
+    )
+
+
+def _managed_hooks(document: dict) -> dict:
+    return {event: selected for event, entries in document.get("hooks", {}).items()
+            if (selected := [entry for entry in entries if _marked(entry)])}
+
+
+def _edit_hooks(codex_home: Path, previous: dict, desired: dict, *, remove_empty: bool = False) -> None:
+    document, before = _hooks(codex_home)
+    if _managed_hooks(document) != previous:
+        raise NativeIntegrationError("context-mode Hook 条目已漂移或由其他 owner 管理")
+    hooks = document.setdefault("hooks", {})
+    for event in previous:
+        hooks[event] = [entry for entry in hooks[event] if not _marked(entry)]
+        if not hooks[event]:
+            del hooks[event]
+    for event, entries in desired.items():
+        hooks.setdefault(event, []).extend(copy.deepcopy(entries))
+    if not hooks:
+        document.pop("hooks", None)
+    output = None if not document and remove_empty else owned_files.json_bytes(document)
+    owned_files.replace(codex_home / "hooks.json", output, before)
+
+
+def _context_target(codex_home: Path) -> dict:
+    root = Path.home() / ".local/lib/node_modules/@pennixrv/context-mode"
+    command = Path.home() / ".local/bin/context-mode"
+    try:
+        package = json.loads(owned_files.read(root / "package.json") or b"{}")
+        if package.get("name") != "@pennixrv/context-mode" or command.resolve(strict=True) != root / "cli.bundle.mjs":
+            raise NativeIntegrationError("context-mode 包和受管绝对入口归属不一致")
+        raw = owned_files.read(root / "configs/codex/hooks.json")
+        hooks = json.loads(raw or b"{}", object_pairs_hook=owned_files.unique_pairs)["hooks"]
+        if not isinstance(hooks, dict) or set(hooks) != EVENTS:
+            raise NativeIntegrationError("已安装包未声明完整六类 Codex Hook")
+        hooks = copy.deepcopy(hooks)
+        for event, entries in hooks.items():
+            if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
+                raise NativeIntegrationError("包内 Hook 结构不符合合同")
+            dispatch = entries[0].get("hooks")
+            if dispatch != [{"type": "command", "command": f"context-mode hook codex {event.lower()}"}]:
+                raise NativeIntegrationError("包内 Hook 命令不符合合同")
+            dispatch[0]["command"] = f"{shlex.quote(str(command))} hook codex {event.lower()}"
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise NativeIntegrationError("无法核验 context-mode 程序与包内 Hook 来源") from error
+    return {"mcp": {"command": str(command), "env": {"CONTEXT_MODE_PLATFORM": "codex", "CODEX_HOME": str(codex_home)}},
+            "hooks": hooks}
+
+
+def _desired(key: str, codex_home: Path, *, enabled: bool) -> dict:
+    if key not in {"codegraph", "context-mode"}:
+        raise NativeIntegrationError(f"未知 native integration: {key}")
+    value = {"key": key, "enabled": enabled, "codex_home": str(codex_home)}
+    if key == "context-mode":
+        value.update(_context_target(codex_home))
+    return value
 
 
 def _read_receipt(key: str) -> dict | None:
     value = owned_files.read_json(_receipt_path(key))
     if value is None:
         return None
-    if (not isinstance(value, dict) or set(value) != {"schema", "key", "codex_home", "desired_digest"}
-            or value.get("schema") != 1 or value.get("key") != key
+    fields = {"schema", "key", "codex_home", "desired_digest"}
+    if key == "context-mode":
+        fields |= {"mcp", "hooks", "hooks_file_created"}
+    if (not isinstance(value, dict) or set(value) != fields or value.get("schema") != 1 or value.get("key") != key
             or not all(isinstance(value.get(name), str) for name in ("codex_home", "desired_digest"))):
         raise NativeIntegrationError(f"{key} native integration receipt 无效")
+    if key == "context-mode" and (not isinstance(value["mcp"], dict) or not isinstance(value["hooks"], dict)
+                                   or not isinstance(value["hooks_file_created"], bool)):
+        raise NativeIntegrationError("context-mode 条目归属记录无效")
     return value
 
 
-def _write_receipt(key: str, desired: dict) -> None:
-    path = _receipt_path(key)
-    owned_files.replace(
-        path,
-        owned_files.json_bytes({
-            "schema": 1,
-            "key": key,
-            "codex_home": desired["codex_home"],
-            "desired_digest": _digest(desired),
-        }),
-        owned_files.read(path, private=True),
-    )
+def _write_receipt(key: str, desired: dict, *, previous: bytes | None, hooks_file_created: bool = False) -> None:
+    record = {"schema": 1, "key": key, "codex_home": desired["codex_home"], "desired_digest": _digest(desired)}
+    if key == "context-mode":
+        record.update(mcp=desired["mcp"], hooks=desired["hooks"], hooks_file_created=hooks_file_created)
+    owned_files.replace(_receipt_path(key), owned_files.json_bytes(record), previous)
 
 
-def _command(name: str) -> str | None:
-    return shutil.which(name)
-
-
-def _run(command: list[str], timeout: int = 600) -> None:
+def _run(command: list[str], codex_home: Path, timeout: int = 600) -> None:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=timeout)
+        result = subprocess.run(command, env={**os.environ, "CODEX_HOME": str(codex_home)},
+                                capture_output=True, text=True, check=False, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise NativeIntegrationError("native owner 未完成") from error
     if result.returncode:
-        raise NativeIntegrationError(f"native owner 拒绝操作（退出码 {result.returncode}）")
+        raise NativeIntegrationError(f"native owner 拒绝操作（退出码 {result.returncode}）: {(result.stderr or result.stdout)[-2000:]}")
 
 
-def _reverse(key: str, command: str, codex_home: Path) -> None:
-    if key == "fastctx":
-        _run([command, "unapply", "--codex-home", str(codex_home), "--yes"])
-    else:
-        _run([command, "uninstall", "--target", "codex", "--location", "global", "--yes", "--keep-cli"])
+def _command(key: str) -> str:
+    value = shutil.which("codex" if key == "context-mode" else key)
+    if value is None:
+        raise NativeIntegrationError(f"{key} native owner 不可用")
+    return value
 
 
-def _toml(path: Path) -> dict:
-    raw = owned_files.read(path)
-    if raw is None:
-        return {}
-    try:
-        return tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeError, tomllib.TOMLDecodeError) as error:
-        raise NativeIntegrationError(f"native owner 配置不是有效 TOML: {path}") from error
+def _server(key: str, codex_home: Path) -> object:
+    servers = _toml(codex_home / "config.toml").get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        raise NativeIntegrationError("mcp_servers 不是 TOML table")
+    return servers.get(key)
 
 
-def _fastctx_current(codex_home: Path, desired: dict) -> bool:
+def _context_present(codex_home: Path) -> bool:
+    document, _ = _hooks(codex_home)
     config = _toml(codex_home / "config.toml")
-    server = config.get("mcp_servers", {}).get("fastctx")
-    if not isinstance(server, dict) or server.get("args") != ["serve"]:
-        return False
-    command = server.get("command")
-    if not isinstance(command, str) or Path(command).name != "fastctx":
-        return False
-    limits = TIER_LIMITS[desired["tier"]]
-    if config.get("tool_output_token_limit") != limits[0]:
-        return False
-    env = server.get("env")
-    if not isinstance(env, dict) or env.get("FASTCTX_TOKEN_BUDGET") != str(limits[1]):
-        return False
-    for key, value in limits[2].items():
-        if env.get(key) != str(value):
-            return False
-    settings = _toml(Path.home() / ".fastctx/config.toml")
-    return settings.get("tier") == desired["tier"]
+    plugins = config.get("plugins", {})
+    if not isinstance(plugins, dict):
+        raise NativeIntegrationError("plugins 不是 TOML table")
+    plugin_enabled = any("context-mode" in name and isinstance(value, dict) and value.get("enabled", True)
+                         for name, value in plugins.items())
+    return _server("context-mode", codex_home) is not None or bool(_managed_hooks(document)) or plugin_enabled
 
 
-def _fastctx_present(codex_home: Path) -> bool:
-    server = _toml(codex_home / "config.toml").get("mcp_servers", {}).get("fastctx")
-    return isinstance(server, dict)
+def _context_matches(codex_home: Path, record: dict) -> bool:
+    document, _ = _hooks(codex_home)
+    return _server("context-mode", codex_home) == record["mcp"] and _managed_hooks(document) == record["hooks"]
 
 
-def _codegraph_current(codex_home: Path) -> bool:
-    config = _toml(codex_home / "config.toml")
-    server = config.get("mcp_servers", {}).get("codegraph")
-    return isinstance(server, dict) and server.get("command") == "codegraph" and server.get("args") == ["serve", "--mcp"]
-
-
-def _codegraph_present(codex_home: Path) -> bool:
-    server = _toml(codex_home / "config.toml").get("mcp_servers", {}).get("codegraph")
-    return isinstance(server, dict)
-
-
-def inspect(key: str, codex_home: Path, *, enabled: bool, tier: str) -> dict[str, object]:
-    desired = _desired(key, codex_home, enabled=enabled, tier=tier)
+def inspect(key: str, codex_home: Path, *, enabled: bool) -> dict[str, object]:
+    if key not in {"context-mode", "codegraph"}:
+        raise NativeIntegrationError(f"未知 native integration: {key}")
     receipt = _read_receipt(key)
-    current = _fastctx_current(codex_home, desired) if key == "fastctx" else _codegraph_current(codex_home)
-    present = _fastctx_present(codex_home) if key == "fastctx" else _codegraph_present(codex_home)
-    if not enabled:
-        return {"state": "owned" if receipt else "absent", "owned": bool(receipt), "detail": "native integration receipt" if receipt else "disabled"}
+    present = _context_present(codex_home) if key == "context-mode" else _server(key, codex_home) is not None
     if receipt is None:
         return {"state": "external" if present else "absent", "owned": False, "detail": "native config has no lifecycle receipt" if present else "not configured"}
     if receipt["codex_home"] != str(codex_home):
         return {"state": "blocked", "owned": False, "detail": "native receipt belongs to another CODEX_HOME"}
-    if receipt["desired_digest"] != _digest(desired):
-        return {"state": "drifted", "owned": True, "detail": "workflow native integration target changed"}
-    return {"state": "current" if current else "drifted", "owned": True, "detail": "native owner configuration"}
+    current = (_context_matches(codex_home, receipt) if key == "context-mode" else
+               _server(key, codex_home) == {"command": "codegraph", "args": ["serve", "--mcp"]})
+    if not current:
+        return {"state": "drifted", "owned": True, "detail": "native owner configuration changed"}
+    if not enabled:
+        return {"state": "owned", "owned": True, "detail": "native integration receipt"}
+    desired = _desired(key, codex_home, enabled=True)
+    return {"state": "current" if receipt["desired_digest"] == _digest(desired) else "update-required",
+            "owned": True, "detail": "native owner configuration"}
 
 
-def apply(key: str, codex_home: Path, *, tier: str) -> str:
-    desired = _desired(key, codex_home, enabled=True, tier=tier)
-    status = inspect(key, codex_home, enabled=True, tier=tier)
-    if status["state"] == "external":
-        raise NativeIntegrationError(f"{key} native 配置由外部 owner 管理，拒绝接管")
-    if status["state"] == "blocked":
-        raise NativeIntegrationError(str(status["detail"]))
-    command = _command(key)
-    if not command:
-        raise NativeIntegrationError(f"{key} native owner 不可用")
-    if key == "fastctx":
-        _run([command, "apply", "--codex-home", str(codex_home), "--tier", tier, "--guidance", "none", "--yes"])
-    else:
-        _run([command, "install", "--target", "codex", "--location", "global", "--yes"])
+def _mcp_add(codex_home: Path, expected: dict) -> None:
+    if _server("context-mode", codex_home) is not None:
+        raise NativeIntegrationError("拒绝覆盖已有 context-mode MCP")
+    args = [_command("context-mode"), "mcp", "add", "context-mode"]
+    for key, value in expected["env"].items():
+        args += ["--env", f"{key}={value}"]
+    _run([*args, "--", expected["command"]], codex_home)
+
+
+def _mcp_remove(codex_home: Path, expected: dict) -> None:
+    if _server("context-mode", codex_home) != expected:
+        raise NativeIntegrationError("context-mode MCP 发生漂移，拒绝移除")
+    _run([_command("context-mode"), "mcp", "remove", "context-mode"], codex_home)
+
+
+def _context_apply(codex_home: Path, desired: dict, receipt: dict | None) -> str:
+    if _toml(codex_home / "config.toml").get("features", {}).get("hooks") is not True:
+        raise NativeIntegrationError("context-mode 要求已启用 Codex features.hooks")
+    if receipt and not _context_matches(codex_home, receipt):
+        raise NativeIntegrationError("context-mode 已有归属条目漂移，拒绝覆盖")
+    before_receipt = owned_files.read(_receipt_path("context-mode"), private=True)
+    _, hooks_before = _hooks(codex_home)
+    old_hooks = receipt["hooks"] if receipt else {}
+    hooks_created = receipt["hooks_file_created"] if receipt else hooks_before is None
+    mcp_added = False
+    hooks_written = False
     try:
-        _write_receipt(key, desired)
+        if receipt is None:
+            _mcp_add(codex_home, desired["mcp"])
+            mcp_added = True
+        _edit_hooks(codex_home, old_hooks, desired["hooks"])
+        hooks_written = True
+        if not _context_matches(codex_home, desired):
+            raise NativeIntegrationError("context-mode 写入后核验失败")
+        _write_receipt("context-mode", desired, previous=before_receipt, hooks_file_created=hooks_created)
     except BaseException as error:
         try:
-            _reverse(key, command, codex_home)
+            if hooks_written:
+                _edit_hooks(codex_home, desired["hooks"], old_hooks, remove_empty=hooks_created)
+            if mcp_added or (receipt is None and _server("context-mode", codex_home) == desired["mcp"]):
+                _mcp_remove(codex_home, desired["mcp"])
         except BaseException as rollback:
-            raise NativeIntegrationError(f"{key} native 配置已写入但归属记录失败，且恢复失败") from rollback
-        raise NativeIntegrationError(f"{key} native 配置归属记录失败，已恢复原配置") from error
-    result = inspect(key, codex_home, enabled=True, tier=tier)
-    if result["state"] != "current":
+            raise NativeIntegrationError("context-mode 接入失败且按归属撤回未完成；保留现场") from rollback
+        raise NativeIntegrationError("context-mode 接入失败；已撤回本次条目") from error
+    return "changed"
+
+
+def apply(key: str, codex_home: Path) -> str:
+    status = inspect(key, codex_home, enabled=True)
+    if status["state"] in {"external", "blocked"}:
+        raise NativeIntegrationError(f"{key} native 配置无法安全接管: {status['state']}")
+    if status["state"] == "current":
+        return "no-op"
+    desired = _desired(key, codex_home, enabled=True)
+    if key == "context-mode":
+        return _context_apply(codex_home, desired, _read_receipt(key))
+    previous = owned_files.read(_receipt_path(key), private=True)
+    _run([_command(key), "install", "--target", "codex", "--location", "global", "--yes"], codex_home)
+    try:
+        _write_receipt(key, desired, previous=previous)
+    except BaseException as error:
+        _run([_command(key), "uninstall", "--target", "codex", "--location", "global", "--yes", "--keep-cli"], codex_home)
+        raise NativeIntegrationError("codegraph 归属记录失败，已撤回配置") from error
+    if inspect(key, codex_home, enabled=True)["state"] != "current":
         raise NativeIntegrationError(f"{key} native owner 写入后核验失败")
     return "changed"
 
 
-def unconfigure(key: str, codex_home: Path, *, tier: str) -> str:
-    desired = _desired(key, codex_home, enabled=False, tier=tier)
+def unconfigure(key: str, codex_home: Path) -> str:
     receipt = _read_receipt(key)
     if receipt is None:
         return "preserved"
-    if receipt["codex_home"] != str(codex_home):
-        raise NativeIntegrationError(f"{key} native receipt belongs to another CODEX_HOME")
-    status = inspect(key, codex_home, enabled=True, tier=tier)
-    if status["state"] != "current":
-        raise NativeIntegrationError(f"{key} native 配置无法安全撤回: {status['state']}")
-    command = _command(key)
-    if not command:
-        raise NativeIntegrationError(f"{key} native owner 不可用")
-    receipt_path = _receipt_path(key)
-    before_receipt = owned_files.read(receipt_path, private=True)
-    owned_files.replace(receipt_path, None, before_receipt)
-    try:
-        _reverse(key, command, codex_home)
-    except BaseException as error:
+    if receipt["codex_home"] != str(codex_home) or inspect(key, codex_home, enabled=False)["state"] != "owned":
+        raise NativeIntegrationError(f"{key} native 配置无法安全撤回")
+    path = _receipt_path(key)
+    before = owned_files.read(path, private=True)
+    if key == "context-mode":
+        hooks_removed = False
         try:
-            owned_files.replace(receipt_path, before_receipt, owned_files.read(receipt_path, private=True))
-        except BaseException as rollback:
-            raise NativeIntegrationError(f"{key} native 撤回失败且归属记录恢复失败") from rollback
-        raise NativeIntegrationError(f"{key} native 撤回失败，已恢复归属记录") from error
+            _edit_hooks(codex_home, receipt["hooks"], {}, remove_empty=receipt["hooks_file_created"])
+            hooks_removed = True
+            _mcp_remove(codex_home, receipt["mcp"])
+            owned_files.replace(path, None, before)
+        except BaseException as error:
+            try:
+                if _server(key, codex_home) is None:
+                    _mcp_add(codex_home, receipt["mcp"])
+                if hooks_removed:
+                    _edit_hooks(codex_home, {}, receipt["hooks"])
+            except BaseException as rollback:
+                raise NativeIntegrationError("context-mode 撤回失败且恢复未完成；保留现场") from rollback
+            raise NativeIntegrationError("context-mode 撤回失败；已恢复本组件条目") from error
+        return "changed; preserved context-mode index/session data"
+    owned_files.replace(path, None, before)
+    try:
+        _run([_command(key), "uninstall", "--target", "codex", "--location", "global", "--yes", "--keep-cli"], codex_home)
+    except BaseException:
+        owned_files.replace(path, before, None)
+        raise
     return "changed"

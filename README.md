@@ -38,3 +38,7 @@ pennix secrets import-ssh --alias office-wsl-via-nas --service codex
 秘密位于 `secrets.toml`，由 `pennix secrets edit` 打开并以明文编辑，文件权限为
 0600；其中只保存凭据字段，普通 URL、ID 和路径属于 `workflow.config`。JSON 输出
 不会包含秘密值。
+
+Context Mode 通过 `@pennixrv/context-mode` 包、Codex 原生 MCP 和六个 Hook 接入；不叠加 plugin，也不改写用户 AGENTS。旧 FastCtx 的撤回由旧安装的原生入口完成，新配置格式 4 不接受旧组件键或旧格式。
+
+工具升级成功后只保留当前发行。完整、归属和权限安全的旧安装目录可清除；未知文件、符号链接和漂移会阻断。AGENTS 的正常升级要求归属凭据中的摘要仍匹配；人工审阅的迁移可用 `pennix repair codex-agents --expected-sha256 <完整文件摘要>` 精确确认当前字节，摘要不符不会写入。

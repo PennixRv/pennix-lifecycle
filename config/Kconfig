@@ -2,7 +2,7 @@ mainmenu "Pennix 工作流生命周期"
 
 config PENNIX_CONFIG_FORMAT
 	string
-	default "3"
+	default "4"
 
 menu "位置与私有输入"
 
@@ -47,11 +47,12 @@ config PENNIX_COMPONENT_PNPM
 	help
 		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
-config PENNIX_COMPONENT_FASTCTX
-	bool "FastCtx"
+config PENNIX_COMPONENT_CONTEXT_MODE
+	bool "Context Mode（程序、Codex MCP 与六类 Hook）"
 	default y
+	depends on PENNIX_COMPONENT_CODEX_CLI && PENNIX_CODEX_HOOKS
 	help
-		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
+		一并管理 npm 程序、MCP 和六类 Hook；保留用户索引与会话数据。
 
 config PENNIX_COMPONENT_CODEGRAPH_CLI
 	bool "CodeGraph CLI"
@@ -575,29 +576,6 @@ comment "颜色和高级 TUI/模型选项保留原生：当前官方配置未声
 
 endmenu
 menu "全局集成与连接"
-
-config PENNIX_FASTCTX_MCP
-	bool "配置 FastCtx 全局 MCP"
-	default y
-	help
-		只配置所选 CODEX_HOME，不索引项目；使用 FastCtx 原生 apply/unapply。
-
-choice PENNIX_FASTCTX_TIER
-	prompt "FastCtx 资源档位"
-	default PENNIX_FASTCTX_TIER_STANDARD
-	help
-		由 FastCtx 解释资源档位及派生限制。
-
-config PENNIX_FASTCTX_TIER_COMPACT
-	bool "compact"
-
-config PENNIX_FASTCTX_TIER_STANDARD
-	bool "standard"
-
-config PENNIX_FASTCTX_TIER_HIGH
-	bool "high"
-
-endchoice
 
 config PENNIX_CODEGRAPH_MCP
 	bool "配置 CodeGraph 全局 MCP"

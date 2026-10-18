@@ -45,11 +45,11 @@ class ConfigModelTests(unittest.TestCase):
         path = config_model.init()
         kconf, _ = config_model.load()
         kconf.syms["PENNIX_CODEX_HOME"].set_value(str(self.home / "codex"))
-        kconf.syms["PENNIX_COMPONENT_FASTCTX"].set_value("n")
+        kconf.syms["PENNIX_COMPONENT_CONTEXT_MODE"].set_value("n")
         config_model.write(kconf, path)
         loaded, _ = config_model.load()
         self.assertEqual(config_model.config_value(loaded, "PENNIX_CODEX_HOME"), str(self.home / "codex"))
-        self.assertEqual(loaded.syms["PENNIX_COMPONENT_FASTCTX"].str_value, "n")
+        self.assertEqual(loaded.syms["PENNIX_COMPONENT_CONTEXT_MODE"].str_value, "n")
 
     def test_incompatible_header_is_rejected(self) -> None:
         path = config_model.init()
@@ -76,6 +76,34 @@ class ConfigModelTests(unittest.TestCase):
         self.assertEqual(cch["delivery"], "native")
         self.assertNotIn("package", cch)
         self.assertIn("not published", cch["native_owner_reason"])
+
+    def test_agents_template_upgrade_requires_unchanged_owned_bytes(self) -> None:
+        target = self.home / "codex/AGENTS.md"
+        component = {"template": {"name": "AGENTS.md.install"}}
+        with mock.patch.object(owner_engine, "_template", return_value="first\n"):
+            owner_engine._operate_static("codex-agents", target.parent, component, "install")
+        with mock.patch.object(owner_engine, "_template", return_value="second\n"):
+            self.assertEqual(owner_engine._static_state("codex-agents", target.parent, component), "outdated")
+            owner_engine._operate_static("codex-agents", target.parent, component, "upgrade")
+            self.assertEqual(target.read_text(), "second\n")
+            target.write_text("user changed\n")
+            with self.assertRaises(owner_engine.BootstrapError):
+                owner_engine._operate_static("codex-agents", target.parent, component, "upgrade")
+            self.assertEqual(target.read_text(), "user changed\n")
+
+    def test_agents_explicit_review_digest_rejects_changes(self) -> None:
+        import hashlib
+        target = self.home / "codex/AGENTS.md"
+        target.parent.mkdir()
+        target.write_bytes(b"reviewed user rules\n")
+        reviewed = hashlib.sha256(target.read_bytes()).hexdigest()
+        component = {"template": {"name": "AGENTS.md.install"}}
+        with mock.patch.object(owner_engine, "_template", return_value="new rules\n"):
+            with self.assertRaises(owner_engine.BootstrapError):
+                owner_engine._operate_static("codex-agents", target.parent, component, "upgrade", "0" * 64)
+            self.assertEqual(target.read_bytes(), b"reviewed user rules\n")
+            owner_engine._operate_static("codex-agents", target.parent, component, "upgrade", reviewed)
+        self.assertEqual(target.read_bytes(), b"new rules\n")
 
     def test_duplicate_assignment_is_rejected(self) -> None:
         path = config_model.init()

@@ -182,6 +182,14 @@ def _agents_block(template: str) -> str:
     return f"{BEGIN_AGENTS}\n{template.rstrip()}\n{END_AGENTS}"
 
 
+def _agents_receipt(path: Path) -> Path:
+    return owned_files.state_root() / "static" / (hashlib.sha256(str(path).encode()).hexdigest() + ".json")
+
+
+def _agents_record(path: Path, content: bytes) -> dict:
+    return {"schema": 1, "path": str(path), "digest": hashlib.sha256(content).hexdigest()}
+
+
 def _static_state(component_id: str, codex_home: Path, component: dict[str, Any]) -> str:
     path = _static_target(component_id, codex_home)
     current = _read(path)
@@ -190,6 +198,10 @@ def _static_state(component_id: str, codex_home: Path, component: dict[str, Any]
             return "missing"
         if current == _template(component):
             return "current"
+        receipt = owned_files.read_json(_agents_receipt(path))
+        raw = owned_files.read(path)
+        if raw is not None and receipt == _agents_record(path, raw):
+            return "outdated"
         return "drifted"
     block = f"{BEGIN_TMUX}\n{_template(component).rstrip()}\n{END_TMUX}"
     if not current:
@@ -203,25 +215,38 @@ def _static_state(component_id: str, codex_home: Path, component: dict[str, Any]
     return "current" if current[start:finish] == block else "drifted"
 
 
-def _operate_static(component_id: str, codex_home: Path, component: dict[str, Any], operation: str) -> str:
+def _operate_static(component_id: str, codex_home: Path, component: dict[str, Any], operation: str, expected_sha256: str | None = None) -> str:
     path = _static_target(component_id, codex_home)
     state = _static_state(component_id, codex_home, component)
     if component_id == "codex-agents":
+        before = owned_files.read(path)
+        receipt_path = _agents_receipt(path)
+        before_receipt = owned_files.read(receipt_path, private=True)
+        if expected_sha256 is not None:
+            if (operation != "upgrade" or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
+                    or before is None or hashlib.sha256(before).hexdigest() != expected_sha256):
+                raise BootstrapError("AGENTS.md 与已审阅的 SHA-256 不符；未执行修改")
+            state = "outdated"
         if operation == "uninstall":
             if state == "missing":
                 return "no-op"
-            if state != "current":
+            if state not in {"current", "outdated"}:
                 raise BootstrapError(f"refusing {state} AGENTS.md")
-            path.unlink()
+            owned_files.replace(path, None, before)
+            owned_files.replace(receipt_path, None, before_receipt)
             return "changed"
         if state == "current":
+            owned_files.replace(receipt_path, owned_files.json_bytes(_agents_record(path, before)), before_receipt)
             return "no-op"
-        if state == "outdated" and operation == "upgrade":
-            _write(path, _template(component))
-            return "changed"
-        if state != "missing":
+        if state != "missing" and not (state == "outdated" and operation == "upgrade"):
             raise BootstrapError(f"refusing {state} AGENTS.md")
-        _write(path, _template(component))
+        output = _template(component).encode()
+        owned_files.replace(path, output, before)
+        try:
+            owned_files.replace(receipt_path, owned_files.json_bytes(_agents_record(path, output)), before_receipt)
+        except BaseException:
+            owned_files.replace(path, before, output)
+            raise
         return "changed"
 
     current = _read(path)
@@ -479,4 +504,4 @@ def static_operation(args: Any, key: str, component: dict[str, Any], operation: 
         raise BootstrapError("codex-config is owned by the TOML writer")
     if component.get("delivery") == "collection":
         return _operate_collection(component, args.codex_home, operation)
-    return _operate_static(key, args.codex_home, component, operation)
+    return _operate_static(key, args.codex_home, component, operation, getattr(args, "expected_sha256", None))

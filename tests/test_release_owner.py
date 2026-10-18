@@ -64,6 +64,50 @@ class ReleaseOwnerTests(unittest.TestCase):
             release_owner.install(second)
         self.assertEqual((self.home / ".local/bin/pennix").resolve().parent, current)
 
+    def test_inactive_complete_releases_are_cleaned_after_switch(self):
+        release_owner.install(make_release(self.home / "source-1", "1.0.0"))
+        releases = self.home / ".local/share/pennix-lifecycle/releases"
+        make_release(releases / "0.9.0", "0.9.0")
+        release_owner.install(make_release(self.home / "source-2", "1.0.1"))
+        self.assertEqual([item.name for item in releases.iterdir()], ["1.0.1"])
+
+    def test_unknown_resource_in_inactive_release_blocks_before_switch(self):
+        release_owner.install(make_release(self.home / "source-1", "1.0.0"))
+        releases = self.home / ".local/share/pennix-lifecycle/releases"
+        stale = make_release(releases / "0.9.0", "0.9.0")
+        (stale / "user-data").write_text("keep")
+        with self.assertRaises(release_owner.ReleaseError):
+            release_owner.install(make_release(self.home / "source-2", "1.0.1"))
+        self.assertEqual((self.home / ".local/bin/pennix").resolve().parent.name, "1.0.0")
+        self.assertTrue((stale / "user-data").exists())
+
+    def test_old_installations_without_receipts_are_removed_only_after_switch(self):
+        releases, entry = release_owner._locations()
+        releases.mkdir(parents=True)
+        entry.parent.mkdir(parents=True)
+        for version in ("0.1.1", "0.1.6"):
+            old = make_release(releases / version, version)
+            (old / "VERSION").unlink()
+            for name in (".gitignore", "README.md", "bootstrap.sh"):
+                (old / name).write_text("old installation\n")
+            (old / "tests").mkdir()
+        entry.symlink_to(releases / "0.1.6/pennix")
+        release_owner.install(make_release(self.home / "source", "0.2.0"))
+        self.assertEqual(entry.resolve().parent.name, "0.2.0")
+        self.assertEqual([item.name for item in releases.iterdir()], ["0.2.0"])
+
+    def test_old_installation_with_extra_content_is_not_adopted(self):
+        releases, entry = release_owner._locations()
+        releases.mkdir(parents=True)
+        entry.parent.mkdir(parents=True)
+        old = make_release(releases / "0.1.6", "0.1.6")
+        (old / "user-data").write_text("keep")
+        entry.symlink_to(old / "pennix")
+        with self.assertRaises(release_owner.ReleaseError):
+            release_owner.install(make_release(self.home / "source", "0.2.0"))
+        self.assertEqual(entry.resolve().parent, old)
+        self.assertTrue((old / "user-data").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

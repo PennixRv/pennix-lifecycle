@@ -162,13 +162,13 @@
         "install_owner": "user"
       }
     },
-    "fastctx": {
+    "context-mode": {
       "delivery": "package",
-      "approved_version": "0.2.29",
-      "source": "PennixRv/fastctx npm package",
-      "owner": "fastctx",
+      "approved_version": "1.0.169-pennix.1",
+      "source": "PennixRv/context-mode npm package",
+      "owner": "context-mode",
       "scope": "global",
-      "verify_key": "fastctx --version",
+      "verify_key": "context-mode --version",
       "actions": {
         "install": "managed",
         "configure": "native-owner",
@@ -178,23 +178,24 @@
         "reconcile": "not-applicable"
       },
       "native_config": {
-        "owner": "fastctx",
-        "select": "PENNIX_FASTCTX_MCP"
+        "owner": "context-mode",
+        "select": "PENNIX_COMPONENT_CONTEXT_MODE"
       },
       "project_init": "not-applicable",
-      "probe": "fastctx",
+      "probe": "context-mode",
       "version_args": [
         "--version"
       ],
-      "replaces": [
-        "fastctx"
-      ],
       "package": {
         "source": "npm",
-        "name": "@pennixrv/fastctx",
+        "name": "@pennixrv/context-mode",
         "registry": "https://registry.npmjs.org/",
         "prefix": "$HOME/.local",
-        "install_owner": "user"
+        "install_owner": "user",
+        "allow_scripts": [
+          "@pennixrv/context-mode",
+          "better-sqlite3"
+        ]
       }
     },
     "codegraph-cli": {
@@ -509,7 +510,7 @@
         "directory": "pennix-skills-extra",
         "source": {
           "repo": "PennixRv/pennix-skills-extra",
-          "ref": "c205b3960602902536ba48bbad5b028803fbf7ab",
+          "ref": "9a693a877fd7517c2201a5af4e65a9e317777c6c",
           "manifest": "collection.json"
         }
       }
@@ -534,7 +535,7 @@
         "directory": "pennix-skills",
         "source": {
           "repo": "PennixRv/pennix-skills",
-          "ref": "0a5f7e0eeafd87b08422813007cbcf0f13271eb6",
+          "ref": "9168c68ecf9e25e06f72706992629c5f0f7d5875",
           "manifest": "collection.json"
         }
       }
