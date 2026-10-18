@@ -296,7 +296,7 @@ class CliTests(unittest.TestCase):
             env = {
                 **os.environ,
                 "HOME": directory,
-                "PATH": "/usr/bin:/bin",
+                "PATH": os.environ["PATH"],
                 "XDG_CONFIG_HOME": str(Path(directory) / "config"),
                 "XDG_STATE_HOME": str(Path(directory) / "state"),
             }
