@@ -57,7 +57,10 @@ def load(path: Path) -> dict[str, dict[str, str]]:
 def update(path: Path, updates: dict[str, dict[str, str]]) -> set[str]:
     """Merge credential values without exposing them in the return value."""
     _validate(updates)
-    before = owned_files.read(path, private=True)
+    try:
+        before = owned_files.read(path, private=True)
+    except owned_files.OwnershipError as error:
+        raise SecretError("秘密文件的类型、归属或权限不安全") from error
     current = load(path) if before is not None else {}
     merged = {table_name: dict(fields) for table_name, fields in current.items()}
     for table_name, fields in updates.items():
@@ -77,7 +80,10 @@ def update(path: Path, updates: dict[str, dict[str, str]]) -> set[str]:
         for field, value in fields.items():
             doc[table_name][field] = value
     after = doc.as_string().encode("utf-8")
-    owned_files.replace(path, after, before, mode=0o600)
+    try:
+        owned_files.replace(path, after, before, mode=0o600)
+    except owned_files.OwnershipError as error:
+        raise SecretError("秘密文件写入失败或目标在操作期间发生变化") from error
     load(path)
     return {f"{table_name}.{field}" for table_name, fields in updates.items() for field in fields}
 

@@ -26,20 +26,18 @@ jobs:
           test "$(cat VERSION)" = "${GITHUB_REF_NAME#v}"
       - name: Build runtime assets
         run: |
+          version="${GITHUB_REF_NAME#v}"
           mkdir -p dist/pennix-lifecycle
-          cp -a pennix scripts references config templates VERSION dist/pennix-lifecycle/
-          find dist -type d -name __pycache__ -prune -exec rm -rf {} +
-          find dist -type f -name '*.pyc' -delete
-          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
-            -czf dist/pennix-lifecycle.tar.gz -C dist pennix-lifecycle
-          (cd dist && sha256sum pennix-lifecycle.tar.gz > pennix-lifecycle.tar.gz.sha256)
+          scripts/build-release.sh "${version}" HEAD "${GITHUB_WORKSPACE}/dist/pennix-lifecycle-${version}.tar.gz"
+          (cd dist && sha256sum "pennix-lifecycle-${version}.tar.gz" > "pennix-lifecycle-${version}.tar.gz.sha256")
           cp bootstrap.sh dist/bootstrap.sh
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          version="${GITHUB_REF_NAME#v}"
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" dist/bootstrap.sh dist/pennix-lifecycle.tar.gz dist/pennix-lifecycle.tar.gz.sha256 --clobber
+            gh release upload "${GITHUB_REF_NAME}" dist/bootstrap.sh "dist/pennix-lifecycle-${version}.tar.gz" "dist/pennix-lifecycle-${version}.tar.gz.sha256" --clobber
           else
-            gh release create "${GITHUB_REF_NAME}" dist/bootstrap.sh dist/pennix-lifecycle.tar.gz dist/pennix-lifecycle.tar.gz.sha256 --title "${GITHUB_REF_NAME}" --generate-notes
+            gh release create "${GITHUB_REF_NAME}" dist/bootstrap.sh "dist/pennix-lifecycle-${version}.tar.gz" "dist/pennix-lifecycle-${version}.tar.gz.sha256" --title "${GITHUB_REF_NAME}" --generate-notes
           fi
