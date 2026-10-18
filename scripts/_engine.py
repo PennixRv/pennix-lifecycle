@@ -338,6 +338,30 @@ def _plugin_refs(codex: str, home: Path, plugin: dict, version: str) -> bool:
         return False
 
 
+def _prepare_plugin_marketplace(codex: str, home: Path, marketplace: dict[str, Any]) -> None:
+    """Refresh a same-source marketplace so its pinned ref can change safely."""
+    env = {**os.environ, "CODEX_HOME": str(home)}
+    result = subprocess.run([codex, "plugin", "marketplace", "list", "--json"],
+                            capture_output=True, text=True, check=False, env=env)
+    if result.returncode:
+        raise BootstrapError("Codex marketplace listing failed")
+    try:
+        configured = next(
+            item for item in json.loads(result.stdout).get("marketplaces", [])
+            if item.get("name") == marketplace["name"]
+        )
+    except (TypeError, ValueError, StopIteration):
+        configured = None
+    if configured is not None:
+        source = configured.get("marketplaceSource", {}).get("source")
+        if source != marketplace["source"]:
+            raise BootstrapError(f"Codex marketplace {marketplace['name']} has a different source")
+        result = subprocess.run([codex, "plugin", "marketplace", "remove", marketplace["name"], "--json"],
+                                check=False, env=env)
+        if result.returncode:
+            raise BootstrapError("Codex marketplace removal failed")
+
+
 def probe_component(component: dict[str, Any], codex_home: Path | None = None, destination: str | None = None, home_directory: Path | None = None) -> tuple[str, str | None]:
     codex_home = codex_home or Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
     delivery = component.get("delivery")
@@ -540,6 +564,7 @@ def _plugin_operation(component: dict[str, Any], codex_home: Path, operation: st
         return "no-op"
     marketplace = plugin["marketplace"]
     env = {**os.environ, "CODEX_HOME": str(codex_home)}
+    _prepare_plugin_marketplace(codex, codex_home, marketplace)
     result = subprocess.run([codex, "plugin", "marketplace", "add", marketplace["source"], "--ref", marketplace["ref"], "--json"], check=False, env=env)
     if result.returncode:
         raise BootstrapError("Codex marketplace registration failed")

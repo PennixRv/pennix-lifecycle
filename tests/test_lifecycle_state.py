@@ -45,6 +45,25 @@ class LifecycleStateTests(unittest.TestCase):
             self.assertEqual(engine._plugin_status(component, Path("/tmp/codex"))[0], "match")
             self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], "/tmp/codex")
 
+    def test_plugin_operation_refreshes_same_source_marketplace(self):
+        component = {"plugin": {"id": "ponytail@ponytail",
+                     "marketplace": {"name": "ponytail", "source": "https://example.test/plugin.git",
+                                      "ref": "b" * 40}}}
+        marketplace = {"name": "ponytail", "marketplaceSource": {
+            "sourceType": "git", "source": "https://example.test/plugin.git"}}
+        with patch.object(engine.shutil, "which", return_value="codex"), \
+             patch.object(engine, "_plugin_status", side_effect=[("outdated", "5.3.1"), ("match", "5.3.2")]), \
+             patch.object(engine.subprocess, "run") as run:
+            run.side_effect = [
+                SimpleNamespace(returncode=0, stdout=json.dumps({"marketplaces": [marketplace]})),
+                SimpleNamespace(returncode=0),
+                SimpleNamespace(returncode=0),
+                SimpleNamespace(returncode=0),
+            ]
+            self.assertEqual(engine._plugin_operation(component, Path("/tmp/codex"), "upgrade"), "changed")
+            self.assertEqual(run.call_args_list[1].args[0][:5],
+                             ["codex", "plugin", "marketplace", "remove", "ponytail"])
+
     def test_rolling_packages_compare_native_full_versions(self):
         component = {"delivery": "package", "probe": "codex", "version_policy": "repository-latest"}
         with patch.object(engine, "_command", return_value="codex"), patch.object(engine, "_version", return_value="0.1.0"), \
