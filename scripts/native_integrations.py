@@ -237,9 +237,17 @@ def _mcp_remove(codex_home: Path, expected: dict) -> None:
 def _context_apply(codex_home: Path, desired: dict, receipt: dict | None) -> str:
     if _toml(codex_home / "config.toml").get("features", {}).get("hooks") is not True:
         raise NativeIntegrationError("context-mode 要求已启用 Codex features.hooks")
-    if receipt and not _context_matches(codex_home, receipt):
-        raise NativeIntegrationError("context-mode 已有归属条目漂移，拒绝覆盖")
     before_receipt = owned_files.read(_receipt_path("context-mode"), private=True)
+    if receipt and not _context_matches(codex_home, receipt):
+        # The package's allowed install script may refresh its own Hook manifest.
+        # Adopt only an exact current-package result; arbitrary drift stays blocked.
+        if not _context_matches(codex_home, desired):
+            raise NativeIntegrationError("context-mode 已有归属条目漂移，拒绝覆盖")
+        _write_receipt(
+            "context-mode", desired, previous=before_receipt,
+            hooks_file_created=receipt["hooks_file_created"],
+        )
+        return "adopted"
     _, hooks_before = _hooks(codex_home)
     old_hooks = receipt["hooks"] if receipt else {}
     hooks_created = receipt["hooks_file_created"] if receipt else hooks_before is None

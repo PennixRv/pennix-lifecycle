@@ -134,6 +134,18 @@ class NativeIntegrationTests(unittest.TestCase):
                 operation("context-mode", self.codex)
         self.assertTrue(native_integrations._receipt_path("context-mode").exists())
 
+    def test_package_hook_refresh_is_adopted_only_when_exactly_desired(self):
+        native_integrations.apply("context-mode", self.codex)
+        package_hooks = json.loads((self.package / "configs/codex/hooks.json").read_text())
+        package_hooks["hooks"]["PreToolUse"][0]["matcher"] = "mcp__.*"
+        (self.package / "configs/codex/hooks.json").write_text(json.dumps(package_hooks))
+        desired = native_integrations._desired("context-mode", self.codex, enabled=True)
+        (self.codex / "hooks.json").write_text(json.dumps({"hooks": desired["hooks"]}))
+
+        self.assertEqual(native_integrations.inspect("context-mode", self.codex, enabled=True)["state"], "drifted")
+        self.assertEqual(native_integrations.apply("context-mode", self.codex), "adopted")
+        self.assertEqual(native_integrations.inspect("context-mode", self.codex, enabled=True)["state"], "current")
+
     def test_receipt_failure_retracts_only_this_installation(self):
         before = (self.codex / "config.toml").read_text()
         with patch.object(native_integrations, "_write_receipt", side_effect=OSError("disk full")):
