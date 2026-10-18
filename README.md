@@ -41,4 +41,10 @@ pennix secrets import-ssh --alias office-wsl-via-nas --service codex
 
 Context Mode 通过 `@pennixrv/context-mode` 包、Codex 原生 MCP 和六个 Hook 接入；不叠加 plugin，也不改写用户 AGENTS。旧 FastCtx 的撤回由旧安装的原生入口完成，新配置格式 4 不接受旧组件键或旧格式。
 
+本地 Hikari wrapper、官方 `tvly`、OpenPeon 运行文件和 AoE/OpenPeon 的精确 Codex Hook 由各自登记合同管理。所有 NAS/其他主机的服务端均为外部依赖，不安装或升级。Hikari 只取得固定上游客户端及无凭据 installer，不 fork 源码；OpenPeon 只更新有限运行文件，保留音效包、偏好和运行数据。CCH 使用经过摘要校验的私有 GitHub Release npm 包，需要现有 `gh` 认证。
+
+正确的既有包可通过 `PENNIX_ADOPT_EXISTING_PACKAGES` 显式纳管，接管前核对原生包名、版本和命令归属；`PENNIX_UPDATE_COMPONENTS` 单独控制更新。对无 receipt 的客户端既有文件，先审阅 `plan` 的摘要，再用 `repair <component> --expected-sha256 <摘要>` 精确迁移，未知旁侧文件保留。
+
+`check` 将本地安装/配置结果与功能请求分开输出。`PENNIX_FUNCTIONAL_CHECKS` 默认关闭；明确开启后才运行已选连接的原生功能入口，Windsurf 仅使用临时合成项目。失败、超时或没有入口均不能通过，不回显响应正文。SiYuan 的实际 MCP 会话连接仍由宿主原生工具核验，不能用本地 receipt 代替。
+
 工具升级成功后只保留当前发行。完整、归属和权限安全的旧安装目录可清除；未知文件、符号链接和漂移会阻断。AGENTS 的正常升级要求归属凭据中的摘要仍匹配；人工审阅的迁移可用 `pennix repair codex-agents --expected-sha256 <完整文件摘要>` 精确确认当前字节，摘要不符不会写入。

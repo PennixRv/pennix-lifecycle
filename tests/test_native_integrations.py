@@ -165,6 +165,35 @@ class NativeIntegrationTests(unittest.TestCase):
         self.assertEqual(native_integrations.unconfigure("codegraph", self.codex), "changed")
         self.assertIn('command = "other"', (self.codex / "config.toml").read_text())
 
+    def test_codegraph_adoption_repairs_command_and_preserves_extensions(self):
+        import tomllib
+        path = self.codex / "config.toml"
+        path.write_text(path.read_text() + '\n[mcp_servers.codegraph]\ncommand = "/usr/bin/codegraph"\nargs = ["serve", "--mcp"]\nenabled_tools = ["query"]\n[mcp_servers.codegraph.env]\nDO_NOT_TRACK = "1"\n')
+        before = tomllib.loads(path.read_text())
+        with self.assertRaises(native_integrations.NativeIntegrationError):
+            native_integrations.apply("codegraph", self.codex)
+        native_integrations.apply("codegraph", self.codex, adopt=True)
+        server = tomllib.loads(path.read_text())["mcp_servers"]["codegraph"]
+        self.assertEqual(server["command"], str(self.bin / "codegraph"))
+        self.assertEqual(server["enabled_tools"], ["query"])
+        self.assertEqual(server["env"], {"DO_NOT_TRACK": "1"})
+        native_integrations.unconfigure("codegraph", self.codex)
+        self.assertEqual(tomllib.loads(path.read_text()), before)
+
+    def test_siyuan_registers_helper_and_retracts_only_its_fields(self):
+        import tomllib
+        helper = self.codex / "skills/pennix-skills/pennix-siyuan-knowledge/scripts/mcp_headers.py"
+        helper.parent.mkdir(parents=True)
+        helper.write_text('import json\nprint(json.dumps({"url": "https://notes.example.test/mcp"}))\n')
+        path = self.codex / "config.toml"
+        native_integrations.apply("siyuan", self.codex)
+        server = tomllib.loads(path.read_text())["mcp_servers"]["siyuan"]
+        self.assertEqual(server["url"], "https://notes.example.test/mcp")
+        self.assertEqual(native_integrations.inspect("siyuan", self.codex, enabled=True)["state"], "current")
+        path.write_text(path.read_text() + '\n[mcp_servers.siyuan.env]\nEXTRA = "keep"\n')
+        native_integrations.unconfigure("siyuan", self.codex)
+        self.assertEqual(tomllib.loads(path.read_text())["mcp_servers"]["siyuan"], {"env": {"EXTRA": "keep"}})
+
 
 if __name__ == "__main__":
     unittest.main()

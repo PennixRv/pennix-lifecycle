@@ -9,12 +9,16 @@ import re
 import shutil
 import subprocess
 import tempfile
+import tomllib
+import urllib.request
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import host
 import skill_collections
 import owned_files
+import local_clients
 
 
 SCRIPT_ROOT = Path(__file__).resolve().parent
@@ -65,7 +69,8 @@ def load_catalog(path: Path) -> dict[str, Any]:
     for key, component in value["components"].items():
         if not isinstance(key, str) or not isinstance(component, dict):
             raise BootstrapError("catalog component is invalid")
-        if component.get("delivery") not in {"package", "plugin", "native", "static", "collection", "state"}:
+        component["id"] = key
+        if component.get("delivery") not in {"package", "plugin", "native", "client", "static", "collection", "state"}:
             raise BootstrapError(f"catalog delivery is invalid: {key}")
         if component.get("delivery") != "state" and not isinstance(component.get("actions"), dict):
             raise BootstrapError(f"catalog actions are missing: {key}")
@@ -294,7 +299,8 @@ def _plugin_status(component: dict[str, Any], codex_home: Path) -> tuple[str, st
     codex = shutil.which("codex")
     if not codex:
         return "missing", None
-    result = subprocess.run([codex, "plugin", "list", "--json"], capture_output=True, text=True, check=False)
+    result = subprocess.run([codex, "plugin", "list", "--json"], capture_output=True, text=True, check=False,
+                            env={**os.environ, "CODEX_HOME": str(codex_home)}, timeout=30)
     if result.returncode:
         return "blocked", None
     try:
@@ -303,14 +309,41 @@ def _plugin_status(component: dict[str, Any], codex_home: Path) -> tuple[str, st
         return "blocked", None
     for item in installed:
         if isinstance(item, dict) and item.get("pluginId") == plugin.get("id"):
-            return ("match" if item.get("enabled") is True else "drifted"), str(item.get("version", ""))
+            version = str(item.get("version", ""))
+            source = item.get("source", {})
+            matches = (item.get("enabled") is True and version == component.get("approved_version")
+                       and source.get("url") == plugin["marketplace"]["source"]
+                       and _plugin_refs(codex, codex_home, plugin, version))
+            return ("match" if matches else "outdated"), version
     return "missing", None
+
+
+def _plugin_refs(codex: str, home: Path, plugin: dict, version: str) -> bool:
+    result = subprocess.run([codex, "plugin", "marketplace", "list", "--json"], capture_output=True, text=True,
+                            env={**os.environ, "CODEX_HOME": str(home)}, timeout=30, check=False)
+    try:
+        market = next(item for item in json.loads(result.stdout)["marketplaces"] if item["name"] == plugin["marketplace"]["name"])
+        name, marketplace = plugin["id"].split("@")
+        if any(not re.fullmatch(r"[A-Za-z0-9_.-]+", value) for value in (name, marketplace, version)):
+            return False
+        roots = [Path(market["root"]), home / "plugins/cache" / marketplace / name / version]
+        for root in roots:
+            head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=15, check=False)
+            dirty = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "status", "--porcelain", "--untracked-files=no"],
+                                   capture_output=True, text=True, timeout=15, check=False)
+            if head.returncode or dirty.returncode or dirty.stdout.strip() or head.stdout.strip() != plugin["marketplace"]["ref"]:
+                return False
+        return result.returncode == 0
+    except (ValueError, KeyError, TypeError, StopIteration):
+        return False
 
 
 def probe_component(component: dict[str, Any], codex_home: Path | None = None, destination: str | None = None, home_directory: Path | None = None) -> tuple[str, str | None]:
     codex_home = codex_home or Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
     delivery = component.get("delivery")
     adapter = component.get("adapter")
+    if delivery == "client":
+        return local_clients.inspect(component["id"], component)
     if adapter in {"codex-agents", "tmux-config"}:
         state = _static_state(adapter, codex_home, component)
         return {"missing": "missing", "current": "match"}.get(state, "blocked" if state == "blocked" else "drifted"), state
@@ -328,8 +361,89 @@ def probe_component(component: dict[str, Any], codex_home: Path | None = None, d
         return "blocked", command
     expected = _target_version(component)
     policy = component.get("version_policy", "pinned")
-    state = "match" if policy == "repository-latest" or expected is None or observed == expected else "drifted"
+    if policy == "repository-latest":
+        installed = package_identity(component)
+        state = "match" if installed["version"] == package_candidate(component) else "outdated"
+    else:
+        state = "match" if expected is None or observed == expected else "outdated"
     return state, observed
+
+
+def package_identity(component: dict[str, Any]) -> dict[str, str]:
+    """Verify the package manager and the executable before claiming ownership."""
+    package = component["package"]
+    command = _command(component)
+    if not command:
+        raise BootstrapError("package executable is missing")
+    if package["source"] == "uv":
+        directory = subprocess.run(["uv", "tool", "dir"], capture_output=True, text=True, timeout=15, check=False)
+        tool_root = Path(directory.stdout.strip()) / package["name"]
+        try:
+            record = tomllib.loads((tool_root / "uv-receipt.toml").read_text())
+            entries = record["tool"]["entrypoints"]
+            if (directory.returncode or not tool_root.is_absolute()
+                    or Path(command).resolve(strict=True) != (tool_root / "bin" / component["probe"]).resolve(strict=True)
+                    or not any(entry["name"] == component["probe"] and entry["from"] == package["name"]
+                               and entry["install-path"] == command for entry in entries)):
+                raise ValueError("uv executable owner mismatch")
+            version = _version(component, command)
+            if version is None:
+                raise ValueError("uv version unavailable")
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise BootstrapError("cannot verify uv tool owner") from error
+        return {"manager": "uv", "name": package["name"], "version": version, "command": str(Path(command).resolve())}
+    if package["source"] == "npm":
+        prefix = _prefix(component)
+        root = prefix / "lib/node_modules" / package["name"]
+        try:
+            metadata = json.loads((root / "package.json").read_text())
+            bins = metadata.get("bin", {})
+            relative = bins if isinstance(bins, str) else bins.get(component["probe"])
+            if (metadata["name"] != package["name"] or not relative
+                    or Path(command).resolve(strict=True) != (root / relative).resolve(strict=True)):
+                raise ValueError("wrong executable owner")
+            result = subprocess.run(["npm", "list", "--global", "--prefix", str(prefix), "--depth=0", "--json", package["name"]],
+                                    capture_output=True, text=True, timeout=30, check=False)
+            actual = json.loads(result.stdout)["dependencies"][package["name"]]["version"]
+            if result.returncode or actual != metadata["version"]:
+                raise ValueError("npm package identity differs")
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise BootstrapError(f"cannot verify npm package owner: {package['name']}") from error
+        return {"manager": "npm", "name": metadata["name"], "version": actual, "command": str(Path(command).resolve())}
+    result = subprocess.run(["pacman", "-Q", package["name"]], capture_output=True, text=True, timeout=30, check=False)
+    owner = subprocess.run(["pacman", "-Qoq", str(Path(command).resolve())], capture_output=True, text=True, timeout=30, check=False)
+    parts = result.stdout.strip().split()
+    if result.returncode or owner.returncode or len(parts) != 2 or parts[0] != package["name"] or owner.stdout.strip() != package["name"]:
+        raise BootstrapError(f"cannot verify pacman executable owner: {package['name']}")
+    return {"manager": "pacman", "name": parts[0], "version": parts[1], "command": str(Path(command).resolve())}
+
+
+@lru_cache(maxsize=32)
+def _candidate(source: str, name: str) -> str:
+    installer = host.detect_host()["installers"].get(source)
+    if not installer:
+        if source != "aur":
+            raise BootstrapError(f"no package candidate owner for {name}")
+        try:
+            with urllib.request.urlopen(f"https://aur.archlinux.org/rpc/v5/info/{name}", timeout=30) as response:
+                value = json.load(response)
+            result = value["results"]
+            if len(result) != 1 or result[0]["Name"] != name or not isinstance(result[0]["Version"], str):
+                raise ValueError()
+            return result[0]["Version"]
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise BootstrapError(f"cannot query AUR candidate: {name}") from error
+    result = subprocess.run(host.package_info_command(installer, name), capture_output=True, text=True,
+                            env={**os.environ, "LC_ALL": "C"}, timeout=60, check=False)
+    version = re.search(r"^Version\s*:\s*(\S+)", result.stdout, re.MULTILINE)
+    if result.returncode or not version:
+        raise BootstrapError(f"cannot query package candidate: {name}")
+    return version[1]
+
+
+def package_candidate(component: dict[str, Any]) -> str:
+    package = component["package"]
+    return _candidate(package["source"], package["name"])
 
 
 def _package_receipt_path(component_id: str) -> Path:
@@ -357,15 +471,19 @@ def package_owned(
     observed: str | None = None,
     codex_home: Path | None = None,
 ) -> bool:
+    if component.get("delivery") == "client":
+        return local_clients.receipt(component_id, component) is not None and local_clients.inspect(component_id, component)[0] in {"match", "outdated"}
     receipt = _package_receipt(component_id, component)
     if receipt is None:
         return False
+    package_identity(component)
     if observed is None:
         observed = probe_component(component, codex_home)[1]
     return observed is not None and receipt["version"] == observed
 
 
 def _write_package_receipt(component_id: str, component: dict[str, Any], observed: str) -> None:
+    package_identity(component)
     package = component["package"]
     path = _package_receipt_path(component_id)
     before = owned_files.read(path, private=True)
@@ -421,17 +539,24 @@ def _plugin_operation(component: dict[str, Any], codex_home: Path, operation: st
     if state == "match":
         return "no-op"
     marketplace = plugin["marketplace"]
-    result = subprocess.run([codex, "plugin", "marketplace", "add", marketplace["source"], "--ref", marketplace["ref"], "--json"], check=False)
+    env = {**os.environ, "CODEX_HOME": str(codex_home)}
+    result = subprocess.run([codex, "plugin", "marketplace", "add", marketplace["source"], "--ref", marketplace["ref"], "--json"], check=False, env=env)
     if result.returncode:
         raise BootstrapError("Codex marketplace registration failed")
-    result = subprocess.run([codex, "plugin", "add", plugin["id"], "--json"], check=False)
+    result = subprocess.run([codex, "plugin", "add", plugin["id"], "--json"], check=False, env=env)
     if result.returncode:
         raise BootstrapError("Codex plugin installation failed")
+    if _plugin_status(component, codex_home)[0] != "match":
+        raise BootstrapError("Codex plugin version/source postcondition failed")
     return "changed"
 
 
 def component_operation(args: Any, catalog: dict[str, Any], key: str, component: dict[str, Any], operation: str) -> str:
     codex_home = args.codex_home
+    if component.get("delivery") == "client":
+        return local_clients.operate(key, component, operation,
+            adopt=bool(getattr(args, "kconf", None) and args.kconf.syms["PENNIX_ADOPT_EXISTING_PACKAGES"].tri_value),
+            expected_sha256=getattr(args, "expected_sha256", None))
     if isinstance(component.get("plugin"), dict):
         return _plugin_operation(component, codex_home, operation)
     if component.get("delivery") == "collection":
@@ -451,7 +576,7 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
     if operation == "uninstall":
         if state == "missing":
             return "no-op"
-        if state != "match" or not owned:
+        if state not in {"match", "outdated"} or not owned:
             raise BootstrapError(f"refusing external or drifted package uninstall: {key}")
         installer = current_host["installers"].get(metadata.get("source"))
         if not isinstance(installer, str):
@@ -462,7 +587,8 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
         _remove_package_receipt(key)
         return "changed"
     _ensure_npm_prefix(metadata)
-    if state == "match":
+    if state != "missing":
+        package_identity(component)
         if not owned:
             kconf = getattr(args, "kconf", None)
             adopted = bool(kconf and kconf.syms.get("PENNIX_ADOPT_EXISTING_PACKAGES")
@@ -470,23 +596,43 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
             if not adopted:
                 raise BootstrapError(f"package is external; enable explicit adoption first: {key}")
             _write_package_receipt(key, component, observed or "")
-            return "adopted"
-        if operation == "install":
-            return "no-op"
-        if operation == "upgrade":
-            kconf = getattr(args, "kconf", None)
-            if not kconf or not kconf.syms["PENNIX_UPDATE_COMPONENTS"].tri_value:
-                return "no-op"
+            owned = True
+            adopted_now = True
+        else:
+            adopted_now = False
+        kconf = getattr(args, "kconf", None)
+        update = bool(kconf and kconf.syms["PENNIX_UPDATE_COMPONENTS"].tri_value)
+        if state == "match":
+            return "adopted" if adopted_now else "no-op"
+        if not update:
+            raise BootstrapError(f"package update requires PENNIX_UPDATE_COMPONENTS: {key}")
     installer = current_host["installers"].get(metadata.get("source"))
     if not isinstance(installer, str):
         raise BootstrapError(f"no installer for {key}")
     package_name = metadata["name"]
     expected = _target_version(component)
     install_name = f"{package_name}@{expected}" if metadata.get("source") == "npm" and expected else package_name
-    result = subprocess.run(
-        host.package_install_command(installer, install_name, metadata.get("registry"), metadata.get("prefix"), metadata.get("allow_scripts")),
-        check=False,
-    )
+    if metadata.get("source") == "uv" and expected:
+        install_name = f"{package_name}=={expected}"
+    with tempfile.TemporaryDirectory(prefix="pennix-package-") as directory:
+        asset = metadata.get("asset")
+        if asset:
+            path = Path(directory) / "package.tgz"
+            if asset.get("private"):
+                downloaded = subprocess.run(["gh", "release", "download", asset["tag"], "--repo", asset["repo"],
+                                             "--pattern", asset["name"], "--output", str(path)],
+                                            capture_output=True, timeout=120, check=False)
+                if downloaded.returncode:
+                    raise BootstrapError("private package asset unavailable; verify native gh authentication")
+            else:
+                owned_files.download(asset["url"], path)
+            if hashlib.sha256(path.read_bytes()).hexdigest() != asset["sha256"]:
+                raise BootstrapError("package asset SHA-256 mismatch")
+            install_name = str(path)
+        result = subprocess.run(
+            host.package_install_command(installer, install_name, metadata.get("registry"), metadata.get("prefix"), metadata.get("allow_scripts")),
+            check=False,
+        )
     if result.returncode:
         raise BootstrapError(f"package install failed: {key}")
     new_state, _ = probe_component(component, codex_home)

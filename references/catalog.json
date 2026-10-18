@@ -1,5 +1,6 @@
 {
   "schema": 3,
+  "aur_helper": {"repo": "https://aur.archlinux.org/yay-bin.git", "ref": "13e0a4754d106a9252b7479bf1b370fbe454fc48"},
   "configuration_targets": {
     "siyuan": {
       "select": "PENNIX_TARGET_SIYUAN",
@@ -19,6 +20,7 @@
       "owner": "cch-codex-tmux-status",
       "component": "cch-status",
       "command": ["cch-codex-tmux-status"],
+      "functional_command": ["cch-codex-tmux-status", "doctor"],
       "values": {
         "base_url": "PENNIX_CCH_URL"
       },
@@ -31,6 +33,7 @@
       "owner": "pennix-tavily-search",
       "component": "tavily-hikari",
       "command": ["python3", "$CODEX_HOME/skills/pennix-skills/pennix-tavily-search/scripts/connection.py"],
+      "functional_command": ["tvly-hikari", "search", "IANA example domain", "--max-results", "1", "--depth", "basic", "--json"],
       "values": {
         "base_url": "PENNIX_HIKARI_URL"
       },
@@ -43,6 +46,7 @@
       "owner": "grok-search",
       "component": "pennix-skills",
       "command": ["grok-search"],
+      "functional_command": ["grok-search", "search", "--no-extra", "--deadline", "120", "IANA example domain"],
       "values": {
         "base_url": "PENNIX_GROK_URL",
         "model": "PENNIX_GROK_MODEL"
@@ -56,6 +60,7 @@
       "owner": "grok-search",
       "component": "pennix-skills",
       "command": ["grok-search"],
+      "functional_command": ["grok-search", "fetch", "https://example.com"],
       "values": {
         "base_url": "PENNIX_GROK_TAVILY_URL"
       },
@@ -68,6 +73,7 @@
       "owner": "windsurf-code-search",
       "component": "pennix-skills",
       "command": ["windsurf-code-search"],
+      "functional_command": ["windsurf-code-search", "--project", "$VERIFY_PROJECT", "--query", "Find lifecycle_probe", "--max-results", "1"],
       "values": {},
       "secrets": {
         "api_key": "windsurf.api_key"
@@ -271,7 +277,7 @@
     },
     "ponytail-plugin": {
       "delivery": "plugin",
-      "approved_version": "5.3.1",
+      "approved_version": "5.3.2",
       "source": "Codex native plugin from pinned Ponytail marketplace",
       "owner": "codex",
       "scope": "global",
@@ -292,27 +298,34 @@
         "marketplace": {
           "name": "ponytail",
           "source": "https://github.com/DietrichGebert/ponytail.git",
-          "ref": "6f1c2bfff0c837d268929a7c4e490918eb4fab29",
+          "ref": "09c434ab73ca43761c5d8b0c5d341926c2fba710",
           "sparse": []
         }
       }
     },
     "cch-status": {
-      "delivery": "native",
-      "source": "CCH private repository; native owner installation",
+      "delivery": "package",
+      "approved_version": "0.1.47",
+      "source": "CCH private GitHub Release npm package",
       "owner": "cch",
       "scope": "global",
       "verify_key": "cch-codex-tmux-status version",
       "actions": {
-        "install": "native-owner",
+        "install": "managed",
         "configure": "native-owner",
-        "upgrade": "native-owner",
-        "uninstall": "native-owner",
+        "upgrade": "managed",
+        "uninstall": "managed",
         "verify": "managed",
         "reconcile": "not-applicable"
       },
       "project_init": "not-applicable",
-      "native_owner_reason": "CCH is not published to the configured npm registry; lifecycle only configures an already installed native owner and never fabricates package installation.",
+      "package": {
+        "source": "npm", "name": "cch-codex-tmux-status",
+        "prefix": "$HOME/.local", "install_owner": "user",
+        "asset": {"private": true, "repo": "PennixRv/cch-codex-tmux-status", "tag": "v0.1.47",
+          "name": "cch-codex-tmux-status-0.1.47.tgz",
+          "sha256": "f72143a1c53efe90221b48be21dff493bb54c02d53c74442ac240ea7c0472d67"}
+      },
       "probe": "cch-codex-tmux-status",
       "version_args": [
         "version"
@@ -320,6 +333,7 @@
     },
     "tmux": {
       "delivery": "package",
+      "version_policy": "repository-latest",
       "approved_version": "3.8",
       "source": "system installation",
       "owner": "system",
@@ -383,9 +397,11 @@
     },
     "aoe": {
       "delivery": "package",
+      "version_policy": "repository-latest",
       "approved_version": "1.20.0",
       "source": "AUR agent-of-empires-bin package; upstream installer inspected as evidence",
       "owner": "aoe",
+      "native_config": {"owner": "aoe", "select": "PENNIX_AOE_HOOK"},
       "scope": "global/project",
       "verify_key": "aoe --version",
       "actions": {
@@ -431,26 +447,68 @@
       }
     },
     "tavily-hikari": {
-      "delivery": "native",
-      "version_policy": "repository-latest",
-      "source": "native Hikari installation",
+      "delivery": "client",
+      "source": "fixed upstream Hikari local wrapper; NAS service is an external dependency",
       "owner": "hikari",
       "scope": "global",
       "verify_key": "tvly-hikari --version",
       "actions": {
-        "install": "native-owner",
+        "install": "managed",
         "configure": "native-owner",
-        "upgrade": "native-owner",
-        "uninstall": "native-owner",
+        "upgrade": "managed",
+        "uninstall": "managed",
         "verify": "managed",
         "reconcile": "not-applicable"
       },
       "project_init": "not-applicable",
-      "native_owner_reason": "NAS Hikari service and the upstream tvly-hikari wrapper remain native-owner; lifecycle only probes the existing wrapper and delegates local connection-file ownership to pennix-tavily-search.",
+      "client": {
+        "root": "$HOME/.local/lib/pennix-clients/tavily-hikari",
+        "source": {
+          "url": "https://raw.githubusercontent.com/IvanLi-CN/tavily-hikari/b1bb1043823b9260b18389854e6b90b2cdedbd70/scripts/tvly-hikari",
+          "sha256": "a1478ac4612b0234dbb9ee56bcb30fcfff2a1bd40ce6c8001f7f58e1d9d82b71",
+          "archive": false
+        },
+        "paths": ["tvly-hikari"],
+        "commands": {"tvly-hikari": "tvly-hikari"},
+        "installer": {
+          "url": "https://raw.githubusercontent.com/IvanLi-CN/tavily-hikari/b1bb1043823b9260b18389854e6b90b2cdedbd70/scripts/install-tvly-hikari.sh",
+          "sha256": "e84be8ef8d58e438dc61f267afa83581549f96cf05ceca4f8022f10537352f81"
+        }
+      },
       "probe": "tvly-hikari",
       "version_args": [
         "--version"
       ]
+    },
+    "uv": {
+      "delivery": "package", "version_policy": "repository-latest",
+      "source": "Arch official uv package", "owner": "uv", "scope": "global",
+      "probe": "uv", "version_args": ["--version"],
+      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed"},
+      "package": {"source": "official", "name": "uv"}
+    },
+    "tavily-cli": {
+      "delivery": "package", "approved_version": "0.1.8",
+      "source": "official PyPI tavily-cli through uv tool", "owner": "tavily-cli", "scope": "global",
+      "probe": "tvly", "version_args": ["--version"],
+      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed"},
+      "package": {"source": "uv", "name": "tavily-cli"}
+    },
+    "peon-ping": {
+      "delivery": "client", "approved_version": "2.37.0",
+      "source": "fixed PeonPing/peon-ping runtime files", "owner": "peon-ping", "scope": "global",
+      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed"},
+      "native_config": {"owner": "peon-ping", "select": "PENNIX_PEON_HOOK"},
+      "client": {
+        "root": "$HOME/.openpeon",
+        "source": {
+          "url": "https://codeload.github.com/PeonPing/peon-ping/tar.gz/de4ada79a43dbf19a58cb403dc242113d0b60446",
+          "sha256": "05c99f093fda32cd8eb9f7c14235ea032b0bd62f3b92f04605030602dac4cf7b",
+          "archive": true
+        },
+        "paths": ["peon.sh", "relay.sh", "VERSION", "LICENSE", "adapters/codex.sh", "scripts"],
+        "commands": {}
+      }
     },
     "codex-config": {
       "delivery": "static",
@@ -535,7 +593,7 @@
         "directory": "pennix-skills",
         "source": {
           "repo": "PennixRv/pennix-skills",
-          "ref": "22bbaa7d6ca699f24ddb55d8fdbda9331a49318a",
+          "ref": "f469eac3adbd5b4124e3598c709cb1524372589f",
           "manifest": "collection.json"
         }
       }

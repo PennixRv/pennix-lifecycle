@@ -6,11 +6,13 @@ import hashlib
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import config_model
 import secret_store
+import native_integrations
 
 
 class ConnectionError(RuntimeError):
@@ -25,6 +27,8 @@ def _command(spec: dict[str, Any], codex_home: Path) -> list[str]:
     executable = shutil.which(values[0]) if not os.path.isabs(values[0]) else values[0]
     if not executable:
         raise ConnectionError(f"owner command unavailable: {values[0]}")
+    if not os.path.isfile(executable) or any(os.path.isabs(item) and not Path(item).is_file() for item in values[1:]):
+        raise ConnectionError("owner command or script unavailable")
     values[0] = executable
     return values
 
@@ -118,7 +122,7 @@ def inspect_target(
         return {"target": target, "state": "blocked", "owned": False, "detail": str(error)}
 
 
-def plan(kconf: Any, catalog: dict[str, Any], codex_home: Path, secrets_path: Path) -> dict[str, dict[str, Any]]:
+def plan(kconf: Any, catalog: dict[str, Any], codex_home: Path, secrets_path: Path, *, installing: set[str] | None = None) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for target, spec in target_specs(catalog).items():
         selected = config_model.config_value(kconf, spec["select"]) == "y"
@@ -132,12 +136,39 @@ def plan(kconf: Any, catalog: dict[str, Any], codex_home: Path, secrets_path: Pa
                 status = inspect_target(target, spec, codex_home)
                 status.update(state="blocked", detail=str(error))
             else:
-                status = inspect_target(target, spec, codex_home, _desired_digest(target, *desired))
+                try:
+                    _command(spec, codex_home)
+                except ConnectionError:
+                    status = ({"target": target, "state": "pending-owner", "owned": False,
+                               "detail": "输入已预检；安装 owner 后重新核验"}
+                              if spec["component"] in (installing or set()) else
+                              inspect_target(target, spec, codex_home))
+                else:
+                    status = inspect_target(target, spec, codex_home, _desired_digest(target, *desired))
+                    if status["state"] == "blocked" and spec["component"] in (installing or set()):
+                        status = {"target": target, "state": "pending-owner", "owned": False,
+                                  "detail": "输入已预检；更新 owner 后重新核验其原生合同"}
         else:
             status = inspect_target(target, spec, codex_home)
+        if target == "siyuan":
+            try:
+                mcp = native_integrations.inspect("siyuan", codex_home, enabled=selected)
+                status["mcp_state"] = mcp["state"]
+                if selected and status["state"] not in {"blocked", "invalid", "external", "pending-owner"}:
+                    if mcp["state"] in {"blocked", "drifted"} or (mcp["state"] == "external" and not (
+                            config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y"
+                            and native_integrations.can_adopt("siyuan", codex_home))):
+                        status.update(state="blocked", detail="SiYuan MCP 配置漂移或无法安全接管")
+                    elif status["state"] == "current" and mcp["state"] != "current":
+                        status["state"] = "configuration-required"
+                status["owned"] = bool(status.get("owned") or mcp.get("owned"))
+            except (native_integrations.NativeIntegrationError, OSError) as error:
+                status.update(state="blocked", detail=str(error))
         if selected:
             action = "keep" if status["state"] == "current" else "configure"
             if status["state"] in {"blocked", "invalid", "external", "environment-override"}:
+                action = "blocked"
+            if status["state"] == "adoptable" and config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") != "y":
                 action = "blocked"
         else:
             action = "unconfigure" if status.get("owned") else "keep"
@@ -150,6 +181,8 @@ def apply_target(target: str, spec: dict[str, Any], kconf: Any, codex_home: Path
         return "no-op"
     command = _command(spec, codex_home)
     if action == "unconfigure":
+        if target == "siyuan":
+            native_integrations.unconfigure("siyuan", codex_home)
         payload = {"target": target}
     elif action == "configure":
         values = _values(spec, kconf)
@@ -159,6 +192,7 @@ def apply_target(target: str, spec: dict[str, Any], kconf: Any, codex_home: Path
             "values": values,
             "secrets": secrets,
             "desired_digest": _desired_digest(target, values, secrets),
+            "adopt_existing": config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y",
         }
     else:
         raise ConnectionError(f"unsupported connection action: {action}")
@@ -168,4 +202,31 @@ def apply_target(target: str, spec: dict[str, Any], kconf: Any, codex_home: Path
         raise ConnectionError(
             f"连接 owner {action} 未达到后置条件: {value.get('state')}"
         )
+    if target == "siyuan" and action == "configure":
+        native_integrations.apply("siyuan", codex_home,
+            adopt=config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y")
     return "changed"
+
+
+def functional_checks(catalog: dict[str, Any], connections: dict, codex_home: Path) -> dict:
+    """Run only explicitly requested native probes; never expose their response bodies."""
+    result = {}
+    with tempfile.TemporaryDirectory(prefix="pennix-functional-") as directory:
+        project = Path(directory)
+        (project / "example.py").write_text("def lifecycle_probe():\n    return 'ok'\n")
+        for target, status in connections.items():
+            if not status["selected"]:
+                continue
+            command = catalog["configuration_targets"][target].get("functional_command")
+            if status["action"] != "keep" or not command:
+                result[target] = {"state": "blocked", "detail": "本地未就绪或 owner 未声明功能核验入口"}
+                continue
+            try:
+                command = _command({"command": command}, codex_home)
+                command = [value.replace("$VERIFY_PROJECT", directory) for value in command]
+                completed = subprocess.run(command, cwd=project, capture_output=True, timeout=300, check=False)
+                result[target] = {"state": "passed" if completed.returncode == 0 else "failed",
+                                  "exit_code": completed.returncode}
+            except (ConnectionError, OSError, subprocess.TimeoutExpired):
+                result[target] = {"state": "failed", "detail": "owner 功能核验未完成"}
+    return result

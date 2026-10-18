@@ -75,7 +75,7 @@ def _component_status(args: argparse.Namespace, component_id: str, component: di
             # Inspect the real native state even when the Kconfig selection is off;
             # disabling a component must not orphan an external or drifted MCP entry.
             return native_integrations.inspect(native["owner"], args.codex_home, enabled=True)
-        except native_integrations.NativeIntegrationError as error:
+        except (native_integrations.NativeIntegrationError, native_integrations.hook_integrations.HookError) as error:
             return {"state": "blocked", "owned": False, "detail": str(error)}
     try:
         state, detail = owner_engine.probe_component(
@@ -84,10 +84,15 @@ def _component_status(args: argparse.Namespace, component_id: str, component: di
     except Exception as error:
         return {"state": "blocked", "detail": str(error)}
     result = {"state": state, "detail": detail}
+    if component.get("delivery") == "client" and state in {"external", "drifted"}:
+        result["review_sha256"] = owner_engine.local_clients.fingerprint(component)
     if component.get("delivery") == "package" and isinstance(component.get("package"), dict):
-        result["ownership"] = "lifecycle" if owner_engine.package_owned(
-            component_id, component, detail if state == "match" else None, args.codex_home
-        ) else "external"
+        try:
+            result["ownership"] = "lifecycle" if owner_engine.package_owned(
+                component_id, component, detail if state in {"match", "outdated"} else None, args.codex_home
+            ) else "external"
+        except owner_engine.BootstrapError as error:
+            result.update(state="blocked", detail=str(error), ownership="unknown")
     return result
 
 
@@ -143,27 +148,39 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             continue
         status = _component_status(args, component_id, component)
         if component.get("native_config"):
-            package_state, package_observed = owner_engine.probe_component(component, args.codex_home)
-            package_owned = owner_engine.package_owned(component_id, component, package_observed, args.codex_home)
+            try:
+                package_state, package_observed = owner_engine.probe_component(component, args.codex_home)
+                package_owned = owner_engine.package_owned(component_id, component, package_observed, args.codex_home)
+            except owner_engine.BootstrapError as error:
+                package_state, package_owned = "blocked", False
+                status["detail"] = str(error)
             status["package_state"] = package_state
             status["package_ownership"] = "lifecycle" if package_owned else "external"
             if component_id in selected:
                 if package_state == "missing":
                     action = "install"
-                elif package_state == "match" and not package_owned:
+                elif package_state in {"match", "external"} and not package_owned:
                     action = "adopt" if config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y" else "blocked"
                 elif package_state in {"upgrade-required", "drifted", "blocked"}:
                     action = "repair"
                 else:
                     action = "keep"
+                if package_state == "outdated":
+                    action = "upgrade" if config_model.config_value(kconf, "PENNIX_UPDATE_COMPONENTS") == "y" else "blocked"
+                    if not package_owned:
+                        action = "adopt-upgrade" if action == "upgrade" and config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y" else "blocked"
                 native_enabled = config_model.config_value(kconf, component["native_config"]["select"]) == "y"
-                native_action = "keep" if not native_enabled or status["state"] == "current" else (
+                native_action = ("unconfigure" if status.get("owned") else "keep") if not native_enabled else "keep" if status["state"] == "current" else (
                     "repair" if status["state"] == "drifted" else "configure"
                 )
                 if native_enabled and status["state"] in {"blocked", "external"}:
-                    action = "blocked"
-                    status["detail"] = status.get("detail", "native owner 无法安全接管")
-                    native_action = "blocked"
+                    if (status["state"] == "external" and config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y"
+                            and native_integrations.can_adopt(component["native_config"]["owner"], args.codex_home)):
+                        native_action = "configure"
+                    else:
+                        action = "blocked"
+                        status["detail"] = status.get("detail", "native owner 无法安全接管")
+                        native_action = "blocked"
                 status["native_action"] = native_action
             else:
                 if status["state"] == "external":
@@ -180,6 +197,8 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             if action == "blocked":
                 status["detail"] = component.get("native_owner_reason", "需要由组件原生 owner 完成安装和配置")
         elif component_id in selected:
+            if component.get("delivery") == "client" and status["state"] == "external":
+                status["state"] = "adoption-required"
             if (component.get("delivery") == "package" and status["state"] == "match"
                     and status.get("ownership") != "lifecycle"):
                 action = "adopt" if config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y" else "blocked"
@@ -187,8 +206,16 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
                     status["detail"] = "已安装但非生命周期归属；需显式开启接管"
             else:
                 action = "keep" if status["state"] in {"match", "current", "present"} else "install"
-            if status["state"] in {"upgrade-required", "drifted", "blocked"}:
+            if status["state"] == "upgrade-required":
+                action = "upgrade" if config_model.config_value(kconf, "PENNIX_UPDATE_COMPONENTS") == "y" else "blocked"
+            if status["state"] in {"drifted", "blocked"}:
                 action = "repair"
+            if status["state"] == "adoption-required":
+                action = "adopt" if config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y" else "blocked"
+            if status["state"] == "outdated":
+                action = "upgrade" if config_model.config_value(kconf, "PENNIX_UPDATE_COMPONENTS") == "y" else "blocked"
+                if component.get("delivery") == "package" and status.get("ownership") != "lifecycle":
+                    action = "adopt-upgrade" if action == "upgrade" and config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y" else "blocked"
         else:
             if component_id == "codex-config":
                 try:
@@ -221,6 +248,7 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
     listen = config_model.config_value(kconf, "PENNIX_PASEO_LISTEN")
     paseo_home = Path(config_model.config_value(kconf, "PENNIX_PASEO_HOME"))
     service_state = paseo_service.inspect(paseo, paseo_home)
+    runtime = paseo_service.runtime(paseo, paseo_home, mode, run)
     if mode != "off" and not run:
         service_action = "blocked"
         service_detail = "Paseo 自启动需要同时启用保持运行"
@@ -235,13 +263,18 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             "uninstall" if mode == "off" else "install"
         )
         service_detail = None
+    if service_action == "keep" and runtime["state"] != "current":
+        service_action = "start"
+        service_detail = "daemon、unit enable/active 或 linger 尚未达到期望"
     components["paseo-autostart"] = {
         "selected": mode != "off" or run,
         "mode": mode,
         "run": run,
         "listen": listen,
         "action": service_action,
-        "state": service_state,
+        "state": ("current" if service_action == "keep" and runtime["state"] == "current" else service_state),
+        "unit_state": service_state,
+        "runtime": runtime,
         **({"detail": service_detail} if service_detail else {}),
     }
     relay = _relay_plan(args, kconf)
@@ -253,10 +286,12 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             catalog,
             args.codex_home,
             Path(config_model.config_value(kconf, "PENNIX_SECRETS_FILE")),
+            installing={key for key, item in components.items() if item["selected"] and item["action"] in {"install", "upgrade", "adopt-upgrade"}},
         )
     except connection_owners.ConnectionError as error:
         raise CliError(str(error)) from error
-    return {"config": str(path), "codex_home": str(args.codex_home), "components": components, "connections": connections}
+    return {"config": str(path), "codex_home": str(args.codex_home), "components": components, "connections": connections,
+            "functional_checks_requested": config_model.config_value(kconf, "PENNIX_FUNCTIONAL_CHECKS") == "y"}
 
 
 def _emit(value: Any, as_json: bool) -> None:
@@ -280,6 +315,8 @@ def _ensure_dependencies(selected: set[str], component_id: str) -> None:
         "ponytail-plugin": {"codex-cli"},
         "codex-config": {"codex-cli"},
         "codex-agents": {"codex-cli"},
+        "tavily-hikari": {"tavily-cli", "pennix-skills"},
+        "tavily-cli": {"uv"},
     }
     missing = dependencies.get(component_id, set()) - selected
     if missing:
@@ -300,7 +337,8 @@ def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_
     if native and operation in {"configure", "unconfigure"}:
         if operation == "unconfigure":
             return native_integrations.unconfigure(native["owner"], args.codex_home)
-        return native_integrations.apply(native["owner"], args.codex_home)
+        return native_integrations.apply(native["owner"], args.codex_home,
+            adopt=config_model.config_value(args.kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y")
     if native and operation == "uninstall":
         native_integrations.unconfigure(native["owner"], args.codex_home)
     if component_id == "codex-config":
@@ -348,7 +386,6 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     value = _plan(args)
-    _emit(value, args.json)
     bad = []
     for item in value["components"].values():
         if not item["selected"]:
@@ -357,12 +394,21 @@ def cmd_check(args: argparse.Namespace) -> int:
             if (item["action"] != "keep" or item.get("package_state") != "match"
                     or item.get("package_ownership") != "lifecycle" or item["native_action"] != "keep"):
                 bad.append(item)
-        elif item["state"] not in {"match", "current", "present"}:
+        elif item["action"] != "keep" or item["state"] not in {"match", "current", "present"}:
             bad.append(item)
-    bad.extend(item for item in value["connections"].values() if item["selected"] and item["action"] == "blocked")
+    bad.extend(item for item in value["connections"].values() if item["selected"] and (
+        item["action"] != "keep" or item["state"] != "current"))
     service = value["components"].get("paseo-autostart")
     if service and service["action"] == "blocked":
         bad.append(service)
+    if value.get("functional_checks_requested"):
+        _, _, catalog = _load(args)
+        probes = connection_owners.functional_checks(catalog, value["connections"], args.codex_home)
+        value["functional_checks"] = probes
+        bad.extend(probe for probe in probes.values() if probe["state"] != "passed")
+    else:
+        value["functional_checks"] = {"state": "not_requested"}
+    _emit(value, args.json)
     return 1 if bad else 0
 
 
@@ -421,16 +467,22 @@ def cmd_apply(args: argparse.Namespace) -> int:
             raise CliError(f"Paseo relay 撤回失败，未执行本地收敛：{error}") from error
     order = [
         "codex-cli", "trellis-cli", "pnpm", "context-mode", "codegraph-cli", "paseo-cli",
-        "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "tavily-hikari",
+        "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "uv", "tavily-cli", "tavily-hikari", "peon-ping",
         "codex-config", "codex-agents", "pennix-skills-extra", "pennix-skills",
     ]
     results: dict[str, str] = {}
+    if any(catalog["components"][key].get("package", {}).get("source") == "aur"
+           and value["components"][key]["action"] in {"install", "upgrade", "adopt-upgrade"}
+           for key in order):
+        try:
+            results["aur-helper"] = owner_engine.host.ensure_aur_helper(catalog["aur_helper"])
+        except RuntimeError as error:
+            raise CliError(str(error)) from error
     for component_id in order:
         item = value["components"][component_id]
-        if item["selected"] and item["action"] in {"install", "adopt"}:
-            results[component_id] = _run_component(args, catalog, component_id, "install")
-        elif item["selected"] and item["state"] in {"match", "current"} and config_model.config_value(args.kconf, "PENNIX_UPDATE_COMPONENTS") == "y":
-            results[component_id] = _run_component(args, catalog, component_id, "upgrade")
+        if item["selected"] and item["action"] in {"install", "adopt", "upgrade", "adopt-upgrade"}:
+            operation = "upgrade" if item["action"] in {"upgrade", "adopt-upgrade"} else "install"
+            results[component_id] = _run_component(args, catalog, component_id, operation)
     for component_id in order:
         item = value["components"][component_id]
         if item["selected"] and item.get("native_action") == "configure":
@@ -439,6 +491,11 @@ def cmd_apply(args: argparse.Namespace) -> int:
         if item["action"] not in {"configure", "unconfigure"}:
             continue
         try:
+            if item.get("state") == "pending-owner":
+                fresh = connection_owners.plan(args.kconf, catalog, args.codex_home,
+                    Path(config_model.config_value(args.kconf, "PENNIX_SECRETS_FILE")))[target]
+                if fresh["action"] == "blocked":
+                    raise connection_owners.ConnectionError(fresh.get("detail", "安装后 owner 仍不可用"))
             results[f"connection:{target}"] = connection_owners.apply_target(
                 target,
                 catalog["configuration_targets"][target],
@@ -451,7 +508,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
             raise CliError(f"连接 {target} {item['action']} 失败: {error}") from error
     for component_id in order:
         item = value["components"][component_id]
-        if not item["selected"] and item.get("native_action") == "unconfigure":
+        if item.get("native_action") == "unconfigure":
             results[component_id] = _run_component(args, catalog, component_id, "unconfigure")
     for component_id in order:
         item = value["components"][component_id]
@@ -496,6 +553,9 @@ def cmd_apply(args: argparse.Namespace) -> int:
             value["components"]["paseo-autostart"]["run"],
             restart_daemon=bool(relay and relay["selected"]),
         )
+        if paseo_service.runtime(paseo, Path(config_model.config_value(args.kconf, "PENNIX_PASEO_HOME")), mode,
+                                 value["components"]["paseo-autostart"]["run"])["state"] != "current":
+            raise paseo_service.PaseoServiceError("Paseo 实际 daemon/enable/active/linger 后置条件未满足")
     except paseo_service.PaseoServiceError as error:
         raise CliError(str(error)) from error
     _emit({"operation": "apply", "results": results}, args.json)
@@ -503,8 +563,6 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
 
 def cmd_repair(args: argparse.Namespace) -> int:
-    if args.expected_sha256 is not None and args.component != "codex-agents":
-        raise CliError("--expected-sha256 只用于审阅后的 codex-agents 升级")
     kconf, _, catalog = _load(args)
     args.kconf = kconf
     args.codex_home = Path(os.path.expanduser(config_model.config_value(kconf, "PENNIX_CODEX_HOME")))
@@ -512,6 +570,8 @@ def cmd_repair(args: argparse.Namespace) -> int:
         raise CliError(f"未知组件: {args.component}")
     operation = "upgrade"
     component = catalog["components"][args.component]
+    if args.expected_sha256 is not None and args.component != "codex-agents" and component.get("delivery") != "client":
+        raise CliError("--expected-sha256 只用于审阅后的 codex-agents 或固定本地客户端升级")
     result = _run_component(args, catalog, args.component, operation)
     native = component.get("native_config")
     if native and config_model.config_value(kconf, native["select"]) == "y":
@@ -523,7 +583,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
 
 def _reverse_uninstall_order(catalog: dict[str, Any]) -> list[str]:
     order = [
-        "pennix-skills", "pennix-skills-extra", "context-mode", "codegraph-cli", "codex-agents", "codex-config", "tavily-hikari",
+        "pennix-skills", "pennix-skills-extra", "context-mode", "codegraph-cli", "codex-agents", "codex-config", "peon-ping", "tavily-hikari", "tavily-cli", "uv",
         "aoe", "tmux-config", "tmux", "cch-status", "ponytail-plugin", "paseo-cli",
         "pnpm", "trellis-cli", "codex-cli",
     ]
@@ -550,7 +610,39 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     if args.all:
         if args.confirm_all != "ALL":
             raise CliError("全量卸载必须使用 --confirm-all ALL")
-        relay = _plan(args)["components"].get("paseo-relay")
+        snapshot = _plan(args)
+        targets = []
+        for key in _reverse_uninstall_order(catalog):
+            component = catalog["components"][key]
+            status = snapshot["components"][key]
+            delivery = component["delivery"]
+            if delivery == "package":
+                if owner_engine._package_receipt(key, component) is None:
+                    continue
+                if not owner_engine.package_owned(key, component, codex_home=args.codex_home):
+                    raise CliError(f"全量卸载预检发现包归属漂移: {key}")
+            elif delivery == "client":
+                if owner_engine.local_clients.receipt(key, component) is None:
+                    continue
+                if owner_engine.local_clients.inspect(key, component)[0] not in {"match", "outdated"}:
+                    raise CliError(f"全量卸载预检发现客户端漂移: {key}")
+            elif delivery == "collection" and not owner_engine.collection_owned(component, args.codex_home):
+                if status["state"] in {"drifted", "blocked"}:
+                    raise CliError(f"全量卸载预检发现集合漂移: {key}")
+                continue
+            elif delivery == "plugin" and status["state"] != "match":
+                continue
+            if status["state"] in {"drifted", "blocked"}:
+                raise CliError(f"全量卸载预检发现配置漂移: {key}")
+            targets.append(key)
+        owned_connections = []
+        for target, spec in catalog["configuration_targets"].items():
+            status = connection_owners.inspect_target(target, spec, args.codex_home)
+            if status.get("owned"):
+                if status["state"] != "current":
+                    raise CliError(f"全量卸载预检发现连接漂移: {target}")
+                owned_connections.append(target)
+        relay = snapshot["components"].get("paseo-relay")
         relay_result = None
         if relay_owner.local_owned():
             try:
@@ -563,7 +655,6 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
                 raise CliError(f"relay 远端撤回预检失败，未执行任何本地卸载：{error}") from error
         elif relay and relay["selected"] and relay["state"] == "blocked":
             raise CliError(f"relay 远端撤回预检失败，未执行任何本地卸载：{relay.get('detail', '未知错误')}")
-        targets = _reverse_uninstall_order(catalog)
     else:
         if not args.component or args.confirm != args.component:
             raise CliError("单组件卸载必须使用 --confirm <component-id>")
@@ -572,12 +663,24 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         dependents = {
             "codex-cli": {"ponytail-plugin", "codex-config", "codex-agents", "context-mode"},
             "tmux": {"tmux-config"},
+            "uv": {"tavily-cli"},
+            "tavily-cli": {"tavily-hikari"},
+            "pennix-skills": {"tavily-hikari"},
         }
         if dependents.get(args.component, set()) & selected:
             raise CliError(f"卸载 {args.component} 会破坏已选择依赖；请先修改配置并 apply")
     results: dict[str, str] = {}
     if args.all and relay_result is not None:
         results["paseo-relay"] = relay_result
+    if args.all:
+        for target in owned_connections:
+            results[f"connection:{target}"] = connection_owners.apply_target(
+                target, catalog["configuration_targets"][target], kconf, args.codex_home,
+                Path(config_model.config_value(kconf, "PENNIX_SECRETS_FILE")), "unconfigure")
+        paseo = Path(shutil.which("paseo") or Path.home() / ".local/bin/paseo")
+        paseo_home = Path(config_model.config_value(kconf, "PENNIX_PASEO_HOME"))
+        if paseo_service.inspect(paseo, paseo_home) == "current":
+            results["paseo-autostart"] = paseo_service.apply("off", paseo, paseo_home, "127.0.0.1:1", False)
     for component_id in targets:
         try:
             results[component_id] = _run_component(args, catalog, component_id, "uninstall")
@@ -770,7 +873,7 @@ def main(argv: list[str] | None = None) -> int:
             with owned_files.locked():
                 return args.function(args)
         return args.function(args)
-    except (CliError, connection_owners.ConnectionError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, relay_owner.RelayError, release_owner.ReleaseError, skill_collections.CollectionError, secret_store.SecretError, owned_files.OwnershipError, OSError) as error:
+    except (CliError, connection_owners.ConnectionError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, relay_owner.RelayError, release_owner.ReleaseError, skill_collections.CollectionError, owner_engine.local_clients.ClientError, secret_store.SecretError, owned_files.OwnershipError, native_integrations.NativeIntegrationError, native_integrations.hook_integrations.HookError, OSError) as error:
         print(f"pennix: {error}", file=sys.stderr)
         return 2
 

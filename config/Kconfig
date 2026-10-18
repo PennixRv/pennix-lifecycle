@@ -97,10 +97,35 @@ config PENNIX_COMPONENT_AOE
 		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_TAVILY_HIKARI
-	bool "Tavily Hikari"
+	bool "Tavily Hikari 本地 wrapper（远端服务为外部依赖）"
 	default n
 	help
 		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
+
+config PENNIX_COMPONENT_UV
+	bool "uv（本地 Python 工具管理器）"
+	default y
+
+config PENNIX_COMPONENT_TAVILY_CLI
+	bool "官方 Tavily CLI（tvly）"
+	default n
+	depends on PENNIX_COMPONENT_UV
+
+config PENNIX_COMPONENT_PEON_PING
+	bool "OpenPeon / peon-ping 本地运行文件"
+	default n
+	help
+		只交付固定官方运行文件；保留 packs、用户配置、状态和日志，不运行多宿主 installer。
+
+config PENNIX_AOE_HOOK
+	bool "AoE 的 Codex SessionStart Hook"
+	default y
+	depends on PENNIX_COMPONENT_AOE && PENNIX_COMPONENT_CODEX_CLI && PENNIX_CODEX_HOOKS
+
+config PENNIX_PEON_HOOK
+	bool "OpenPeon 的 Codex Hook"
+	default y
+	depends on PENNIX_COMPONENT_PEON_PING && PENNIX_COMPONENT_CODEX_CLI && PENNIX_CODEX_HOOKS
 
 config PENNIX_COMPONENT_CODEX_CONFIG
 	bool "Codex 配置"
@@ -762,5 +787,11 @@ config PENNIX_SYSTEM_UPGRADE
 	default n
 	help
 		独立选择；默认关闭。本地一致性和必要服务核验始终执行。
+
+config PENNIX_FUNCTIONAL_CHECKS
+	bool "执行已选择连接的真实功能请求"
+	default n
+	help
+		独立于本地完整性检查；可能访问外部依赖并计费。明确开启却未执行或失败时 check 不得成功。
 
 endmenu

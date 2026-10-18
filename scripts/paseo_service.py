@@ -100,6 +100,38 @@ def inspect(paseo: Path, home: Path) -> str:
     return "current" if _owned(paseo, home) else "external"
 
 
+def runtime(paseo: Path, home: Path, mode: str, run: bool) -> dict:
+    """Keep unit ownership separate from enablement and the actual daemon."""
+    result = {"state": "current", "running": False, "enabled": False, "linger": False}
+    if not run and mode == "off":
+        return result
+    try:
+        status = subprocess.run([str(paseo), "daemon", "status", "--home", str(home), "--json"],
+                                capture_output=True, text=True, timeout=15, check=False)
+        value = json.loads(status.stdout) if status.returncode == 0 else {}
+        result["running"] = (isinstance(value.get("pid"), int) and value["pid"] > 0
+                             and value.get("home") == str(home))
+        if result["running"]:
+            os.kill(value["pid"], 0)
+        if mode != "off":
+            enabled = subprocess.run(["systemctl", "--user", "is-enabled", unit_path().stem],
+                                     capture_output=True, text=True, timeout=15, check=False)
+            active = subprocess.run(["systemctl", "--user", "is-active", unit_path().stem],
+                                    capture_output=True, text=True, timeout=15, check=False)
+            result["enabled"] = enabled.returncode == 0 and enabled.stdout.strip() == "enabled"
+            result["active"] = active.returncode == 0 and active.stdout.strip() == "active"
+        if mode == "linger":
+            linger = subprocess.run(["loginctl", "show-user", str(os.getuid()), "--property=Linger", "--value"],
+                                    capture_output=True, text=True, timeout=15, check=False)
+            result["linger"] = linger.returncode == 0 and linger.stdout.strip() == "yes"
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        result["state"] = "unknown"
+        return result
+    if not result["running"] or mode != "off" and not (result["enabled"] and result.get("active")) or mode == "linger" and not result["linger"]:
+        result["state"] = "start-required"
+    return result
+
+
 def _systemctl(*args: str) -> None:
     if not shutil.which("systemctl"):
         raise PaseoServiceError("systemctl 不可用")

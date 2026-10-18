@@ -5,14 +5,16 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Callable
 
 
 WSL_PATTERN = re.compile(r"(?:microsoft|wsl)", re.IGNORECASE)
 WSL2_PATTERN = re.compile(r"(?:wsl2|microsoft-standard-wsl2)", re.IGNORECASE)
-PACKAGE_MANAGERS = ("pacman", "paru", "yay", "npm")
-PACKAGE_NAME = re.compile(r"^[A-Za-z0-9@._+:/-]+$")
+PACKAGE_MANAGERS = ("pacman", "paru", "yay", "npm", "uv")
+PACKAGE_NAME = re.compile(r"^[A-Za-z0-9@=._+:/-]+$")
 PACKAGE_TAG = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -73,6 +75,8 @@ def select_installer(source: str, available: dict[str, bool]) -> str | None:
         return None
     if source == "npm":
         return "npm" if available.get("npm", False) else None
+    if source == "uv":
+        return "uv" if available.get("uv", False) else None
     return None
 
 
@@ -84,6 +88,8 @@ def package_info_command(
 ) -> list[str]:
     if installer not in PACKAGE_MANAGERS or not PACKAGE_NAME.fullmatch(package):
         raise ValueError("invalid package installer or package name")
+    if installer == "uv":
+        raise ValueError("uv packages require a fixed catalog version")
     if installer == "npm":
         if tag is not None and not PACKAGE_TAG.fullmatch(tag):
             raise ValueError("invalid npm package tag")
@@ -102,6 +108,8 @@ def package_install_command(
 ) -> list[str]:
     if installer not in PACKAGE_MANAGERS or not PACKAGE_NAME.fullmatch(package):
         raise ValueError("invalid package installer or package name")
+    if installer == "uv":
+        return ["uv", "tool", "install", "--force", package]
     if installer == "npm":
         script_option = (
             f"--allow-scripts={','.join(allow_scripts)}"
@@ -120,6 +128,8 @@ def package_install_command(
 def package_remove_command(installer: str, package: str, prefix: str | None = None) -> list[str]:
     if installer not in PACKAGE_MANAGERS or not PACKAGE_NAME.fullmatch(package):
         raise ValueError("invalid package installer or package name")
+    if installer == "uv":
+        return ["uv", "tool", "uninstall", package]
     if installer == "npm":
         command = [installer, "uninstall", "--global"]
         if prefix is not None:
@@ -128,6 +138,29 @@ def package_remove_command(installer: str, package: str, prefix: str | None = No
     if installer == "pacman":
         return ["sudo", installer, "-R", "--noconfirm", package]
     return [installer, "-R", "--noconfirm", package]
+
+
+def ensure_aur_helper(spec: dict[str, str]) -> str:
+    if select_installer("aur", package_managers()):
+        return "no-op"
+    if os.getuid() == 0:
+        raise RuntimeError("AUR helper 必须由普通目标用户构建")
+    if (spec.get("repo") != "https://aur.archlinux.org/yay-bin.git"
+            or not re.fullmatch(r"[0-9a-f]{40}", spec.get("ref", ""))):
+        raise RuntimeError("AUR helper 固定来源无效")
+    commands = [["sudo", "pacman", "-S", "--needed", "--noconfirm", "base-devel", "git"]]
+    with tempfile.TemporaryDirectory(prefix="pennix-aur-helper-") as directory:
+        commands += [["git", "init", directory],
+                     ["git", "-C", directory, "fetch", "--depth=1", spec["repo"], spec["ref"]],
+                     ["git", "-C", directory, "checkout", "--detach", "FETCH_HEAD"],
+                     ["makepkg", "--syncdeps", "--install", "--noconfirm"]]
+        for command in commands:
+            result = subprocess.run(command, cwd=directory, check=False)
+            if result.returncode:
+                raise RuntimeError("固定 AUR helper 构建或安装失败，未继续部署")
+    if not select_installer("aur", package_managers()):
+        raise RuntimeError("AUR helper 安装后不可用")
+    return "changed"
 
 
 def detect_host(
@@ -159,5 +192,6 @@ def detect_host(
             "official": select_installer("official", available),
             "aur": select_installer("aur", available),
             "npm": select_installer("npm", available),
+            "uv": select_installer("uv", available),
         },
     }

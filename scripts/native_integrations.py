@@ -10,8 +10,11 @@ import shlex
 import shutil
 import subprocess
 import tomllib
+import tempfile
+import tomlkit
 
 import owned_files
+import hook_integrations
 
 
 class NativeIntegrationError(RuntimeError):
@@ -104,11 +107,26 @@ def _context_target(codex_home: Path) -> dict:
 
 
 def _desired(key: str, codex_home: Path, *, enabled: bool) -> dict:
-    if key not in {"codegraph", "context-mode"}:
+    if key not in {"codegraph", "context-mode", "siyuan"}:
         raise NativeIntegrationError(f"未知 native integration: {key}")
     value = {"key": key, "enabled": enabled, "codex_home": str(codex_home)}
     if key == "context-mode":
         value.update(_context_target(codex_home))
+    elif key == "codegraph":
+        value["mcp"] = {"command": _command(key), "args": ["serve", "--mcp"]}
+    else:
+        helper = codex_home / "skills/pennix-skills/pennix-siyuan-knowledge/scripts/mcp_headers.py"
+        python = shutil.which("python3")
+        if python is None or not helper.is_file():
+            raise NativeIntegrationError("SiYuan 本机 helper 不可用")
+        result = subprocess.run([python, str(helper), "--metadata"], capture_output=True, text=True, timeout=15, check=False)
+        try:
+            url = json.loads(result.stdout)["url"]
+            if result.returncode or not isinstance(url, str):
+                raise ValueError()
+        except (ValueError, KeyError, TypeError) as error:
+            raise NativeIntegrationError("SiYuan 本机连接 metadata 不可用") from error
+        value["mcp"] = {"url": url, "http_headers_helper": shlex.join([python, str(helper)])}
     return value
 
 
@@ -119,6 +137,8 @@ def _read_receipt(key: str) -> dict | None:
     fields = {"schema", "key", "codex_home", "desired_digest"}
     if key == "context-mode":
         fields |= {"mcp", "hooks", "hooks_file_created"}
+    else:
+        fields |= {"mcp", "baseline"}
     if (not isinstance(value, dict) or set(value) != fields or value.get("schema") != 1 or value.get("key") != key
             or not all(isinstance(value.get(name), str) for name in ("codex_home", "desired_digest"))):
         raise NativeIntegrationError(f"{key} native integration receipt 无效")
@@ -128,10 +148,12 @@ def _read_receipt(key: str) -> dict | None:
     return value
 
 
-def _write_receipt(key: str, desired: dict, *, previous: bytes | None, hooks_file_created: bool = False) -> None:
+def _write_receipt(key: str, desired: dict, *, previous: bytes | None, hooks_file_created: bool = False, baseline: dict | None = None) -> None:
     record = {"schema": 1, "key": key, "codex_home": desired["codex_home"], "desired_digest": _digest(desired)}
     if key == "context-mode":
         record.update(mcp=desired["mcp"], hooks=desired["hooks"], hooks_file_created=hooks_file_created)
+    else:
+        record.update(mcp=desired["mcp"], baseline=baseline)
     owned_files.replace(_receipt_path(key), owned_files.json_bytes(record), previous)
 
 
@@ -176,7 +198,9 @@ def _context_matches(codex_home: Path, record: dict) -> bool:
 
 
 def inspect(key: str, codex_home: Path, *, enabled: bool) -> dict[str, object]:
-    if key not in {"context-mode", "codegraph"}:
+    if key in {"aoe", "peon-ping"}:
+        return hook_integrations.inspect(key, codex_home, enabled=enabled)
+    if key not in {"context-mode", "codegraph", "siyuan"}:
         raise NativeIntegrationError(f"未知 native integration: {key}")
     receipt = _read_receipt(key)
     present = _context_present(codex_home) if key == "context-mode" else _server(key, codex_home) is not None
@@ -185,7 +209,7 @@ def inspect(key: str, codex_home: Path, *, enabled: bool) -> dict[str, object]:
     if receipt["codex_home"] != str(codex_home):
         return {"state": "blocked", "owned": False, "detail": "native receipt belongs to another CODEX_HOME"}
     current = (_context_matches(codex_home, receipt) if key == "context-mode" else
-               _server(key, codex_home) == {"command": "codegraph", "args": ["serve", "--mcp"]})
+               _mcp_fields(key, codex_home) == receipt["mcp"])
     if not current:
         return {"state": "drifted", "owned": True, "detail": "native owner configuration changed"}
     if not enabled:
@@ -242,9 +266,62 @@ def _context_apply(codex_home: Path, desired: dict, receipt: dict | None) -> str
     return "changed"
 
 
-def apply(key: str, codex_home: Path) -> str:
+def _mcp_fields(key: str, home: Path) -> dict | None:
+    server = _server(key, home)
+    if server is None:
+        return None
+    if not isinstance(server, dict):
+        raise NativeIntegrationError(f"{key} MCP 不是 table")
+    names = ("url", "http_headers_helper") if key == "siyuan" else ("command", "args")
+    return {name: server[name] for name in names if name in server}
+
+
+def can_adopt(key: str, home: Path) -> bool:
+    if key in {"aoe", "peon-ping"}:
+        return hook_integrations._read(key, home)[1] == hook_integrations.desired(key)
+    if key == "codegraph":
+        fields = _mcp_fields(key, home)
+        return bool(fields and isinstance(fields.get("command"), str)
+                    and Path(fields["command"]).name == "codegraph" and fields.get("args") == ["serve", "--mcp"])
+    if key == "siyuan":
+        current = _mcp_fields(key, home)
+        expected = _desired(key, home, enabled=True)["mcp"]
+        if current is None:
+            return False
+        try:
+            actual_helper, helper = shlex.split(current["http_headers_helper"]), shlex.split(expected["http_headers_helper"])
+            return (current["url"] == expected["url"] and len(actual_helper) == len(helper) == 2
+                    and Path(actual_helper[0]).samefile(helper[0]) and actual_helper[1] == helper[1])
+        except (OSError, ValueError, TypeError, KeyError):
+            return False
+    return False
+
+
+def _mcp_edit(key: str, home: Path, fields: dict | None, expected: dict | None) -> None:
+    if _mcp_fields(key, home) != expected:
+        raise NativeIntegrationError(f"{key} MCP 在操作期间改变")
+    path = home / "config.toml"
+    before = owned_files.read(path)
+    document = tomlkit.parse(before.decode() if before else "")
+    servers = document.setdefault("mcp_servers", tomlkit.table())
+    server = servers.setdefault(key, tomlkit.table())
+    for name in (("url", "http_headers_helper") if key == "siyuan" else ("command", "args")):
+        if fields is not None and name in fields:
+            server[name] = fields[name]
+        else:
+            server.pop(name, None)
+    if not server:
+        servers.pop(key, None)
+    if not servers:
+        document.pop("mcp_servers", None)
+    owned_files.replace(path, tomlkit.dumps(document).encode(), before)
+
+
+def apply(key: str, codex_home: Path, *, adopt: bool = False) -> str:
+    if key in {"aoe", "peon-ping"}:
+        return hook_integrations.apply(key, codex_home, adopt=adopt)
     status = inspect(key, codex_home, enabled=True)
-    if status["state"] in {"external", "blocked"}:
+    if status["state"] == "blocked" or status["state"] == "external" and not (adopt and can_adopt(key, codex_home)):
         raise NativeIntegrationError(f"{key} native 配置无法安全接管: {status['state']}")
     if status["state"] == "current":
         return "no-op"
@@ -252,11 +329,21 @@ def apply(key: str, codex_home: Path) -> str:
     if key == "context-mode":
         return _context_apply(codex_home, desired, _read_receipt(key))
     previous = owned_files.read(_receipt_path(key), private=True)
-    _run([_command(key), "install", "--target", "codex", "--location", "global", "--yes"], codex_home)
+    receipt = _read_receipt(key)
+    before = _mcp_fields(key, codex_home)
+    baseline = receipt["baseline"] if receipt else before
+    # Ask the native owner for its contract in isolation, then merge its fields.
+    if key == "codegraph":
+        with tempfile.TemporaryDirectory(prefix="pennix-codegraph-") as directory:
+            staging = Path(directory)
+            _run([_command(key), "install", "--target", "codex", "--location", "global", "--yes"], staging)
+            if _mcp_fields(key, staging) != {"command": "codegraph", "args": ["serve", "--mcp"]}:
+                raise NativeIntegrationError("CodeGraph 原生配置合同已变化")
+    _mcp_edit(key, codex_home, desired["mcp"], before)
     try:
-        _write_receipt(key, desired, previous=previous)
+        _write_receipt(key, desired, previous=previous, baseline=baseline)
     except BaseException as error:
-        _run([_command(key), "uninstall", "--target", "codex", "--location", "global", "--yes", "--keep-cli"], codex_home)
+        _mcp_edit(key, codex_home, before, desired["mcp"])
         raise NativeIntegrationError("codegraph 归属记录失败，已撤回配置") from error
     if inspect(key, codex_home, enabled=True)["state"] != "current":
         raise NativeIntegrationError(f"{key} native owner 写入后核验失败")
@@ -264,6 +351,8 @@ def apply(key: str, codex_home: Path) -> str:
 
 
 def unconfigure(key: str, codex_home: Path) -> str:
+    if key in {"aoe", "peon-ping"}:
+        return hook_integrations.apply(key, codex_home, remove=True)
     receipt = _read_receipt(key)
     if receipt is None:
         return "preserved"
@@ -288,10 +377,10 @@ def unconfigure(key: str, codex_home: Path) -> str:
                 raise NativeIntegrationError("context-mode 撤回失败且恢复未完成；保留现场") from rollback
             raise NativeIntegrationError("context-mode 撤回失败；已恢复本组件条目") from error
         return "changed; preserved context-mode index/session data"
-    owned_files.replace(path, None, before)
+    _mcp_edit(key, codex_home, receipt["baseline"], receipt["mcp"])
     try:
-        _run([_command(key), "uninstall", "--target", "codex", "--location", "global", "--yes", "--keep-cli"], codex_home)
+        owned_files.replace(path, None, before)
     except BaseException:
-        owned_files.replace(path, before, None)
+        _mcp_edit(key, codex_home, receipt["mcp"], receipt["baseline"])
         raise
     return "changed"

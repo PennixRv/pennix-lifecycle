@@ -65,7 +65,13 @@ class ConfigModelTests(unittest.TestCase):
             defconfig=str(Path(__file__).resolve().parents[1] / "config/defconfig-wsl"),
         )
         loaded, _ = config_model.load(str(path))
-        self.assertGreater(len(config_model.values(loaded)), 100)
+        raw = config_model._parse_assignments((Path(__file__).resolve().parents[1] / "config/defconfig-wsl").read_text(), loaded)
+        public = {symbol.name for symbol in loaded.unique_defined_syms if symbol.visibility}
+        self.assertFalse(public - raw.keys(), f"defconfig 缺少公开字段: {sorted(public - raw.keys())}")
+        catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
+        declared = {symbol.name.removeprefix("PENNIX_COMPONENT_").lower().replace("_", "-")
+                    for symbol in loaded.unique_defined_syms if symbol.name.startswith("PENNIX_COMPONENT_")}
+        self.assertEqual(declared, {key for key, item in catalog["components"].items() if item["delivery"] != "state"})
         self.assertEqual(config_model.config_value(loaded, "PENNIX_CODEX_HOME"), str(self.home / ".codex"))
         self.assertEqual(config_model.config_value(loaded, "PENNIX_PASEO_HOME"), str(self.home / ".paseo"))
         self.assertEqual(config_model.config_value(loaded, "PENNIX_PASEO_RELAY"), "n")
@@ -73,11 +79,12 @@ class ConfigModelTests(unittest.TestCase):
     def test_catalog_does_not_claim_cch_is_a_public_npm_package(self) -> None:
         catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
         cch = catalog["components"]["cch-status"]
-        self.assertEqual(cch["delivery"], "native")
-        self.assertNotIn("package", cch)
-        self.assertIn("not published", cch["native_owner_reason"])
+        self.assertEqual(cch["delivery"], "package")
+        self.assertTrue(cch["package"]["asset"]["private"])
+        self.assertEqual(cch["package"]["asset"]["repo"], "PennixRv/cch-codex-tmux-status")
+        self.assertNotIn("registry", cch["package"])
 
-    def test_catalog_keeps_hikari_remote_service_native_and_local_owner_in_skill(self) -> None:
+    def test_catalog_manages_only_hikari_local_wrapper_and_skill_connection(self) -> None:
         catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
         target = catalog["configuration_targets"]["hikari"]
         component = catalog["components"]["tavily-hikari"]
@@ -87,8 +94,10 @@ class ConfigModelTests(unittest.TestCase):
             target["command"],
             ["python3", "$CODEX_HOME/skills/pennix-skills/pennix-tavily-search/scripts/connection.py"],
         )
-        self.assertEqual(component["delivery"], "native")
-        self.assertIn("NAS Hikari service", component["native_owner_reason"])
+        self.assertEqual(component["delivery"], "client")
+        self.assertIn("/scripts/tvly-hikari", component["client"]["source"]["url"])
+        self.assertEqual(component["client"]["paths"], ["tvly-hikari"])
+        self.assertIn("NAS service is an external dependency", component["source"])
 
     def test_catalog_static_template_revisions_match_delivered_files(self) -> None:
         catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
