@@ -10,8 +10,8 @@
 
 ## 已知基线
 
-- Lifecycle checkout：`main`=`b0605229d49c186d284b4edd6bc70768340191f8`，已快进到实际 `origin/main`；本次 catalog/version 更新完成后再提交发行。
-- 当前源码发行版本：`0.2.14`；上一版远端发行版本为 `0.2.13`。Context Mode catalog pin 为 `1.0.169-pennix.2`；Skills catalog ref 为远端 `main` 实际提交 `d8cb76f025931708b91cca409372dc7cf2115dc8`。本版包含 Context Mode 包自更新 Hook 后的 native receipt 收敛修复、显式 repair 的安全漂移恢复路径，以及 Skills 固定来源校正。
+- Lifecycle 本次以 catalog 和 VERSION 更新后的 `main` 作为 `0.2.15` 发行提交；WSL 复核以该远端 tag 和 release asset 为准。
+- 当前源码发行版本：`0.2.15`；上一版远端发行版本为 `0.2.14`。Context Mode catalog pin 为 `1.0.169-pennix.2`；`pennix-skills` catalog ref 为 `991bfe96217dc6066044bf4f82fadc20f20dc9d2`，`pennix-skills-extra` catalog ref 为 `4f5f88ea342a39c8eaa30261c41de984c17584dc`。本版继续固定 Context Mode 包自更新 Hook 后的 native receipt 收敛修复、显式 repair 的安全漂移恢复路径，并纳入两个 Skills collection 的最新远端提交及其物化成员 refs。
 - 最新远端已补齐 `peon-ping`、`tavily-cli`、`uv` 定义，并调整多个 member pins 与 native ownership；这些改动必须先审查和测试后才用于发行物。
 
 ## 实施与验收

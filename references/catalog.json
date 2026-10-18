@@ -568,7 +568,7 @@
         "directory": "pennix-skills-extra",
         "source": {
           "repo": "PennixRv/pennix-skills-extra",
-          "ref": "c64c2b4f0aac9797a32bef2bf2b0554f67dfd00d",
+        "ref": "4f5f88ea342a39c8eaa30261c41de984c17584dc",
           "manifest": "collection.json"
         }
       }
@@ -593,7 +593,7 @@
         "directory": "pennix-skills",
         "source": {
           "repo": "PennixRv/pennix-skills",
-        "ref": "d8cb76f025931708b91cca409372dc7cf2115dc8",
+        "ref": "991bfe96217dc6066044bf4f82fadc20f20dc9d2",
           "manifest": "collection.json"
         }
       }
