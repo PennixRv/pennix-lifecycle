@@ -77,6 +77,12 @@ class ConfigModelTests(unittest.TestCase):
         self.assertNotIn("package", cch)
         self.assertIn("not published", cch["native_owner_reason"])
 
+    def test_catalog_static_template_revisions_match_delivered_files(self) -> None:
+        catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
+        for component in catalog["components"].values():
+            if component.get("delivery") == "static" and "template" in component:
+                self.assertTrue(owner_engine._template(component))
+
     def test_agents_template_upgrade_requires_unchanged_owned_bytes(self) -> None:
         target = self.home / "codex/AGENTS.md"
         component = {"template": {"name": "AGENTS.md.install"}}
