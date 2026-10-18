@@ -133,6 +133,8 @@ class NativeIntegrationTests(unittest.TestCase):
             with self.assertRaises(native_integrations.NativeIntegrationError):
                 operation("context-mode", self.codex)
         self.assertTrue(native_integrations._receipt_path("context-mode").exists())
+        self.assertEqual(native_integrations.apply("context-mode", self.codex, repair=True), "repaired")
+        self.assertEqual(native_integrations.inspect("context-mode", self.codex, enabled=True)["state"], "current")
 
     def test_package_hook_refresh_is_adopted_only_when_exactly_desired(self):
         native_integrations.apply("context-mode", self.codex)

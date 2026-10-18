@@ -234,11 +234,34 @@ def _mcp_remove(codex_home: Path, expected: dict) -> None:
     _run([_command("context-mode"), "mcp", "remove", "context-mode"], codex_home)
 
 
-def _context_apply(codex_home: Path, desired: dict, receipt: dict | None) -> str:
+def _context_apply(codex_home: Path, desired: dict, receipt: dict | None, *, repair: bool = False) -> str:
     if _toml(codex_home / "config.toml").get("features", {}).get("hooks") is not True:
         raise NativeIntegrationError("context-mode 要求已启用 Codex features.hooks")
     before_receipt = owned_files.read(_receipt_path("context-mode"), private=True)
     if receipt and not _context_matches(codex_home, receipt):
+        if repair:
+            if _server("context-mode", codex_home) != receipt["mcp"]:
+                raise NativeIntegrationError("context-mode MCP 发生漂移，拒绝 repair")
+            document, _ = _hooks(codex_home)
+            current_hooks = _managed_hooks(document)
+            hooks_written = False
+            try:
+                _edit_hooks(codex_home, current_hooks, desired["hooks"])
+                hooks_written = True
+                if not _context_matches(codex_home, desired):
+                    raise NativeIntegrationError("context-mode repair 后核验失败")
+                _write_receipt(
+                    "context-mode", desired, previous=before_receipt,
+                    hooks_file_created=receipt["hooks_file_created"],
+                )
+            except BaseException as error:
+                try:
+                    if hooks_written:
+                        _edit_hooks(codex_home, desired["hooks"], current_hooks)
+                except BaseException as rollback:
+                    raise NativeIntegrationError("context-mode repair 失败且恢复未完成；保留现场") from rollback
+                raise NativeIntegrationError("context-mode repair 失败；已恢复原条目") from error
+            return "repaired"
         # The package's allowed install script may refresh its own Hook manifest.
         # Adopt only an exact current-package result; arbitrary drift stays blocked.
         if not _context_matches(codex_home, desired):
@@ -325,7 +348,7 @@ def _mcp_edit(key: str, home: Path, fields: dict | None, expected: dict | None) 
     owned_files.replace(path, tomlkit.dumps(document).encode(), before)
 
 
-def apply(key: str, codex_home: Path, *, adopt: bool = False) -> str:
+def apply(key: str, codex_home: Path, *, adopt: bool = False, repair: bool = False) -> str:
     if key in {"aoe", "peon-ping"}:
         return hook_integrations.apply(key, codex_home, adopt=adopt)
     status = inspect(key, codex_home, enabled=True)
@@ -335,7 +358,7 @@ def apply(key: str, codex_home: Path, *, adopt: bool = False) -> str:
         return "no-op"
     desired = _desired(key, codex_home, enabled=True)
     if key == "context-mode":
-        return _context_apply(codex_home, desired, _read_receipt(key))
+        return _context_apply(codex_home, desired, _read_receipt(key), repair=repair)
     previous = owned_files.read(_receipt_path(key), private=True)
     receipt = _read_receipt(key)
     before = _mcp_fields(key, codex_home)

@@ -338,14 +338,15 @@ def _ensure_connection_dependencies(selected: set[str], connections: dict[str, A
                 raise CliError(f"连接 {target} 依赖未选择: {component}")
 
 
-def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_id: str, operation: str) -> str:
+def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_id: str, operation: str, *, repair: bool = False) -> str:
     component = catalog["components"][component_id]
     native = component.get("native_config")
     if native and operation in {"configure", "unconfigure"}:
         if operation == "unconfigure":
             return native_integrations.unconfigure(native["owner"], args.codex_home)
         return native_integrations.apply(native["owner"], args.codex_home,
-            adopt=config_model.config_value(args.kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y")
+            adopt=config_model.config_value(args.kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y",
+            repair=repair)
     if native and operation == "uninstall":
         native_integrations.unconfigure(native["owner"], args.codex_home)
     if component_id == "codex-config":
@@ -582,7 +583,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
     result = _run_component(args, catalog, args.component, operation)
     native = component.get("native_config")
     if native and config_model.config_value(kconf, native["select"]) == "y":
-        configured = _run_component(args, catalog, args.component, "configure")
+        configured = _run_component(args, catalog, args.component, "configure", repair=True)
         result = f"{result}; native {configured}"
     _emit({"operation": "repair", "component": args.component, "status": result}, args.json)
     return 0
