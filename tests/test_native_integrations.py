@@ -8,6 +8,9 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import native_integrations
+import config_model
+import pennix
+from types import SimpleNamespace
 
 
 FAKE_NATIVE = r'''#!/usr/bin/env python3
@@ -86,6 +89,20 @@ class NativeIntegrationTests(unittest.TestCase):
         self.assertEqual(json.loads((self.codex / "hooks.json").read_text()), other)
         self.assertIn('command = "other"', (self.codex / "config.toml").read_text())
         self.assertFalse(native_integrations._receipt_path("context-mode").exists())
+
+    def test_single_component_repair_registers_fresh_native_integration(self):
+        path = config_model.init(str(self.root / "workflow.config"))
+        kconf, _ = config_model.load(str(path))
+        kconf.syms["PENNIX_CODEX_HOME"].set_value(str(self.codex))
+        kconf.syms["PENNIX_COMPONENT_CODEX_CLI"].set_value("y")
+        kconf.syms["PENNIX_CODEX_HOOKS"].set_value("y")
+        kconf.syms["PENNIX_COMPONENT_CONTEXT_MODE"].set_value("y")
+        config_model.write(kconf, path)
+        args = SimpleNamespace(component="context-mode", config=str(path), json=True, expected_sha256=None)
+        with patch.object(pennix.owner_engine, "component_operation", return_value="changed") as package:
+            self.assertEqual(pennix.cmd_repair(args), 0)
+        package.assert_called_once()
+        self.assertEqual(native_integrations.inspect("context-mode", self.codex, enabled=True)["state"], "current")
 
     def test_new_hooks_file_is_removed_on_uninstall(self):
         native_integrations.apply("context-mode", self.codex)

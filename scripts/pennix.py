@@ -512,11 +512,11 @@ def cmd_repair(args: argparse.Namespace) -> int:
         raise CliError(f"未知组件: {args.component}")
     operation = "upgrade"
     component = catalog["components"][args.component]
-    if component.get("native_config"):
-        planned = _plan(args)["components"][args.component]
-        if planned.get("native_action") == "repair":
-            operation = "configure"
     result = _run_component(args, catalog, args.component, operation)
+    native = component.get("native_config")
+    if native and config_model.config_value(kconf, native["select"]) == "y":
+        configured = _run_component(args, catalog, args.component, "configure")
+        result = f"{result}; native {configured}"
     _emit({"operation": "repair", "component": args.component, "status": result}, args.json)
     return 0
 
