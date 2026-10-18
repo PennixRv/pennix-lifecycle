@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 import host
+import skill_collections
+import owned_files
 
 
 SCRIPT_ROOT = Path(__file__).resolve().parent
@@ -43,8 +45,23 @@ def load_catalog(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=pairs)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise BootstrapError(f"cannot read catalog: {path}") from error
-    if not isinstance(value, dict) or value.get("schema") != 2 or not isinstance(value.get("components"), dict):
-        raise BootstrapError("catalog schema 2 is required")
+    if (not isinstance(value, dict) or value.get("schema") != 3
+            or not isinstance(value.get("components"), dict)
+            or not isinstance(value.get("configuration_targets"), dict)):
+        raise BootstrapError("catalog schema 3 is required")
+    for target, spec in value["configuration_targets"].items():
+        if (not isinstance(target, str) or not isinstance(spec, dict)
+                or not isinstance(spec.get("select"), str)
+                or not isinstance(spec.get("owner"), str)
+                or not isinstance(spec.get("component"), str)
+                or not isinstance(spec.get("command"), list)
+                or not isinstance(spec.get("values"), dict)
+                or not isinstance(spec.get("secrets"), dict)):
+            raise BootstrapError(f"configuration target contract is invalid: {target}")
+        if any(not isinstance(item, str) or not item for item in spec["command"]):
+            raise BootstrapError(f"configuration target command is invalid: {target}")
+        if any(not isinstance(item, str) or not item for item in [*spec["values"].values(), *spec["secrets"].values()]):
+            raise BootstrapError(f"configuration target field mapping is invalid: {target}")
     for key, component in value["components"].items():
         if not isinstance(key, str) or not isinstance(component, dict):
             raise BootstrapError("catalog component is invalid")
@@ -52,6 +69,13 @@ def load_catalog(path: Path) -> dict[str, Any]:
             raise BootstrapError(f"catalog delivery is invalid: {key}")
         if component.get("delivery") != "state" and not isinstance(component.get("actions"), dict):
             raise BootstrapError(f"catalog actions are missing: {key}")
+        if component.get("delivery") == "collection":
+            contract = component.get("collection_contract")
+            if not isinstance(contract, dict) or set(contract) != {"directory", "source"}:
+                raise BootstrapError(f"collection manifest contract is invalid: {key}")
+            source = contract["source"]
+            if not isinstance(source, dict) or set(source) != {"repo", "ref", "manifest"}:
+                raise BootstrapError(f"collection source contract is invalid: {key}")
     return value
 
 
@@ -164,7 +188,9 @@ def _static_state(component_id: str, codex_home: Path, component: dict[str, Any]
     if component_id == "codex-agents":
         if not current:
             return "missing"
-        return "current" if current == _template(component) else "drifted"
+        if current == _template(component):
+            return "current"
+        return "drifted"
     block = f"{BEGIN_TMUX}\n{_template(component).rstrip()}\n{END_TMUX}"
     if not current:
         return "missing"
@@ -190,6 +216,9 @@ def _operate_static(component_id: str, codex_home: Path, component: dict[str, An
             return "changed"
         if state == "current":
             return "no-op"
+        if state == "outdated" and operation == "upgrade":
+            _write(path, _template(component))
+            return "changed"
         if state != "missing":
             raise BootstrapError(f"refusing {state} AGENTS.md")
         _write(path, _template(component))
@@ -215,176 +244,22 @@ def _operate_static(component_id: str, codex_home: Path, component: dict[str, An
 
 
 def _collection_destination(component: dict[str, Any], codex_home: Path) -> Path:
-    contract = component.get("collection_contract")
-    name = contract.get("directory", component.get("adapter")) if isinstance(contract, dict) else None
-    if not isinstance(name, str) or not name:
-        raise BootstrapError("collection directory is missing")
-    return codex_home / "skills" / name
-
-
-def _collection_state_path() -> Path:
-    base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")).expanduser()
-    return base / "pennix-lifecycle" / "collections.json"
-
-
-def _collection_names(component: dict[str, Any]) -> set[str]:
-    contract = component.get("collection_contract")
-    names = contract.get("skills") if isinstance(contract, dict) else None
-    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
-        raise BootstrapError("collection skills are missing")
-    return set(names)
-
-
-def _collection_key(component: dict[str, Any]) -> str:
-    key = component.get("adapter")
-    if not isinstance(key, str) or not key:
-        raise BootstrapError("collection adapter is missing")
-    return key
-
-
-def _collection_manifest() -> dict[str, Any]:
-    path = _collection_state_path()
-    if not path.exists():
-        return {"schema": 1, "collections": {}}
-    if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
-        raise BootstrapError("collection ownership record is unsafe")
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise BootstrapError("collection ownership record is invalid") from error
-    if not isinstance(value, dict) or value.get("schema") != 1 or not isinstance(value.get("collections"), dict):
-        raise BootstrapError("collection ownership record version is unsupported")
-    return value
-
-
-def _write_collection_manifest(value: dict[str, Any]) -> None:
-    path = _collection_state_path()
-    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    if path.parent.is_symlink() or not path.parent.is_dir():
-        raise BootstrapError("collection ownership directory is unsafe")
-    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(value, handle, ensure_ascii=False, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    return skill_collections.destination(component, codex_home)
 
 
 def collection_owned(component: dict[str, Any], codex_home: Path) -> bool:
-    destination = _collection_destination(component, codex_home)
-    record = _collection_manifest().get("collections", {}).get(_collection_key(component))
-    return (
-        isinstance(record, dict)
-        and record.get("destination") == str(destination)
-        and record.get("skills") == sorted(_collection_names(component))
-    )
+    return skill_collections.owned(component, codex_home)
 
 
 def _collection_state(component: dict[str, Any], codex_home: Path) -> str:
-    destination = _collection_destination(component, codex_home)
-    names = _collection_names(component)
-    if not destination.exists():
-        return "missing"
-    if destination.is_symlink() or not destination.is_dir():
-        return "blocked"
-    present = {item.name for item in destination.iterdir() if item.is_dir()}
-    if names <= present:
-        return "match"
-    return "partial"
-
-
-def _git_tree(source: dict[str, Any], paths: list[str]) -> Path:
-    repo = source.get("repo")
-    ref = source.get("ref")
-    if not isinstance(repo, str) or not isinstance(ref, str):
-        raise BootstrapError("collection source is incomplete")
-    staging = Path(tempfile.mkdtemp(prefix="pennix-collection-"))
-    try:
-        result = subprocess.run(
-            ["git", "clone", "--filter=blob:none", "--no-checkout", f"https://github.com/{repo}.git", str(staging)],
-            capture_output=True, text=True, timeout=180, check=False,
-        )
-        if result.returncode:
-            raise BootstrapError("collection source clone failed")
-        result = subprocess.run(["git", "-C", str(staging), "checkout", "--detach", ref], capture_output=True, text=True, timeout=60, check=False)
-        if result.returncode:
-            raise BootstrapError("collection source ref is unavailable")
-        return staging
-    except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+    return skill_collections.inspect(component, codex_home)[0]
 
 
 def _operate_collection(component: dict[str, Any], codex_home: Path, operation: str) -> str:
-    state = _collection_state(component, codex_home)
-    destination = _collection_destination(component, codex_home)
-    names = _collection_names(component)
-    if operation == "uninstall":
-        if state == "missing":
-            return "no-op"
-        if state != "match":
-            raise BootstrapError(f"refusing {state} collection")
-        if not collection_owned(component, codex_home):
-            return "preserved"
-        for name in names:
-            target = destination / name
-            if target.is_symlink() or not target.is_dir():
-                raise BootstrapError(f"collection target is unsafe: {name}")
-            shutil.rmtree(target)
-        try:
-            destination.rmdir()
-        except OSError:
-            pass
-        manifest = _collection_manifest()
-        manifest["collections"].pop(_collection_key(component), None)
-        if manifest["collections"]:
-            _write_collection_manifest(manifest)
-        else:
-            _collection_state_path().unlink(missing_ok=True)
-        return "changed"
-    if state == "match":
-        return "no-op"
-    if state != "missing":
-        raise BootstrapError(f"refusing {state} collection")
-    contract = component["collection_contract"]
-    source = contract["source"]
-    staging = _git_tree(source, source.get("paths", []))
-    temporary_destination: Path | None = None
     try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.parent.is_symlink() or not destination.parent.is_dir():
-            raise BootstrapError("collection parent is unsafe")
-        temporary_destination = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent))
-        for relative in source["paths"]:
-            source_path = staging / relative
-            name = Path(relative).name
-            if name not in names or not source_path.is_dir():
-                raise BootstrapError(f"collection source path is invalid: {relative}")
-            shutil.copytree(source_path, temporary_destination / name)
-        if destination.exists() or destination.is_symlink():
-            raise BootstrapError("collection destination changed during install")
-        os.replace(temporary_destination, destination)
-        temporary_destination = None
-    finally:
-        if temporary_destination is not None:
-            shutil.rmtree(temporary_destination, ignore_errors=True)
-        shutil.rmtree(staging, ignore_errors=True)
-    if _collection_state(component, codex_home) != "match":
-        raise BootstrapError("collection postcondition failed")
-    manifest = _collection_manifest()
-    manifest["collections"][_collection_key(component)] = {
-        "destination": str(destination),
-        "skills": sorted(names),
-        "source_ref": source.get("ref"),
-    }
-    _write_collection_manifest(manifest)
-    return "changed"
+        return skill_collections.operate(component, codex_home, operation)
+    except (skill_collections.CollectionError, OSError, subprocess.TimeoutExpired) as error:
+        raise BootstrapError(str(error)) from error
 
 
 def _plugin_status(component: dict[str, Any], codex_home: Path) -> tuple[str, str | None]:
@@ -415,8 +290,7 @@ def probe_component(component: dict[str, Any], codex_home: Path | None = None, d
         state = _static_state(adapter, codex_home, component)
         return {"missing": "missing", "current": "match"}.get(state, "blocked" if state == "blocked" else "drifted"), state
     if delivery == "collection":
-        state = _collection_state(component, codex_home)
-        return {"missing": "missing", "match": "match"}.get(state, "drifted" if state == "partial" else state), str(_collection_destination(component, codex_home))
+        return skill_collections.inspect(component, codex_home)
     if isinstance(component.get("plugin"), dict):
         return _plugin_status(component, codex_home)
     if delivery == "state":
@@ -433,6 +307,60 @@ def probe_component(component: dict[str, Any], codex_home: Path | None = None, d
     return state, observed
 
 
+def _package_receipt_path(component_id: str) -> Path:
+    if not PACKAGE_NAME.fullmatch(component_id):
+        raise BootstrapError("package identity is invalid")
+    return owned_files.state_root() / "packages" / f"{component_id}.json"
+
+
+def _package_receipt(component_id: str, component: dict[str, Any]) -> dict[str, Any] | None:
+    raw = owned_files.read_json(_package_receipt_path(component_id))
+    if raw is None:
+        return None
+    package = component.get("package")
+    if (not isinstance(raw, dict) or set(raw) != {"schema", "component", "source", "name", "version"}
+            or raw.get("schema") != 1 or raw.get("component") != component_id
+            or not isinstance(package, dict) or raw.get("source") != package.get("source")
+            or raw.get("name") != package.get("name") or not isinstance(raw.get("version"), str)):
+        raise BootstrapError(f"package ownership receipt is invalid: {component_id}")
+    return raw
+
+
+def package_owned(
+    component_id: str,
+    component: dict[str, Any],
+    observed: str | None = None,
+    codex_home: Path | None = None,
+) -> bool:
+    receipt = _package_receipt(component_id, component)
+    if receipt is None:
+        return False
+    if observed is None:
+        observed = probe_component(component, codex_home)[1]
+    return observed is not None and receipt["version"] == observed
+
+
+def _write_package_receipt(component_id: str, component: dict[str, Any], observed: str) -> None:
+    package = component["package"]
+    path = _package_receipt_path(component_id)
+    before = owned_files.read(path, private=True)
+    content = owned_files.json_bytes({
+        "schema": 1,
+        "component": component_id,
+        "source": package["source"],
+        "name": package["name"],
+        "version": observed,
+    })
+    owned_files.replace(path, content, before)
+
+
+def _remove_package_receipt(component_id: str) -> None:
+    path = _package_receipt_path(component_id)
+    before = owned_files.read(path, private=True)
+    if before is not None:
+        owned_files.replace(path, None, before)
+
+
 def _ensure_npm_prefix(metadata: dict[str, Any]) -> None:
     if metadata.get("source") != "npm":
         return
@@ -447,6 +375,9 @@ def _ensure_npm_prefix(metadata: dict[str, Any]) -> None:
         result = subprocess.run([npm, "config", "set", "prefix", prefix, "--location=user"], check=False)
         if result.returncode:
             raise BootstrapError("cannot set npm user prefix")
+        result = subprocess.run([npm, "config", "get", "prefix", "--location=user"], capture_output=True, text=True, check=False)
+        if result.returncode or result.stdout.strip() != prefix:
+            raise BootstrapError("npm user prefix verification failed")
 
 
 def _plugin_operation(component: dict[str, Any], codex_home: Path, operation: str) -> str:
@@ -490,22 +421,37 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
     current_host = host.detect_host()
     if not current_host["supported"]:
         raise BootstrapError(str(current_host["reason"]))
-    state, _ = probe_component(component, codex_home)
+    state, observed = probe_component(component, codex_home)
+    owned = package_owned(key, component, observed, codex_home)
     if operation == "uninstall":
         if state == "missing":
             return "no-op"
-        if state != "match":
-            raise BootstrapError(f"refusing {state} package uninstall: {key}")
+        if state != "match" or not owned:
+            raise BootstrapError(f"refusing external or drifted package uninstall: {key}")
         installer = current_host["installers"].get(metadata.get("source"))
         if not isinstance(installer, str):
             raise BootstrapError(f"no installer for {key}")
         result = subprocess.run(host.package_remove_command(installer, metadata["name"], metadata.get("prefix")), check=False)
         if result.returncode:
             raise BootstrapError(f"package uninstall failed: {key}")
+        _remove_package_receipt(key)
         return "changed"
     _ensure_npm_prefix(metadata)
-    if state == "match" and operation == "install":
-        return "no-op"
+    if state == "match":
+        if not owned:
+            kconf = getattr(args, "kconf", None)
+            adopted = bool(kconf and kconf.syms.get("PENNIX_ADOPT_EXISTING_PACKAGES")
+                          and kconf.syms["PENNIX_ADOPT_EXISTING_PACKAGES"].tri_value)
+            if not adopted:
+                raise BootstrapError(f"package is external; enable explicit adoption first: {key}")
+            _write_package_receipt(key, component, observed or "")
+            return "adopted"
+        if operation == "install":
+            return "no-op"
+        if operation == "upgrade":
+            kconf = getattr(args, "kconf", None)
+            if not kconf or not kconf.syms["PENNIX_UPDATE_COMPONENTS"].tri_value:
+                return "no-op"
     installer = current_host["installers"].get(metadata.get("source"))
     if not isinstance(installer, str):
         raise BootstrapError(f"no installer for {key}")
@@ -521,6 +467,10 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
     new_state, _ = probe_component(component, codex_home)
     if new_state != "match":
         raise BootstrapError(f"package postcondition failed: {key}")
+    _, new_observed = probe_component(component, codex_home)
+    if new_observed is None:
+        raise BootstrapError(f"package version cannot be recorded: {key}")
+    _write_package_receipt(key, component, new_observed)
     return "changed"
 
 

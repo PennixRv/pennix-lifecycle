@@ -1,157 +1,708 @@
 mainmenu "Pennix 工作流生命周期"
 
 config PENNIX_CONFIG_FORMAT
-	string "配置格式主版本"
-	default "1"
-	help
-		由工具写入的格式主版本。变更主版本时必须明确拒绝旧配置，不能自动迁移。
+	string
+	default "3"
 
-menu "运行路径"
+menu "位置与私有输入"
 
 config PENNIX_CODEX_HOME
 	string "Codex 家目录"
 	default "$HOME/.codex"
 	help
-		Codex 原生配置和认证所在目录。
+		绝对路径；仅展开 $HOME，不接受其他变量。
 
-config PENNIX_NPM_PREFIX
-	string "npm 用户全局 prefix"
-	default "$HOME/.local"
+config PENNIX_PASEO_HOME
+	string "Paseo 家目录"
+	default "$HOME/.paseo"
 	help
-		用户级 npm 全局安装位置。路径必须为绝对路径或以 $HOME 开头。
+		独立于 CODEX_HOME；保留身份、配对、认证和会话。
+
+config PENNIX_SECRETS_FILE
+	string "集中秘密文件"
+	default "$HOME/.config/pennix/secrets.toml"
+	help
+			私有明文 TOML；目录 0700、文件 0600；只保存凭据，不保存 URL、ID 或路径。
+
+comment "控制工具和 npm 固定使用用户 ~/.local；不配置系统级 npm prefix"
 
 endmenu
-
-menu "核心工具"
+menu "工作流组件"
 
 config PENNIX_COMPONENT_CODEX_CLI
 	bool "Codex CLI"
 	default y
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_TRELLIS_CLI
 	bool "Trellis CLI"
 	default y
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_PNPM
 	bool "pnpm"
 	default y
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_FASTCTX
 	bool "FastCtx"
 	default y
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_CODEGRAPH_CLI
 	bool "CodeGraph CLI"
 	default y
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_PASEO_CLI
 	bool "Paseo CLI"
 	default y
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_PONYTAIL_PLUGIN
 	bool "Ponytail 插件"
 	default y
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_CCH_STATUS
 	bool "CCH 状态组件"
-	default y
+	default n
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_TMUX
 	bool "tmux"
 	default y
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_TMUX_CONFIG
 	bool "tmux 配置"
-	depends on PENNIX_COMPONENT_TMUX
 	default y
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_AOE
 	bool "AOE"
 	default y
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_TAVILY_HIKARI
 	bool "Tavily Hikari"
-	default y
+	default n
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_CODEX_CONFIG
 	bool "Codex 配置"
 	default y
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_CODEX_AGENTS
 	bool "Codex AGENTS.md"
 	default y
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_PENNIX_SKILLS_EXTRA
 	bool "pennix-skills-extra"
 	default y
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_PENNIX_SKILLS
 	bool "pennix-skills"
 	default y
+	help
+		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 endmenu
+menu "Codex provider 与模型"
 
-menu "Codex 工作流偏好"
+choice PENNIX_CODEX_PROVIDER
+	prompt "Provider 配置"
+	default PENNIX_CODEX_PROVIDER_PRESERVE
+	help
+		静态 API Key 单独输入；不要求浏览器或 ChatGPT 登录。
+
+config PENNIX_CODEX_PROVIDER_PRESERVE
+	bool "保留现有 provider"
+
+config PENNIX_CODEX_PROVIDER_CUSTOM
+	bool "指定 Responses provider"
+
+endchoice
+
+config PENNIX_CODEX_PROVIDER_ID
+	string "Provider ID"
+	default "custom"
+	help
+		普通公开数据。仅在选择指定 provider 时应用；URL 必须为 HTTP(S)，不含凭据或查询参数。
+
+config PENNIX_CODEX_PROVIDER_NAME
+	string "Provider 显示名"
+	default "Custom"
+	help
+		普通公开数据。仅在选择指定 provider 时应用；URL 必须为 HTTP(S)，不含凭据或查询参数。
+
+config PENNIX_CODEX_PROVIDER_URL
+	string "Responses API base URL"
+	default ""
+	help
+		普通公开数据。仅在选择指定 provider 时应用；URL 必须为 HTTP(S)，不含凭据或查询参数。
+
+choice PENNIX_CODEX_AUTH
+	prompt "认证输入"
+	default PENNIX_CODEX_AUTH_PRESERVE
+	depends on PENNIX_CODEX_PROVIDER_CUSTOM
+	help
+		静态 API Key 从集中私有文件由 Codex 原生 auth command 读取；不使用浏览器登录。
+
+config PENNIX_CODEX_AUTH_PRESERVE
+	bool "保留原生有效认证"
+
+config PENNIX_CODEX_AUTH_API_KEY
+	bool "集中静态 API Key"
+
+endchoice
+
+choice PENNIX_CODEX_MODEL
+	prompt "默认模型"
+	default PENNIX_CODEX_MODEL_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_MODEL_NATIVE
+	bool "沿用原生模型"
+
+config PENNIX_CODEX_MODEL_CUSTOM
+	bool "指定模型 ID"
+
+endchoice
+
+config PENNIX_CODEX_MODEL_ID
+	string "模型 ID"
+	default ""
+	help
+		完整模型标识；不会修改上下文预算或固定模型目录。
+
+choice PENNIX_CODEX_REASONING
+	prompt "常规推理强度"
+	default PENNIX_CODEX_REASONING_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_REASONING_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_REASONING_LOW
+	bool "low"
+
+config PENNIX_CODEX_REASONING_MEDIUM
+	bool "medium"
+
+config PENNIX_CODEX_REASONING_HIGH
+	bool "high"
+
+config PENNIX_CODEX_REASONING_XHIGH
+	bool "xhigh"
+
+endchoice
+
+choice PENNIX_CODEX_PLAN_REASONING
+	prompt "规划推理强度"
+	default PENNIX_CODEX_PLAN_REASONING_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_PLAN_REASONING_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_PLAN_REASONING_LOW
+	bool "low"
+
+config PENNIX_CODEX_PLAN_REASONING_MEDIUM
+	bool "medium"
+
+config PENNIX_CODEX_PLAN_REASONING_HIGH
+	bool "high"
+
+config PENNIX_CODEX_PLAN_REASONING_XHIGH
+	bool "xhigh"
+
+endchoice
+
+choice PENNIX_CODEX_SUMMARY
+	prompt "推理摘要"
+	default PENNIX_CODEX_SUMMARY_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_SUMMARY_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_SUMMARY_AUTO
+	bool "auto"
+
+config PENNIX_CODEX_SUMMARY_CONCISE
+	bool "concise"
+
+config PENNIX_CODEX_SUMMARY_DETAILED
+	bool "detailed"
+
+config PENNIX_CODEX_SUMMARY_NONE
+	bool "none"
+
+endchoice
+
+choice PENNIX_CODEX_VERBOSITY
+	prompt "答复详细程度"
+	default PENNIX_CODEX_VERBOSITY_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_VERBOSITY_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_VERBOSITY_LOW
+	bool "low"
+
+config PENNIX_CODEX_VERBOSITY_MEDIUM
+	bool "medium"
+
+config PENNIX_CODEX_VERBOSITY_HIGH
+	bool "high"
+
+endchoice
+
+choice PENNIX_CODEX_APPROVAL
+	prompt "审批策略"
+	default PENNIX_CODEX_APPROVAL_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_APPROVAL_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_APPROVAL_ON_REQUEST
+	bool "on-request"
+
+config PENNIX_CODEX_APPROVAL_NEVER
+	bool "never"
+
+endchoice
+
+choice PENNIX_CODEX_SANDBOX
+	prompt "沙箱策略"
+	default PENNIX_CODEX_SANDBOX_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_SANDBOX_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_SANDBOX_READ_ONLY
+	bool "read-only"
+
+config PENNIX_CODEX_SANDBOX_WORKSPACE_WRITE
+	bool "workspace-write"
+
+config PENNIX_CODEX_SANDBOX_DANGER_FULL_ACCESS
+	bool "danger-full-access"
+
+endchoice
+
+choice PENNIX_CODEX_WEB_SEARCH
+	prompt "原生 Web 搜索"
+	default PENNIX_CODEX_WEB_SEARCH_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_WEB_SEARCH_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_WEB_SEARCH_DISABLED
+	bool "disabled"
+
+config PENNIX_CODEX_WEB_SEARCH_CACHED
+	bool "cached"
+
+config PENNIX_CODEX_WEB_SEARCH_LIVE
+	bool "live"
+
+endchoice
+
+choice PENNIX_CODEX_SERVICE_TIER
+	prompt "服务等级（fast 可能增加费用）"
+	default PENNIX_CODEX_SERVICE_TIER_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_SERVICE_TIER_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_SERVICE_TIER_DEFAULT
+	bool "default"
+
+config PENNIX_CODEX_SERVICE_TIER_FAST
+	bool "fast"
+
+endchoice
+
+choice PENNIX_CODEX_ALT_SCREEN
+	prompt "终端 alternate screen"
+	default PENNIX_CODEX_ALT_SCREEN_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_ALT_SCREEN_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_ALT_SCREEN_AUTO
+	bool "auto"
+
+config PENNIX_CODEX_ALT_SCREEN_ALWAYS
+	bool "always"
+
+config PENNIX_CODEX_ALT_SCREEN_NEVER
+	bool "never"
+
+endchoice
+
+choice PENNIX_CODEX_FILE_OPENER
+	prompt "文件引用打开方式"
+	default PENNIX_CODEX_FILE_OPENER_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_FILE_OPENER_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_FILE_OPENER_VSCODE
+	bool "vscode"
+
+config PENNIX_CODEX_FILE_OPENER_VSCODE_INSIDERS
+	bool "vscode-insiders"
+
+config PENNIX_CODEX_FILE_OPENER_WINDSURF
+	bool "windsurf"
+
+config PENNIX_CODEX_FILE_OPENER_CURSOR
+	bool "cursor"
+
+config PENNIX_CODEX_FILE_OPENER_NONE
+	bool "none"
+
+endchoice
+
+choice PENNIX_CODEX_HISTORY
+	prompt "历史保存策略"
+	default PENNIX_CODEX_HISTORY_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_HISTORY_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_HISTORY_SAVE_ALL
+	bool "save-all"
+
+config PENNIX_CODEX_HISTORY_NONE
+	bool "none"
+
+endchoice
+
+choice PENNIX_CODEX_HIDE_REASONING
+	prompt "隐藏 reasoning"
+	default PENNIX_CODEX_HIDE_REASONING_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_HIDE_REASONING_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_HIDE_REASONING_ON
+	bool "启用"
+
+config PENNIX_CODEX_HIDE_REASONING_OFF
+	bool "关闭"
+
+endchoice
+
+choice PENNIX_CODEX_RAW_REASONING
+	prompt "显示原始 reasoning"
+	default PENNIX_CODEX_RAW_REASONING_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_RAW_REASONING_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_RAW_REASONING_ON
+	bool "启用"
+
+config PENNIX_CODEX_RAW_REASONING_OFF
+	bool "关闭"
+
+endchoice
+
+choice PENNIX_CODEX_ANIMATIONS
+	prompt "终端动画"
+	default PENNIX_CODEX_ANIMATIONS_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_ANIMATIONS_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_ANIMATIONS_ON
+	bool "启用"
+
+config PENNIX_CODEX_ANIMATIONS_OFF
+	bool "关闭"
+
+endchoice
+
+choice PENNIX_CODEX_TOOLTIPS
+	prompt "提示"
+	default PENNIX_CODEX_TOOLTIPS_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_TOOLTIPS_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_TOOLTIPS_ON
+	bool "启用"
+
+config PENNIX_CODEX_TOOLTIPS_OFF
+	bool "关闭"
+
+endchoice
+
+choice PENNIX_CODEX_VIM
+	prompt "默认进入 Vim normal mode"
+	default PENNIX_CODEX_VIM_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_VIM_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_VIM_ON
+	bool "启用"
+
+config PENNIX_CODEX_VIM_OFF
+	bool "关闭"
+
+endchoice
+
+choice PENNIX_CODEX_AGENTS
+	prompt "Codex agents"
+	default PENNIX_CODEX_AGENTS_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_AGENTS_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_AGENTS_ON
+	bool "启用"
+
+config PENNIX_CODEX_AGENTS_OFF
+	bool "关闭"
+
+endchoice
+
+choice PENNIX_CODEX_MEMORIES
+	prompt "Codex memories"
+	default PENNIX_CODEX_MEMORIES_NATIVE
+	help
+		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
+
+config PENNIX_CODEX_MEMORIES_NATIVE
+	bool "沿用原生"
+
+config PENNIX_CODEX_MEMORIES_ON
+	bool "启用"
+
+config PENNIX_CODEX_MEMORIES_OFF
+	bool "关闭"
+
+endchoice
+
+config PENNIX_CODEX_HISTORY_LIMIT
+	bool "管理历史空间上限"
+	default n
+	help
+		会影响后续历史回收；原生历史内容仍归 Codex。
+
+config PENNIX_CODEX_HISTORY_BYTES
+	int "历史空间上限（bytes）"
+	default 104857600
+	range 1 2147483647
+	help
+		正整数 bytes；只在启用空间上限时应用。
 
 config PENNIX_CODEX_REMOTE_COMPACTION
-	bool "启用远程压缩"
+	bool "远程压缩"
 	default y
+	help
+		工作流基础偏好；保留其他未知字段和项目覆盖。
 
 config PENNIX_CODEX_HOOKS
-	bool "启用 hooks"
+	bool "Hooks"
 	default y
+	help
+		工作流基础偏好；保留其他未知字段和项目覆盖。
 
 config PENNIX_CODEX_GOALS
-	bool "启用 goals"
+	bool "Goals"
 	default y
+	help
+		工作流基础偏好；保留其他未知字段和项目覆盖。
 
-config PENNIX_CODEX_MEMORIES
-	bool "允许生命周期工具启用 memories"
-	default n
-
-config PENNIX_CODEX_AGENTS_ENABLED
-	bool "启用 Codex agents"
-	default n
-
-config PENNIX_CODEX_CONFIG_MODE_NATIVE
-	bool "保留 Codex 原生配置"
-	default y
+comment "颜色和高级 TUI/模型选项保留原生：当前官方配置未声明通用颜色开关"
 
 endmenu
+menu "全局集成与连接"
 
-menu "连接目标"
+config PENNIX_FASTCTX_MCP
+	bool "配置 FastCtx 全局 MCP"
+	default y
+	help
+		只配置所选 CODEX_HOME，不索引项目；使用 FastCtx 原生 apply/unapply。
+
+choice PENNIX_FASTCTX_TIER
+	prompt "FastCtx 资源档位"
+	default PENNIX_FASTCTX_TIER_STANDARD
+	help
+		由 FastCtx 解释资源档位及派生限制。
+
+config PENNIX_FASTCTX_TIER_COMPACT
+	bool "compact"
+
+config PENNIX_FASTCTX_TIER_STANDARD
+	bool "standard"
+
+config PENNIX_FASTCTX_TIER_HIGH
+	bool "high"
+
+endchoice
+
+config PENNIX_CODEGRAPH_MCP
+	bool "配置 CodeGraph 全局 MCP"
+	default y
+	help
+		只做全局入口；不初始化或重建项目索引。
 
 config PENNIX_TARGET_SIYUAN
-	bool "启用思源连接"
+	bool "配置 思源 连接"
 	default n
+	help
+			默认关闭；开启后须提供 URL 等普通数据，并按需填写集中凭据。
 
 config PENNIX_TARGET_CCH
-	bool "启用 CCH 连接"
+	bool "配置 CCH 连接"
 	default n
+	help
+			默认关闭；开启后须提供 URL 等普通数据，并按需填写集中凭据。
 
 config PENNIX_TARGET_HIKARI
-	bool "启用 Hikari 连接"
+	bool "配置 Tavily Hikari 连接"
 	default n
+	help
+			默认关闭；开启后须提供 URL 等普通数据，并按需填写集中凭据。
 
 config PENNIX_TARGET_GROK
-	bool "启用 Grok Search 连接"
+	bool "配置 Grok provider 连接"
 	default n
+	help
+			默认关闭；开启后须提供 URL 等普通数据，并按需填写集中凭据。
 
 config PENNIX_TARGET_GROK_TAVILY
-	bool "启用 Grok Tavily 扩展"
+	bool "配置 Grok Tavily 扩展 连接"
 	default n
+	help
+			默认关闭；开启后须提供 URL 等普通数据，并按需填写集中凭据。
 
 config PENNIX_TARGET_WINDSURF
-	bool "启用 Windsurf Code Search 连接"
+	bool "配置 Windsurf credential 连接"
 	default n
+	help
+			默认关闭；开启后须提供 URL 等普通数据，并按需填写集中凭据。
+
+config PENNIX_SIYUAN_URL
+	string "思源 API URL"
+	default ""
+	help
+		公开数据；秘密放在集中 secrets.toml。关闭连接保留输入。
+
+config PENNIX_CCH_URL
+	string "CCH API URL"
+	default ""
+	help
+		公开数据；秘密放在集中 secrets.toml。关闭连接保留输入。
+
+config PENNIX_SIYUAN_NOTEBOOK
+	string "思源默认笔记本 ID"
+	default ""
+	help
+		普通数据；启用思源连接时必填，格式由思源 owner 校验。
+
+config PENNIX_HIKARI_URL
+	string "Hikari base URL"
+	default ""
+	help
+		公开数据；秘密放在集中 secrets.toml。关闭连接保留输入。
+
+config PENNIX_GROK_URL
+	string "Grok base URL"
+	default ""
+	help
+		公开数据；秘密放在集中 secrets.toml。关闭连接保留输入。
+
+config PENNIX_GROK_MODEL
+	string "Grok 模型 ID"
+	default "grok-4"
+	help
+		公开数据；秘密放在集中 secrets.toml。关闭连接保留输入。
+
+config PENNIX_GROK_TAVILY_URL
+	string "Grok Tavily endpoint"
+	default ""
+	help
+		公开数据；秘密放在集中 secrets.toml。关闭连接保留输入。
 
 endmenu
+menu "Paseo 运行与 relay"
 
-menu "Paseo 与服务"
+config PENNIX_PASEO_RUN
+	bool "保持 Paseo daemon 运行"
+	default n
+	help
+		配置写入全部完成后才激活；默认不启动服务。
 
-choice
+config PENNIX_PASEO_LISTEN
+	string "Paseo 监听地址"
+	default "127.0.0.1:6767"
+	help
+		host:port；默认仅回环。修改配置保留 daemon 身份和会话。
+
+choice PENNIX_PASEO_AUTOSTART
 	prompt "Paseo 自启动"
 	default PENNIX_PASEO_AUTOSTART_OFF
+	help
+		仅撤回自身创建或显式接管的 unit/linger，不关闭共享 linger。
 
 config PENNIX_PASEO_AUTOSTART_OFF
 	bool "关闭"
@@ -160,47 +711,78 @@ config PENNIX_PASEO_AUTOSTART_LOGIN
 	bool "用户登录时启动"
 
 config PENNIX_PASEO_AUTOSTART_LINGER
-	bool "无登录时启动（需要显式启用 linger）"
+	bool "无登录常驻（需要 linger）"
 
 endchoice
 
 config PENNIX_PASEO_RELAY
-	bool "登记现有 NAS relay"
-	depends on PENNIX_COMPONENT_PASEO_CLI
+	bool "配置 daemon relay"
 	default n
 	help
-		仅登记既有受信 SSH 路径；不创建镜像、修改 Compose 或配置 SSH 密钥。
+		仅设置 daemon 的 relay 字段；远端表项管理另选。
 
 config PENNIX_PASEO_RELAY_ENDPOINT
-	string "Paseo relay 内部 endpoint"
+	string "relay endpoint"
 	default ""
-	depends on PENNIX_PASEO_RELAY
+	help
+		host:port，无协议前缀；关闭 relay 后仍保留数据。
 
 config PENNIX_PASEO_RELAY_PUBLIC_ENDPOINT
-	string "Paseo relay 公网 endpoint"
+	string "relay public endpoint"
 	default ""
-	depends on PENNIX_PASEO_RELAY
+	help
+		host:port，无协议前缀；关闭 relay 后仍保留数据。
 
 config PENNIX_PASEO_RELAY_TLS
-	bool "relay 使用 TLS"
+	bool "relay TLS"
 	default y
-	depends on PENNIX_PASEO_RELAY
+	help
+		连接使用 TLS；输入不会因关闭 relay 而丢失。
 
 config PENNIX_PASEO_RELAY_PUBLIC_TLS
-	bool "relay 公网使用 TLS"
+	bool "relay public TLS"
 	default y
-	depends on PENNIX_PASEO_RELAY
+	help
+		连接使用 TLS；输入不会因关闭 relay 而丢失。
+
+config PENNIX_PASEO_RELAY_REGISTER
+	bool "自动登记现有 relay 允许表"
+	default n
+	help
+		仅管理选定 daemon 的条目；关闭时不访问远端管理面。
+
+config PENNIX_RELAY_NAS_SSH
+	string "受信 NAS SSH 目标"
+	default "nas"
+	help
+		已有 SSH config 目标；不创建凭据。
+
+config PENNIX_RELAY_ROUTER_SSH
+	string "NAS 内受信 router SSH 目标"
+	default "home-main-router"
+	help
+		已有 SSH config 目标；登记表路径固定，不接受任意命令。
+
+endmenu
+
+menu "本次更新与验证"
+
+config PENNIX_ADOPT_EXISTING_PACKAGES
+	bool "明确接管已安装的外部包"
+	default n
+	help
+		默认保留外部安装的包。仅在本次 apply 显式开启后登记当前准确包身份。
 
 config PENNIX_UPDATE_COMPONENTS
-	bool "apply 时更新已选组件"
+	bool "更新已选择组件"
 	default n
+	help
+		独立选择；默认关闭。本地一致性和必要服务核验始终执行。
 
 config PENNIX_SYSTEM_UPGRADE
-	bool "执行完整系统升级"
+	bool "完整系统升级"
 	default n
-
-config PENNIX_REAL_SMOKE_TEST
-	bool "运行真实功能 smoke test"
-	default n
+	help
+		独立选择；默认关闭。本地一致性和必要服务核验始终执行。
 
 endmenu

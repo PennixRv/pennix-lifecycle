@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
+import shlex
 from pathlib import Path
+import owned_files as files
 
 
 BEGIN = "# pennix-lifecycle:npm-path:begin"
@@ -21,7 +21,7 @@ def _target() -> Path:
 
 def _block(prefix: str) -> str:
     bin_path = str(Path(prefix).expanduser() / "bin")
-    return f'{BEGIN}\npath=("{bin_path}" $path)\n{END}'
+    return f"{BEGIN}\npath=({shlex.quote(bin_path)} $path)\n{END}"
 
 
 def _replace(contents: str, block: str) -> str:
@@ -29,8 +29,7 @@ def _replace(contents: str, block: str) -> str:
     if count != (0, 0) and count != (1, 1):
         raise PathEnvError("zshrc 中的生命周期 PATH 标记不完整")
     if count == (0, 0):
-        bin_path = block.splitlines()[1].split('"')[1]
-        if bin_path in contents:
+        if block.splitlines()[1] in contents:
             return contents
         return contents.rstrip("\n") + "\n\n" + block + "\n"
     start = contents.index(BEGIN)
@@ -40,29 +39,22 @@ def _replace(contents: str, block: str) -> str:
 
 def apply(prefix: str) -> str:
     path = _target()
-    before = path.read_text(encoding="utf-8") if path.exists() else ""
+    raw = files.read(path)
+    before = raw.decode("utf-8") if raw is not None else ""
     after = _replace(before, _block(prefix))
     if after == before:
         return "no-op"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(after)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    mode = path.stat().st_mode & 0o777 if raw is not None else 0o600
+    files.replace(path, after.encode(), raw, mode=mode)
     return "changed"
 
 
 def remove() -> str:
     path = _target()
-    if not path.exists():
+    raw = files.read(path)
+    if raw is None:
         return "no-op"
-    before = path.read_text(encoding="utf-8")
+    before = raw.decode("utf-8")
     if BEGIN not in before and END not in before:
         return "preserved"
     if before.count(BEGIN) != 1 or before.count(END) != 1:
@@ -70,5 +62,5 @@ def remove() -> str:
     start = before.index(BEGIN)
     finish = before.index(END, start) + len(END)
     after = before[:start].rstrip("\n") + before[finish:]
-    path.write_text(after.lstrip("\n"), encoding="utf-8")
+    files.replace(path, after.lstrip("\n").encode(), raw, mode=path.stat().st_mode & 0o777)
     return "changed"
