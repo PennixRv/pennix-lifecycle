@@ -117,12 +117,19 @@ def _relay_plan(args: argparse.Namespace, kconf: config_model.StrictKconfig) -> 
     try:
         relay_owner.validate_config(endpoint, public_endpoint)
         if not register:
+            paseo = Path(shutil.which("paseo") or Path.home() / ".local/bin/paseo")
+            state = relay_owner.inspect_daemon(
+                paseo, paseo_home, endpoint, public_endpoint,
+                config_model.config_value(kconf, "PENNIX_PASEO_RELAY_TLS") == "y",
+                config_model.config_value(kconf, "PENNIX_PASEO_RELAY_PUBLIC_TLS") == "y",
+            )
             return {
                 "selected": True,
                 "register": False,
-                "action": "configure",
-                "state": "unverified",
-                "detail": "仅配置 daemon relay，不访问远端登记表",
+                "action": "keep" if state == "current" else "configure",
+                "state": state,
+                "detail": "本地 daemon relay 已核验；不访问远端登记表" if state == "current"
+                else "仅配置本地 daemon relay，不访问远端登记表",
             }
         state = relay_owner.inspect(paseo_home, nas_ssh=nas_ssh, router_ssh=router_ssh)
         return {

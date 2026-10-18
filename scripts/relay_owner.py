@@ -207,12 +207,12 @@ def validate_config(endpoint: str, public_endpoint: str) -> None:
         raise RelayError("relay endpoint 必须是 host:port 或 [IPv6]:port")
 
 
-def configure_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoint: str, tls: bool, public_tls: bool) -> str:
-    validate_config(endpoint, public_endpoint)
+def _daemon_values(paseo: Path, paseo_home: Path) -> dict[str, object]:
     if not paseo.is_file():
         raise RelayError("Paseo 可执行文件不存在")
-
-    def get_value(path: str):
+    values = {}
+    for path in ("daemon.relay.enabled", "daemon.relay.endpoint", "daemon.relay.publicEndpoint",
+                 "daemon.relay.useTls", "daemon.relay.publicUseTls"):
         result = subprocess.run(
             [str(paseo), "daemon", "config", "get", path, "--home", str(paseo_home), "--json"],
             capture_output=True, text=True, check=False, timeout=60,
@@ -225,7 +225,29 @@ def configure_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoi
             raise RelayError(f"Paseo relay 配置回执无效: {path}") from error
         if not isinstance(response, dict) or not isinstance(response.get("set"), bool):
             raise RelayError(f"Paseo relay 配置回执无效: {path}")
-        return response["value"] if response["set"] else _MISSING
+        values[path] = response["value"] if response["set"] else _MISSING
+    return values
+
+
+def inspect_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoint: str,
+                   tls: bool, public_tls: bool) -> str:
+    validate_config(endpoint, public_endpoint)
+    values = _daemon_values(paseo, paseo_home)
+    expected = {
+        "daemon.relay.enabled": True,
+        "daemon.relay.endpoint": endpoint,
+        "daemon.relay.publicEndpoint": public_endpoint,
+        "daemon.relay.useTls": tls,
+        "daemon.relay.publicUseTls": public_tls,
+    }
+    if values == expected:
+        return "current"
+    return "missing" if all(value is _MISSING for value in values.values()) else "drifted"
+
+
+def configure_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoint: str, tls: bool, public_tls: bool) -> str:
+    validate_config(endpoint, public_endpoint)
+    _daemon_values(paseo, paseo_home)
 
     def set_value(path: str, value: str, literal: bool) -> None:
         command = [str(paseo), "daemon", "config", "set", path, value, "--home", str(paseo_home)]
@@ -248,14 +270,9 @@ def configure_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoi
         if result.returncode:
             raise RelayError(f"Paseo relay 配置恢复失败: {path}")
 
-    paths = [
-        "daemon.relay.enabled",
-        "daemon.relay.endpoint",
-        "daemon.relay.publicEndpoint",
-        "daemon.relay.useTls",
-        "daemon.relay.publicUseTls",
-    ]
-    baseline = {path: get_value(path) for path in paths}
+    paths = ["daemon.relay.enabled", "daemon.relay.endpoint", "daemon.relay.publicEndpoint",
+             "daemon.relay.useTls", "daemon.relay.publicUseTls"]
+    baseline = _daemon_values(paseo, paseo_home)
     try:
         set_value("daemon.relay.enabled", "false", False)
         set_value("daemon.relay.endpoint", endpoint, True)
@@ -270,11 +287,11 @@ def configure_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoi
             "daemon.relay.publicUseTls": public_tls,
         }
         for path, value in expected.items():
-            observed = get_value(path)
+            observed = _daemon_values(paseo, paseo_home)[path]
             if observed is _MISSING or observed != value:
                 raise RelayError(f"Paseo relay 配置回读不一致: {path}")
         set_value("daemon.relay.enabled", "true", False)
-        if get_value("daemon.relay.enabled") is not True:
+        if _daemon_values(paseo, paseo_home)["daemon.relay.enabled"] is not True:
             raise RelayError("Paseo relay enabled 配置回读不一致")
     except BaseException as error:
         try:

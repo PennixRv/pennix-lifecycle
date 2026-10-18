@@ -325,7 +325,11 @@ class ConfigModelTests(unittest.TestCase):
                 relay_owner.configure_daemon(paseo, self.home / "paseo", "relay:1", "public:2", True, False),
                 "changed",
             )
-        self.assertTrue(state["daemon.relay.enabled"])
+            self.assertTrue(state["daemon.relay.enabled"])
+            self.assertEqual(
+                relay_owner.inspect_daemon(paseo, self.home / "paseo", "relay:1", "public:2", True, False),
+                "current",
+            )
 
 
 class CliTests(unittest.TestCase):
