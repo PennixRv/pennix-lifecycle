@@ -77,6 +77,19 @@ class ConfigModelTests(unittest.TestCase):
         self.assertNotIn("package", cch)
         self.assertIn("not published", cch["native_owner_reason"])
 
+    def test_catalog_keeps_hikari_remote_service_native_and_local_owner_in_skill(self) -> None:
+        catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
+        target = catalog["configuration_targets"]["hikari"]
+        component = catalog["components"]["tavily-hikari"]
+        self.assertEqual(target["owner"], "pennix-tavily-search")
+        self.assertEqual(target["component"], "tavily-hikari")
+        self.assertEqual(
+            target["command"],
+            ["python3", "$CODEX_HOME/skills/pennix-skills/pennix-tavily-search/scripts/connection.py"],
+        )
+        self.assertEqual(component["delivery"], "native")
+        self.assertIn("NAS Hikari service", component["native_owner_reason"])
+
     def test_catalog_static_template_revisions_match_delivered_files(self) -> None:
         catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
         for component in catalog["components"].values():

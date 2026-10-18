@@ -28,9 +28,9 @@
     },
     "hikari": {
       "select": "PENNIX_TARGET_HIKARI",
-      "owner": "tavily-hikari",
+      "owner": "pennix-tavily-search",
       "component": "tavily-hikari",
-      "command": ["tvly-hikari"],
+      "command": ["python3", "$CODEX_HOME/skills/pennix-skills/pennix-tavily-search/scripts/connection.py"],
       "values": {
         "base_url": "PENNIX_HIKARI_URL"
       },
@@ -446,7 +446,7 @@
         "reconcile": "not-applicable"
       },
       "project_init": "not-applicable",
-      "native_owner_reason": "Hikari wrapper has no available source-owned non-interactive configuration contract; disabled by default and never installed or removed by lifecycle.",
+      "native_owner_reason": "NAS Hikari service and the upstream tvly-hikari wrapper remain native-owner; lifecycle only probes the existing wrapper and delegates local connection-file ownership to pennix-tavily-search.",
       "probe": "tvly-hikari",
       "version_args": [
         "--version"
@@ -535,7 +535,7 @@
         "directory": "pennix-skills",
         "source": {
           "repo": "PennixRv/pennix-skills",
-          "ref": "9168c68ecf9e25e06f72706992629c5f0f7d5875",
+          "ref": "22bbaa7d6ca699f24ddb55d8fdbda9331a49318a",
           "manifest": "collection.json"
         }
       }
