@@ -11,3 +11,5 @@
 固定来源：Context Mode `1.0.169-pennix.1`；主集合 `9168c68ecf9e25e06f72706992629c5f0f7d5875`；extra `9a693a877fd7517c2201a5af4e65a9e317777c6c`。制品验收与当前 WSL 结果由根任务继续记录。
 
 提交后复核发现单组件 `repair` 只处理包、首次接入遗漏 configure；已修正为包成功后配置该组件已选中的 native integration，配置失败继续保留原始错误，不回放全局组件或 relay。新增公共入口回归调用真实 native adapter；实际交付改用 `v0.2.1`，不消费 `v0.2.0`。
+
+正式制品组合发现 extra 仓库根指令符号链接使安全提取拒绝。由 extra publisher 用 export-ignore 排除未交付链接，远端归档验证通过。最终来源改为 `c64c2b4f0aac9797a32bef2bf2b0554f67dfd00d`，catalog 修订发行 `v0.2.2`；不放宽消费者提取规则，后续只部署此修订版。
