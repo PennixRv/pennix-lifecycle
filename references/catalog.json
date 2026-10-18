@@ -593,7 +593,7 @@
         "directory": "pennix-skills",
         "source": {
           "repo": "PennixRv/pennix-skills",
-          "ref": "12722df96bf30dfb412572827e29b8fb624e6458",
+          "ref": "aa4a81a470905f9e6e7dc1e5b66082692808ae86",
           "manifest": "collection.json"
         }
       }
