@@ -25,4 +25,6 @@
 ## 实际交付
 
 - 当前源码差异仅含 catalog pin 与 `VERSION` 两处；完整 unittest 71 项通过，`bash -n bootstrap.sh`、catalog JSON 解析和 `git diff --check` 均通过。
-- 组件提交、发行包构建、远端 CI/Release 和正式资产摘要仍待完成；未通过这些门禁前不向根任务交付固定来源。
+- lifecycle `v0.2.19` 发行源码提交为 `cbda86fe8af60b411341c80e2bb484a78cf76401`，本地可复现发行包 SHA-256 为 `4b9dcf3628e248971b7212bbc3d6df8281859a015aaa502c0564092b1dd0b5dd`。远端标签解析到同一提交。
+- [发行 CI 39251764214](https://github.com/PennixRv/pennix-lifecycle/actions/runs/39251764214) 成功；[GitHub Release v0.2.19](https://github.com/PennixRv/pennix-lifecycle/releases/tag/v0.2.19) 正式资产的 tarball SHA-256 与本地构建完全一致，Release 校验清单验证通过。
+- 此任务记录在发行后以独立文档提交补齐；该提交不改变 `v0.2.19` 已验证源码资产。根任务固定组件 gitlink 并继续执行本机安装与 daemon 验收。
