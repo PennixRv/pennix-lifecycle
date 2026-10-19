@@ -23,4 +23,8 @@
 
 ## 实际交付
 
-- 待实施与正式发行后补记。
+- catalog 仅将 `codegraph-cli.approved_version` 更新为 `1.6.2-pennix.2`，Lifecycle `VERSION` 更新为 `0.2.20`；未改其他组件 pin、升级逻辑、安装器、receipt 或用户配置。
+- Lifecycle `main` 源码提交为 `8204604597e4d82ae79e7288f65a3b4ee871e0ff`。完整 unittest 71 项通过；`bash -n bootstrap.sh`、catalog JSON/version 解析和 `git diff --check` 通过。
+- 从该提交两次独立构建的发行 tarball 均为 63,624 bytes、SHA-256 `66a6358bb435c4dea57219b574612fa426a9e8b10922149f2661a71ec58a29ac`，归档内容与版本及固定值吻合。
+- `v0.2.20` 已推送且解引用到源码提交；[发行 CI 39292773320](https://github.com/PennixRv/pennix-lifecycle/actions/runs/39292773320) 的源码验证、构建和发布 job 均成功。[GitHub Release v0.2.20](https://github.com/PennixRv/pennix-lifecycle/releases/tag/v0.2.20) 正式 tarball SHA-256 为 `66a6358bb435c4dea57219b574612fa426a9e8b10922149f2661a71ec58a29ac`，下载归档的 VERSION/catalog 字段和 31 项归档清单检查通过。
+- 发行后组件任务记录作为独立提交补齐，不改变已验证的 tag 源码资产；根任务继续执行正式 Lifecycle 工具安装和 CodeGraph 本机验收。
