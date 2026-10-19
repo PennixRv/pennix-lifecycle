@@ -170,7 +170,7 @@
     },
     "context-mode": {
       "delivery": "package",
-      "approved_version": "1.0.169-pennix.2",
+      "approved_version": "1.0.169-pennix.6",
       "source": "PennixRv/context-mode npm package",
       "owner": "context-mode",
       "scope": "global",
