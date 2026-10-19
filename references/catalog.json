@@ -206,7 +206,7 @@
     },
     "codegraph-cli": {
       "delivery": "package",
-      "approved_version": "1.6.2-pennix.1",
+      "approved_version": "1.6.2-pennix.2",
       "source": "PennixRv/codegraph Linux x64 npm fork",
       "owner": "codegraph",
       "scope": "global/project",
