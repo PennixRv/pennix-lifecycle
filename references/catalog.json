@@ -545,7 +545,7 @@
       "adapter": "codex-agents",
       "template": {
         "name": "AGENTS.md.install",
-        "revision": "sha256:8e49e603a08cf1f46cad5a57c0e84714847cbf2354d9c227740242f1efa54e2d"
+        "revision": "sha256:3b784afda5f904f7fdf07e0247f654b6e329e479dad6b60ce696cf44f2b852e1"
       }
     },
     "pennix-skills-extra": {
@@ -593,7 +593,7 @@
         "directory": "pennix-skills",
         "source": {
           "repo": "PennixRv/pennix-skills",
-        "ref": "91ea7fb47033bc6321a6ad193a01a808b2bf3bc6",
+        "ref": "c092a018c81e52c01d671a2fe1ecb1a4c71a66fe",
           "manifest": "collection.json"
         }
       }
