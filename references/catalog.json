@@ -170,7 +170,7 @@
     },
     "context-mode": {
       "delivery": "package",
-      "approved_version": "1.0.169-pennix.6",
+      "approved_version": "1.0.169-pennix.7",
       "source": "PennixRv/context-mode npm package",
       "owner": "context-mode",
       "scope": "global",
@@ -593,7 +593,7 @@
         "directory": "pennix-skills",
         "source": {
           "repo": "PennixRv/pennix-skills",
-        "ref": "991bfe96217dc6066044bf4f82fadc20f20dc9d2",
+        "ref": "91ea7fb47033bc6321a6ad193a01a808b2bf3bc6",
           "manifest": "collection.json"
         }
       }
