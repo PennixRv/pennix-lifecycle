@@ -124,7 +124,8 @@ def _archive_json(archive: Path, suffix: str) -> dict:
     try:
         with tarfile.open(archive, "r:*") as source:
             matches = [item for item in source.getmembers()
-                       if item.isfile() and PurePosixPath(item.name).as_posix().endswith("/" + suffix)]
+                       if item.isfile() and (PurePosixPath(item.name).as_posix() == suffix
+                                             or PurePosixPath(item.name).as_posix().endswith("/" + suffix))]
             if len(matches) != 1 or matches[0].size > 1024 * 1024:
                 raise CandidateError(f"archive identity file is missing or ambiguous: {suffix}")
             stream = source.extractfile(matches[0])

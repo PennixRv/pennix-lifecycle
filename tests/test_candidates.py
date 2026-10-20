@@ -1,8 +1,11 @@
 import base64
 import hashlib
+import io
 import json
 from pathlib import Path
 import sys
+import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -12,6 +15,16 @@ import candidates
 
 
 class CandidateTests(unittest.TestCase):
+    @staticmethod
+    def _archive_bytes(entries):
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w:gz") as archive:
+            for name, value in entries:
+                member = tarfile.TarInfo(name)
+                member.size = len(value)
+                archive.addfile(member, io.BytesIO(value))
+        return output.getvalue()
+
     def test_beta_tag_resolves_context_mode_pennix_8_and_lock_digest(self):
         raw = b"context-mode pennix beta package"
         metadata = {"name": "@pennixrv/context-mode", "version": "1.0.169-pennix.8", "dist": {
@@ -75,6 +88,42 @@ class CandidateTests(unittest.TestCase):
         locked = candidates.lock_entry(candidate)
         self.assertEqual(locked["sha256"], digest)
         self.assertEqual(candidates._check_target(candidate, locked), candidate)
+
+    def test_archive_json_accepts_standard_npm_root_and_prefixed_root(self):
+        payload = json.dumps({"name": "example", "version": "2.0.0"}).encode()
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "package.tgz"
+            archive.write_bytes(self._archive_bytes([("package/package.json", payload)]))
+            self.assertEqual(candidates._archive_json(archive, "package/package.json")["version"], "2.0.0")
+
+            archive.write_bytes(self._archive_bytes([("release/package/package.json", payload)]))
+            self.assertEqual(candidates._archive_json(archive, "package/package.json")["name"], "example")
+
+    def test_release_candidate_rejects_duplicate_or_wrong_identity(self):
+        payload = json.dumps({"name": "wrong", "version": "2.0.0"}).encode()
+        archive_bytes = self._archive_bytes([("package/package.json", payload)])
+        component = {"lock_source": "release:example", "package": {
+            "name": "example", "asset": {"repo": "example/repo", "name_prefix": "pkg-", "suffix": ".tgz"}}}
+        release = {"tagName": "v2.0.0", "assets": [{"name": "pkg-2.0.0.tgz"}]}
+
+        def download(command, **_kwargs):
+            Path(command[-1]).write_bytes(archive_bytes)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(candidates, "_gh_release", return_value=release), \
+             patch.object(candidates, "_run", side_effect=download):
+            with self.assertRaises(candidates.CandidateError):
+                candidates.resolve_release(component, Path(directory))
+
+            duplicate = self._archive_bytes([
+                ("package/package.json", json.dumps({"name": "example", "version": "2.0.0"}).encode()),
+                ("package/package.json", json.dumps({"name": "example", "version": "2.0.0"}).encode()),
+            ])
+            archive = Path(directory) / "duplicate.tgz"
+            archive.write_bytes(duplicate)
+            with self.assertRaises(candidates.CandidateError):
+                candidates._archive_json(archive, "package/package.json")
 
 
 if __name__ == "__main__":
