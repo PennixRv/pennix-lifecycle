@@ -96,6 +96,31 @@ class LocalClientTests(unittest.TestCase):
                          "changed; preserved adjacent user data")
         self.assertEqual((self.home / ".client/client").read_bytes(), replacement.read_bytes())
 
+    def test_legacy_url_receipt_migrates_to_a_matching_ref_lock(self):
+        component = {"id": "client", "lock_source": "git:example/client:client",
+                     "client": {"root": "$HOME/.client", "source": {"repo": "example/client",
+                                 "path": "client", "archive": False}, "paths": ["client"],
+                                "commands": {"client": "client"}}}
+        target = self.home / ".client"
+        target.mkdir()
+        asset = target / "client"
+        asset.write_bytes(self.content)
+        command = self.home / ".local/bin/client"
+        command.parent.mkdir(parents=True)
+        command.symlink_to(asset)
+        ref = "a" * 40
+        digest = hashlib.sha256(self.content).hexdigest()
+        record = {"schema": 1, "root": str(target),
+                  "source": {"url": f"https://raw.githubusercontent.com/example/client/{ref}/client",
+                             "archive": False, "sha256": digest},
+                  "files": {"client": {"digest": digest, "mode": asset.stat().st_mode & 0o777}},
+                  "commands": {"client": "client"}}
+        owned_files.replace(local_clients.receipt_path("client"), owned_files.json_bytes(record), None)
+
+        component["_lock_target"] = local_clients.lock_migration("client", component)
+        self.assertEqual(component["_lock_target"], {"source": component["lock_source"], "ref": ref, "sha256": digest})
+        self.assertEqual(local_clients.inspect("client", component)[0], "match")
+
     def test_hikari_staging_generates_wrapper_without_running_upstream_installer(self):
         config = self.home / ".config/tavily-hikari-cli"
         config.mkdir(parents=True)

@@ -48,6 +48,41 @@ class LifecycleStateTests(unittest.TestCase):
             self.assertEqual(engine._plugin_status(component, Path("/tmp/codex"))[0], "match")
             self.assertEqual(snapshot.call_count, 2)
 
+    def test_plugin_tree_allows_only_codex_marketplace_install_marker(self):
+        root = Path("/tmp/marketplace")
+        for output, expected in (("", True), ("?? .codex-marketplace-install.json\n", True),
+                                 ("?? local-plugin.json\n", False), (" M .codex-plugin/plugin.json\n", False)):
+            with self.subTest(output=output), patch.object(engine.subprocess, "run",
+                    return_value=SimpleNamespace(returncode=0, stdout=output)):
+                self.assertEqual(engine._plugin_tree_clean(root), expected)
+
+    def test_package_lock_migration_accepts_legacy_pacman_receipt_version(self):
+        component = {"delivery": "package", "lock_source": "arch:extra/tmux",
+                     "package": {"source": "official", "name": "tmux"}, "probe": "tmux"}
+        receipt = {"source": "official", "name": "tmux", "version": "3.8"}
+        with patch.object(engine, "_package_receipt", return_value=receipt), \
+             patch.object(engine, "package_identity", return_value={"manager": "pacman", "name": "tmux",
+                                                                     "version": "3.8-1", "command": "/usr/bin/tmux"}), \
+             patch.object(engine, "_version", return_value="3.8"):
+            self.assertEqual(engine.package_lock_migration("tmux", component),
+                             {"source": "arch:extra/tmux", "version": "3.8-1"})
+            self.assertTrue(engine.package_owned("tmux", component, "3.8-1"))
+
+    def test_private_release_receipt_maps_to_declared_github_release_source(self):
+        component = {"delivery": "package",
+                     "lock_source": "github-release:PennixRv/cch-codex-tmux-status:cch-codex-tmux-status-*.tgz",
+                     "package": {"source": "npm", "name": "cch-codex-tmux-status",
+                                 "asset": {"private": True, "repo": "PennixRv/cch-codex-tmux-status",
+                                           "name_prefix": "cch-codex-tmux-status-", "suffix": ".tgz"}},
+                     "probe": "cch-codex-tmux-status"}
+        receipt = {"source": "npm", "name": "cch-codex-tmux-status", "version": "0.1.47"}
+        with patch.object(engine, "_package_receipt", return_value=receipt), \
+             patch.object(engine, "package_identity", return_value={"manager": "npm", "name": "cch-codex-tmux-status",
+                                                                     "version": "0.1.47", "command": "/home/penn/.local/bin/cch"}), \
+             patch.object(engine, "_version", return_value="0.1.47"):
+            self.assertEqual(engine.package_lock_migration("cch-status", component),
+                             {"source": component["lock_source"], "version": "0.1.47"})
+
     def test_plugin_operation_refreshes_same_source_marketplace(self):
         component = {"lock_source": "codex-marketplace:example", "_candidate_target": {"source": "codex-marketplace:example", "version": "5.3.2", "ref": "b" * 40},
                      "plugin": {"id": "ponytail@ponytail",

@@ -108,9 +108,11 @@ def inspect(key: str, component: dict) -> tuple[str, str]:
         if not _source_matches(key, component, record):
             return "blocked", "本地客户端来源归属不一致"
         lock = component.get("_lock_target") or component.get("_candidate_target")
-        if isinstance(lock, dict) and any(record["source"].get(key) != lock.get(key)
-                                          for key in ("ref", "sha256") if key in lock):
-            return "outdated", "本地客户端需要更新到锁定身份"
+        if isinstance(lock, dict):
+            migrated = lock_migration(key, component)
+            if migrated is None or any(migrated.get(key) != lock.get(key)
+                                       for key in ("ref", "sha256") if key in lock):
+                return "outdated", "本地客户端需要更新到锁定身份"
         return "match", "verified local runtime"
     except (OSError, ValueError, files.OwnershipError, ClientError, skill_collections.CollectionError) as error:
         return "blocked", str(error)

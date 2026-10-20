@@ -324,15 +324,14 @@ def _plugin_snapshot(component: dict[str, Any], codex_home: Path) -> dict[str, s
         root = Path(market.get("root", ""))
         head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
                               timeout=15, check=False)
-        dirty = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "status", "--porcelain",
-                                "--untracked-files=all"], capture_output=True, text=True, timeout=15, check=False)
+        clean = _plugin_tree_clean(root)
         try:
             manifest = json.loads((root / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
         version = item.get("version")
         name = plugin["id"].split("@", 1)[0]
-        if (head.returncode or dirty.returncode or dirty.stdout.strip()
+        if (head.returncode or not clean
                 or not re.fullmatch(r"[0-9a-f]{40}", head.stdout.strip())
                 or not isinstance(version, str) or manifest.get("name") != name
                 or manifest.get("version") != version):
@@ -432,13 +431,19 @@ def _plugin_refs(codex: str, home: Path, plugin: dict, version: str) -> bool:
         roots = [Path(market["root"]), home / "plugins/cache" / marketplace / name / version]
         for root in roots:
             head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=15, check=False)
-            dirty = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "status", "--porcelain", "--untracked-files=no"],
-                                   capture_output=True, text=True, timeout=15, check=False)
-            if head.returncode or dirty.returncode or dirty.stdout.strip() or head.stdout.strip() != plugin["marketplace"]["ref"]:
+            if head.returncode or not _plugin_tree_clean(root) or head.stdout.strip() != plugin["marketplace"]["ref"]:
                 return False
         return result.returncode == 0
     except (ValueError, KeyError, TypeError, StopIteration):
         return False
+
+
+def _plugin_tree_clean(root: Path) -> bool:
+    result = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "status", "--porcelain",
+                             "--untracked-files=all"], capture_output=True, text=True, timeout=15, check=False)
+    # Codex writes this marketplace ownership marker beside otherwise immutable source files.
+    return result.returncode == 0 and all(line == "?? .codex-marketplace-install.json"
+                                          for line in result.stdout.splitlines())
 
 
 def _prepare_plugin_marketplace(codex: str, home: Path, marketplace: dict[str, Any]) -> None:
@@ -604,10 +609,14 @@ def package_owned(
     receipt = _package_receipt(component_id, component)
     if receipt is None:
         return False
-    package_identity(component)
+    identity = package_identity(component)
     if observed is None:
         observed = probe_component(component, codex_home)[1]
-    return observed is not None and receipt["version"] == observed
+    if observed is not None and receipt["version"] == observed:
+        return True
+    package = component["package"]
+    return (package.get("source") in {"official", "aur"}
+            and _version(component, identity["command"]) == receipt["version"])
 
 
 def package_lock_migration(component_id: str, component: dict[str, Any]) -> dict[str, str] | None:
@@ -619,9 +628,15 @@ def package_lock_migration(component_id: str, component: dict[str, Any]) -> dict
     source = package.get("source")
     lock_source = component.get("lock_source")
     manager = {"npm": "npm", "uv": "uv", "official": "pacman", "aur": "pacman"}.get(source)
+    private_release = package.get("asset", {}).get("private") is True
+    release_lock_source = (f"github-release:{package['asset'].get('repo')}:{package['asset'].get('name_prefix')}*"
+                           f"{package['asset'].get('suffix')}" if private_release else None)
+    npm_lock_source_valid = (isinstance(lock_source, str)
+                             and (lock_source.startswith(f"npm:{package['name']}:")
+                                  or private_release and lock_source == release_lock_source))
     if (manager is None or receipt["source"] != source or receipt["name"] != package.get("name")
             or not isinstance(lock_source, str)
-            or source == "npm" and not lock_source.startswith(f"npm:{package['name']}:")
+            or source == "npm" and not npm_lock_source_valid
             or source == "uv" and lock_source != f"pypi:{package['name']}"
             or source == "official" and not lock_source.startswith("arch:")
             or source == "aur" and lock_source != f"aur:{package['name']}"):
@@ -630,7 +645,9 @@ def package_lock_migration(component_id: str, component: dict[str, Any]) -> dict
         identity = package_identity(component)
     except BootstrapError:
         return None
-    if identity["manager"] != manager or identity["name"] != package["name"] or identity["version"] != receipt["version"]:
+    command_version = _version(component, identity["command"])
+    if (identity["manager"] != manager or identity["name"] != package["name"]
+            or receipt["version"] not in {identity["version"], command_version}):
         return None
     return {"source": lock_source, "version": identity["version"]}
 
