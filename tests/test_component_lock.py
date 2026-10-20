@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import sys
@@ -33,6 +34,26 @@ class ComponentLockTests(unittest.TestCase):
         ]:
             with self.subTest(value=value), self.assertRaises(component_lock.LockError):
                 component_lock.validate(value, sources)
+
+    def test_declared_source_alias_reads_legacy_lock_and_writes_canonical_source(self):
+        canonical = "npm:example:beta"
+        legacy = "npm:example:latest"
+        sources = {"package": (canonical, legacy)}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "components.lock.json"
+            legacy_entry = {"source": legacy, "version": "1.0.0", "sha256": "a" * 64}
+            path.write_text(json.dumps({"schema": 1, "components": {"package": legacy_entry}}), encoding="utf-8")
+            path.chmod(0o600)
+
+            value = component_lock.read(path, sources)
+            with self.assertRaises(component_lock.LockError):
+                component_lock.read(path, {"package": (canonical, "npm:example:preview")})
+
+            current_entry = {"source": canonical, "version": "1.1.0", "sha256": "b" * 64}
+            updated = component_lock.set_entry(value, "package", current_entry, sources)
+            component_lock.write(path, updated, sources)
+
+            self.assertEqual(component_lock.read(path, sources)["components"]["package"], current_entry)
 
 
 if __name__ == "__main__":

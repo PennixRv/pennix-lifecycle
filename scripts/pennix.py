@@ -70,7 +70,9 @@ def _load(args: argparse.Namespace) -> tuple[config_model.StrictKconfig, Path, d
         candidates.validate_catalog(catalog)
     except candidates.CandidateError as error:
         raise CliError(f"候选解析器目录不完整: {error}") from error
-    sources = {key: value["lock_source"] for key, value in catalog["components"].items()
+    sources = {key: ((value["lock_source"], *value["lock_source_aliases"])
+                     if value.get("lock_source_aliases") else value["lock_source"])
+               for key, value in catalog["components"].items()
                if value.get("delivery") in {"package", "plugin", "client", "collection"}}
     try:
         lock_path = component_lock.path_for(path)

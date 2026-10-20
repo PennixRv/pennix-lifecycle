@@ -12,6 +12,26 @@ import candidates
 
 
 class CandidateTests(unittest.TestCase):
+    def test_beta_tag_resolves_context_mode_pennix_8_and_lock_digest(self):
+        raw = b"context-mode pennix beta package"
+        metadata = {"name": "@pennixrv/context-mode", "version": "1.0.169-pennix.8", "dist": {
+            "tarball": "https://registry.test/context-mode.tgz",
+            "integrity": "sha512-" + base64.b64encode(hashlib.sha512(raw).digest()).decode(),
+        }}
+        component = {"lock_source": "npm:@pennixrv/context-mode:beta", "package": {
+            "name": "@pennixrv/context-mode", "registry": "https://registry.test/", "tag": "beta"}}
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(candidates, "_json", return_value=metadata) as query, \
+                 patch.object(candidates.owned_files, "download", side_effect=lambda url, path: path.write_bytes(raw)):
+                value = candidates.resolve_npm(component, Path(directory))
+                locked = {"version": value["version"], "sha256": value["sha256"]}
+                candidates.resolve_npm(component, Path(directory), locked)
+
+        self.assertEqual(query.call_args_list[0].args[0], "https://registry.test/%40pennixrv%2Fcontext-mode/beta")
+        self.assertEqual(value["version"], "1.0.169-pennix.8")
+        self.assertEqual(value["source"], "npm:@pennixrv/context-mode:beta")
+        self.assertEqual(value["sha256"], hashlib.sha256(raw).hexdigest())
+
     def test_npm_candidate_is_staged_and_both_registry_integrities_are_checked(self):
         raw = b"verified npm tarball"
         metadata = {"name": "example", "version": "2.0.0", "dist": {

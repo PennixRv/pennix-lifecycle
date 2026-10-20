@@ -19,7 +19,7 @@ def path_for(config: Path) -> Path:
     return config.with_name("components.lock.json")
 
 
-def validate(value: object, sources: dict[str, str]) -> dict:
+def validate(value: object, sources: dict[str, str | tuple[str, ...]]) -> dict:
     if (not isinstance(value, dict) or set(value) != {"schema", "components"}
             or type(value["schema"]) is not int or value["schema"] != 1
             or not isinstance(value["components"], dict)):
@@ -28,7 +28,11 @@ def validate(value: object, sources: dict[str, str]) -> dict:
     for key, entry in components.items():
         if key not in sources or not isinstance(entry, dict) or not {"source"} <= set(entry) <= FIELDS:
             raise LockError(f"components.lock.json entry is invalid: {key}")
-        if entry["source"] != sources[key] or not any(field in entry for field in ("version", "ref", "sha256")):
+        expected_sources = sources[key]
+        if isinstance(expected_sources, str):
+            expected_sources = (expected_sources,)
+        if (entry["source"] not in expected_sources
+                or not any(field in entry for field in ("version", "ref", "sha256"))):
             raise LockError(f"components.lock.json source or target identity differs: {key}")
         if any(field in entry and (not isinstance(entry[field], str) or not entry[field])
                for field in ("source", "version", "ref", "sha256")):
@@ -38,7 +42,7 @@ def validate(value: object, sources: dict[str, str]) -> dict:
     return value
 
 
-def read(path: Path, sources: dict[str, str]) -> dict:
+def read(path: Path, sources: dict[str, str | tuple[str, ...]]) -> dict:
     try:
         value = owned_files.read_json(path)
     except owned_files.OwnershipError as error:
@@ -48,13 +52,13 @@ def read(path: Path, sources: dict[str, str]) -> dict:
     return validate(value, sources)
 
 
-def write(path: Path, value: dict, sources: dict[str, str]) -> None:
+def write(path: Path, value: dict, sources: dict[str, str | tuple[str, ...]]) -> None:
     validate(value, sources)
     previous = owned_files.read(path, private=True)
     owned_files.replace(path, owned_files.json_bytes(value), previous, mode=0o600)
 
 
-def set_entry(value: dict, key: str, entry: dict, sources: dict[str, str]) -> dict:
+def set_entry(value: dict, key: str, entry: dict, sources: dict[str, str | tuple[str, ...]]) -> dict:
     updated = {"schema": 1, "components": dict(value["components"])}
     updated["components"][key] = entry
     return validate(updated, sources)

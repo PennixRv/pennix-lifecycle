@@ -170,7 +170,10 @@
     },
     "context-mode": {
       "delivery": "package",
-      "lock_source": "npm:@pennixrv/context-mode:latest",
+      "lock_source": "npm:@pennixrv/context-mode:beta",
+      "lock_source_aliases": [
+        "npm:@pennixrv/context-mode:latest"
+      ],
       "source": "PennixRv/context-mode npm package",
       "owner": "context-mode",
       "scope": "global",
@@ -196,6 +199,7 @@
         "source": "npm",
         "name": "@pennixrv/context-mode",
         "registry": "https://registry.npmjs.org/",
+        "tag": "beta",
         "prefix": "$HOME/.local",
         "install_owner": "user",
         "allow_scripts": [

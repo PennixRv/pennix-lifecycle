@@ -84,6 +84,30 @@ class ConfigModelTests(unittest.TestCase):
         self.assertEqual(cch["package"]["asset"]["repo"], "PennixRv/cch-codex-tmux-status")
         self.assertNotIn("registry", cch["package"])
 
+    def test_context_mode_catalog_uses_beta_and_declares_only_legacy_lock_source(self) -> None:
+        catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
+        component = catalog["components"]["context-mode"]
+        self.assertEqual(component["lock_source"], "npm:@pennixrv/context-mode:beta")
+        self.assertEqual(component["lock_source_aliases"], ["npm:@pennixrv/context-mode:latest"])
+        self.assertEqual(component["package"]["tag"], "beta")
+
+    def test_catalog_rejects_invalid_lock_source_aliases(self) -> None:
+        path = self.home / "catalog.json"
+        for aliases in ([], [""], ["npm:example:beta"], ["legacy", "legacy"], "legacy"):
+            catalog = {
+                "schema": 3,
+                "components": {"package": {
+                    "delivery": "package",
+                    "lock_source": "npm:example:beta",
+                    "lock_source_aliases": aliases,
+                    "actions": {},
+                }},
+                "configuration_targets": {},
+            }
+            path.write_text(json.dumps(catalog), encoding="utf-8")
+            with self.subTest(aliases=aliases), self.assertRaises(owner_engine.BootstrapError):
+                owner_engine.load_catalog(path)
+
     def test_catalog_manages_only_hikari_local_wrapper_and_skill_connection(self) -> None:
         catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
         target = catalog["configuration_targets"]["hikari"]

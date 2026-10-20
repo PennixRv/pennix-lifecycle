@@ -77,6 +77,14 @@ def load_catalog(path: Path) -> dict[str, Any]:
         if (component.get("delivery") in {"package", "plugin", "client", "collection"}
                 and (not isinstance(component.get("lock_source"), str) or not component["lock_source"])):
             raise BootstrapError(f"catalog lock source is missing: {key}")
+        if "lock_source_aliases" in component:
+            aliases = component["lock_source_aliases"]
+            if (component.get("delivery") not in {"package", "plugin", "client", "collection"}
+                    or not isinstance(aliases, list) or not aliases
+                    or any(not isinstance(alias, str) or not alias for alias in aliases)
+                    or len(aliases) != len(set(aliases))
+                    or component["lock_source"] in aliases):
+                raise BootstrapError(f"catalog lock source aliases are invalid: {key}")
         if component.get("delivery") == "collection":
             contract = component.get("collection_contract")
             if not isinstance(contract, dict) or set(contract) != {"directory", "source"}:
