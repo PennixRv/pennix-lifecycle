@@ -79,6 +79,11 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual("changed", collections.operate(self.component, self.codex, "upgrade", candidate=candidate))
         self.assertEqual(candidate["ref"], collections.read_receipt(path)["source"]["ref"])
 
+    def test_update_candidate_takes_precedence_over_existing_lock(self):
+        component = {**self.component, "_lock_target": {"ref": "a" * 40},
+                     "_candidate_target": {"ref": "b" * 40}}
+        self.assertEqual("b" * 40, collections.source_identity(component)["ref"])
+
     def test_content_or_command_drift_is_never_deleted(self):
         path = self.install()
         (path / "example-skill/SKILL.md").write_text("modified")

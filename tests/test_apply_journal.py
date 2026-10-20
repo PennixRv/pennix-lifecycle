@@ -23,8 +23,19 @@ class ApplyJournalTests(unittest.TestCase):
             value = apply_journal.unknown(value, "context-mode:install")
             self.assertFalse(apply_journal.complete(value))
             self.assertEqual(apply_journal.read()["steps"][0]["status"], "unknown")
+            value = apply_journal.retry(value, "context-mode:install")
+            self.assertEqual(apply_journal.read()["steps"][0]["status"], "pending")
             apply_journal.clear()
             self.assertIsNone(apply_journal.read())
+
+    def test_retry_requires_unknown_status(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(apply_journal.owned_files, "state_root", return_value=Path(directory)):
+            value = apply_journal.start("update", "pennix-skills", "a" * 64, "b" * 64, [
+                {"id": "pennix-skills:upgrade", "component": "pennix-skills", "action": "upgrade", "target": {"ref": "c" * 40}},
+            ])
+            with self.assertRaises(apply_journal.JournalError):
+                apply_journal.retry(value, "pennix-skills:upgrade")
+            apply_journal.clear()
 
 
 if __name__ == "__main__":

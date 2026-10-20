@@ -105,6 +105,12 @@ def unknown(value: dict, step_id: str) -> dict:
     return _replace(value, step_id, status="unknown")
 
 
+def retry(value: dict, step_id: str) -> dict:
+    if step(value, step_id)["status"] != "unknown":
+        raise JournalError("only an unknown step can be retried after owner verification")
+    return _replace(value, step_id, status="pending")
+
+
 def step(value: dict, step_id: str) -> dict:
     for item in value["steps"]:
         if item["id"] == step_id:

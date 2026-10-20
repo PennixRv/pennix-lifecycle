@@ -52,7 +52,7 @@ def destination(component: dict, codex_home: Path) -> Path:
 
 def source_identity(component: dict) -> dict:
     source = component["collection_contract"]["source"]
-    target = component.get("_lock_target") or component.get("_candidate_target")
+    target = component.get("_candidate_target") or component.get("_lock_target")
     ref = target.get("ref") if isinstance(target, dict) else source.get("ref")
     if not ref and component.get("_receipt_ref"):
         ref = component["_receipt_ref"]

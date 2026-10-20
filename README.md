@@ -46,8 +46,9 @@ receipt 会先回填锁。已有安装缺少可信 receipt 时，`apply` 会阻�
 启用 `PENNIX_SYSTEM_UPGRADE` 时，`apply` 会在完整计划中显示并确认
 `sudo pacman -Syu --noconfirm`；缺少或更新 Arch/AUR 组件时，必须沿这条同次确认的
 路径执行。Lifecycle 变更会在私有状态目录写入 journal，步骤只有完成后置核验才标记
-为 verified；副作用状态未知时保留 journal 并阻断自动重试，继续使用原来的
-`apply` 或 `update` 入口恢复。
+为 verified；副作用状态未知时保留 journal 并阻断自动重试。`update` 只能在当前
+owner 与旧锁定目标仍完全匹配且 receipt 有效时，通过同一入口重试原先确认的目标；
+否则保留 journal 并要求人工核验。
 
 秘密位于 `secrets.toml`，由 `pennix secrets edit` 打开并以明文编辑，文件权限为
 0600；其中只保存凭据字段，普通 URL、ID 和路径属于 `workflow.config`。JSON 输出

@@ -624,6 +624,14 @@ def _journal_mutate(value: dict, step_id: str, action):
     return apply_journal.verified(value, step_id), result
 
 
+def _retry_unknown_update(active: dict, step_id: str, state: str) -> dict:
+    if apply_journal.step(active, step_id)["status"] != "unknown":
+        return active
+    if state != "match":
+        raise CliError("update owner 未保持旧锁定目标；保留 journal，需人工核验")
+    return apply_journal.retry(active, step_id)
+
+
 def _refresh_arch_receipts(args: argparse.Namespace, catalog: dict[str, Any]) -> None:
     updates = []
     selected = config_model.selected_components(args.kconf)
@@ -943,8 +951,8 @@ def cmd_update(args: argparse.Namespace) -> int:
             active = None
         elif apply_journal.digest(args.component_lock_path) != active["lock_digest"]:
             raise CliError("components.lock.json 已改变；未完成 update 保留现场，不能猜测续跑")
-        elif any(item["status"] in {"started", "unknown"} for item in active["steps"]):
-            raise CliError("update 副作用状态未知；保留 journal，不能自动重试")
+        elif any(item["status"] == "started" for item in active["steps"]):
+            raise CliError("update 步骤仍处于 started；保留 journal，不能自动重试")
     entry = args.component_lock["components"].get(args.component)
     if entry is None:
         raise CliError(f"组件尚无可信 lock；先通过 apply 初始化或完成 receipt 迁移: {args.component}")
@@ -971,6 +979,9 @@ def cmd_update(args: argparse.Namespace) -> int:
         raise CliError("组件没有可信 Lifecycle collection receipt")
     if component.get("delivery") == "plugin" and not owner_engine._plugin_owned(args.component, component, args.codex_home):
         raise CliError("组件没有可信 Lifecycle plugin receipt")
+    if active is not None:
+        step_id = f"{args.component}:upgrade"
+        active = _retry_unknown_update(active, step_id, status["state"])
     if active is None and (not sys.stdin.isatty() or not sys.stdout.isatty()):
         raise CliError("pennix update 需要交互式终端")
     with tempfile.TemporaryDirectory(prefix="pennix-update-") as directory:

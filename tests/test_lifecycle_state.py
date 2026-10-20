@@ -64,6 +64,18 @@ class LifecycleStateTests(unittest.TestCase):
             self.assertEqual(engine.static_operation(args, "pennix-skills", component, "upgrade"), "changed")
         operate.assert_called_once_with(component, args.codex_home, "upgrade", candidate=candidate)
 
+    def test_unknown_update_retries_only_when_old_locked_owner_state_matches(self):
+        active = {"steps": [{"id": "pennix-skills:upgrade", "status": "unknown"}]}
+        with patch.object(pennix.apply_journal, "step", return_value=active["steps"][0]), \
+             patch.object(pennix.apply_journal, "retry", return_value={"retried": True}) as retry:
+            self.assertEqual({"retried": True}, pennix._retry_unknown_update(active, "pennix-skills:upgrade", "match"))
+            retry.assert_called_once_with(active, "pennix-skills:upgrade")
+        with patch.object(pennix.apply_journal, "step", return_value=active["steps"][0]), \
+             patch.object(pennix.apply_journal, "retry") as retry:
+            with self.assertRaisesRegex(pennix.CliError, "需人工核验"):
+                pennix._retry_unknown_update(active, "pennix-skills:upgrade", "drifted")
+            retry.assert_not_called()
+
     def test_package_lock_migration_accepts_legacy_pacman_receipt_version(self):
         component = {"delivery": "package", "lock_source": "arch:extra/tmux",
                      "package": {"source": "official", "name": "tmux"}, "probe": "tmux"}
