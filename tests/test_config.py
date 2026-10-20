@@ -95,14 +95,22 @@ class ConfigModelTests(unittest.TestCase):
             ["python3", "$CODEX_HOME/skills/pennix-skills/pennix-tavily-search/scripts/connection.py"],
         )
         self.assertEqual(component["delivery"], "client")
-        self.assertIn("/scripts/tvly-hikari", component["client"]["source"]["url"])
+        self.assertEqual(component["lock_source"], "git:IvanLi-CN/tavily-hikari:scripts/tvly-hikari")
+        self.assertEqual(component["client"]["source"]["repo"], "IvanLi-CN/tavily-hikari")
+        self.assertEqual(component["client"]["source"]["path"], "scripts/tvly-hikari")
         self.assertEqual(component["client"]["paths"], ["tvly-hikari"])
+        self.assertNotIn("installer", component["client"])
         self.assertIn("NAS service is an external dependency", component["source"])
 
-    def test_catalog_static_template_revisions_match_delivered_files(self) -> None:
+    def test_catalog_has_sixteen_dynamic_sources_and_unpinned_static_templates(self) -> None:
         catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
+        dynamic = {key: value for key, value in catalog["components"].items()
+                   if value["delivery"] in {"package", "plugin", "client", "collection"}}
+        self.assertEqual(len(dynamic), 16)
+        self.assertEqual(len({value["lock_source"] for value in dynamic.values()}), 16)
         for component in catalog["components"].values():
             if component.get("delivery") == "static" and "template" in component:
+                self.assertNotIn("revision", component["template"])
                 self.assertTrue(owner_engine._template(component))
 
     def test_agents_template_upgrade_requires_unchanged_owned_bytes(self) -> None:

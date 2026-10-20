@@ -31,7 +31,7 @@ class CollectionTests(unittest.TestCase):
         self.home_patch.stop()
         self.temporary.cleanup()
 
-    def stage(self, component, workspace):
+    def stage(self, component, workspace, candidate=None):
         staging = workspace / "collection"
         skill = staging / "example-skill"
         (skill / "bin").mkdir(parents=True)
@@ -60,6 +60,24 @@ class CollectionTests(unittest.TestCase):
         self.assertFalse(path.exists())
         self.assertFalse(collections.receipt_path(path).exists())
         self.assertFalse((self.home / ".local/bin/example").exists())
+
+    def test_deselected_old_source_receipt_can_be_removed(self):
+        path = self.install()
+        self.component["collection_contract"]["source"] = {
+            "repo": "new/skills", "ref": "b" * 40, "manifest": "collection.json"}
+        self.assertEqual("blocked", collections.inspect(self.component, self.codex)[0])
+        self.assertEqual("owned", collections.receipt_owned(self.component, self.codex))
+        self.assertEqual("changed", collections.operate(self.component, self.codex, "uninstall"))
+        self.assertFalse(path.exists())
+
+    def test_explicit_candidate_replaces_a_matching_collection(self):
+        path = self.install()
+        candidate = {"repo": "example/skills", "ref": "b" * 40, "sha256": "c" * 64,
+                     "path": "/tmp/source.tar.gz", "checkout": "/tmp/source"}
+        self.component["_candidate_target"] = {"ref": candidate["ref"]}
+        with patch.object(collections, "_stage", side_effect=self.stage):
+            self.assertEqual("changed", collections.operate(self.component, self.codex, "upgrade", candidate=candidate))
+        self.assertEqual(candidate["ref"], collections.read_receipt(path)["source"]["ref"])
 
     def test_content_or_command_drift_is_never_deleted(self):
         path = self.install()

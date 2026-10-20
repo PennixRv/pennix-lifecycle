@@ -2,7 +2,7 @@ mainmenu "Pennix 工作流生命周期"
 
 config PENNIX_CONFIG_FORMAT
 	string
-	default "4"
+	default "5"
 
 menu "位置与私有输入"
 
@@ -775,12 +775,6 @@ config PENNIX_ADOPT_EXISTING_PACKAGES
 	default n
 	help
 		默认保留外部安装的包。仅在本次 apply 显式开启后登记当前准确包身份。
-
-config PENNIX_UPDATE_COMPONENTS
-	bool "更新已选择组件"
-	default n
-	help
-		独立选择；默认关闭。本地一致性和必要服务核验始终执行。
 
 config PENNIX_SYSTEM_UPGRADE
 	bool "完整系统升级"

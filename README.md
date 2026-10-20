@@ -35,15 +35,29 @@ pennix secrets import-ssh --alias office-wsl-via-nas --service codex
 `uninstall <component> --confirm <component>` 不修改配置；要永久取消组件，先在
 `config edit` 中取消选择，再执行 `apply`。
 
+与 `workflow.config` 同目录的 `components.lock.json` 记录每个动态组件已核验的
+来源、版本、提交或发布引用和摘要。它由 Lifecycle 原子写入，不应手工编辑。首次
+安装缺少锁时，`apply` 只解析一次当前候选，完成安装和后置核验后写入锁；已有可信
+receipt 会先回填锁。已有安装缺少可信 receipt 时，`apply` 会阻断并要求先完成归属
+迁移。普通 `apply` 按锁执行，不自动升级；明确升级使用
+`pennix update <component>`，该命令先展示精确候选和影响，再在同一次交互确认后
+执行单组件替换。
+
+启用 `PENNIX_SYSTEM_UPGRADE` 时，`apply` 会在完整计划中显示并确认
+`sudo pacman -Syu --noconfirm`；缺少或更新 Arch/AUR 组件时，必须沿这条同次确认的
+路径执行。Lifecycle 变更会在私有状态目录写入 journal，步骤只有完成后置核验才标记
+为 verified；副作用状态未知时保留 journal 并阻断自动重试，继续使用原来的
+`apply` 或 `update` 入口恢复。
+
 秘密位于 `secrets.toml`，由 `pennix secrets edit` 打开并以明文编辑，文件权限为
 0600；其中只保存凭据字段，普通 URL、ID 和路径属于 `workflow.config`。JSON 输出
 不会包含秘密值。
 
-Context Mode 通过 `@pennixrv/context-mode` 包、Codex 原生 MCP 和六个 Hook 接入；不叠加 plugin，也不改写用户 AGENTS。旧 FastCtx 的撤回由旧安装的原生入口完成，新配置格式 4 不接受旧组件键或旧格式。
+Context Mode 通过 `@pennixrv/context-mode` 包、Codex 原生 MCP 和六个 Hook 接入；不叠加 plugin，也不改写用户 AGENTS。旧 FastCtx 的撤回由旧安装的原生入口完成，新配置格式 5 不接受旧组件键或旧格式。
 
-本地 Hikari wrapper、官方 `tvly`、OpenPeon 运行文件和 AoE/OpenPeon 的精确 Codex Hook 由各自登记合同管理。所有 NAS/其他主机的服务端均为外部依赖，不安装或升级。Hikari 只取得固定上游客户端及无凭据 installer，不 fork 源码；OpenPeon 只更新有限运行文件，保留音效包、偏好和运行数据。CCH 使用经过摘要校验的私有 GitHub Release npm 包，需要现有 `gh` 认证。
+本地 Hikari wrapper、官方 `tvly`、OpenPeon 运行文件和 AoE/OpenPeon 的精确 Codex Hook 由各自登记合同管理。所有 NAS/其他主机的服务端均为外部依赖，不安装或升级。Hikari 只取得固定上游客户端，并由 Lifecycle 生成本地 wrapper，不执行上游 installer 或 fork 源码；OpenPeon 只更新有限运行文件，保留音效包、偏好和运行数据。CCH 使用经过摘要校验的私有 GitHub Release npm 包，需要现有 `gh` 认证。
 
-正确的既有包可通过 `PENNIX_ADOPT_EXISTING_PACKAGES` 显式纳管，接管前核对原生包名、版本和命令归属；`PENNIX_UPDATE_COMPONENTS` 单独控制更新。对无 receipt 的客户端既有文件，先审阅 `plan` 的摘要，再用 `repair <component> --expected-sha256 <摘要>` 精确迁移，未知旁侧文件保留。
+正确的既有包可通过 `PENNIX_ADOPT_EXISTING_PACKAGES` 显式纳管，接管前核对原生包名、版本和命令归属；更新须使用 `pennix update <component>`。对无 receipt 的客户端既有文件，先审阅 `plan` 的摘要，再用 `repair <component> --expected-sha256 <摘要>` 精确迁移，未知旁侧文件保留。
 
 `check` 将本地安装/配置结果与功能请求分开输出。`PENNIX_FUNCTIONAL_CHECKS` 默认关闭；明确开启后才运行已选连接的原生功能入口，Windsurf 仅使用临时合成项目。失败、超时或没有入口均不能通过，不回显响应正文。SiYuan 的实际 MCP 会话连接仍由宿主原生工具核验，不能用本地 receipt 代替。
 

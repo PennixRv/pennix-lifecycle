@@ -11,12 +11,16 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 import tomllib
 
 import _engine as owner_engine
+import apply_journal
 import codex_config
+import component_lock
+import candidates
 import connection_owners
 import config_model
 import credential_import
@@ -32,6 +36,12 @@ import native_integrations
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "references" / "catalog.json"
+APPLY_ORDER = [
+    "codex-cli", "trellis-cli", "pnpm", "context-mode", "codegraph-cli", "paseo-cli",
+    "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "uv", "tavily-cli",
+    "tavily-hikari", "peon-ping", "codex-config", "codex-agents", "pennix-skills-extra",
+    "pennix-skills",
+]
 
 
 class CliError(RuntimeError):
@@ -54,6 +64,21 @@ def _load(args: argparse.Namespace) -> tuple[config_model.StrictKconfig, Path, d
     except Exception as error:
         raise CliError(f"组件目录无效: {error}") from error
     catalog = copy.deepcopy(catalog)
+    for key, component in catalog["components"].items():
+        component["id"] = key
+    try:
+        candidates.validate_catalog(catalog)
+    except candidates.CandidateError as error:
+        raise CliError(f"候选解析器目录不完整: {error}") from error
+    sources = {key: value["lock_source"] for key, value in catalog["components"].items()
+               if value.get("delivery") in {"package", "plugin", "client", "collection"}}
+    try:
+        lock_path = component_lock.path_for(path)
+        args.component_lock = component_lock.read(lock_path, sources)
+        args.component_lock_path = lock_path
+        args.component_lock_sources = sources
+    except component_lock.LockError as error:
+        raise CliError(str(error)) from error
     return kconf, path, catalog
 
 
@@ -153,6 +178,33 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
         if component.get("delivery") == "state":
             components[component_id] = {"selected": False, "action": "ignored", "state": "runtime-state"}
             continue
+        lock_target = args.component_lock["components"].get(component_id)
+        lock_migration = None
+        plugin_adoption = None
+        if component_id in selected and lock_target is None:
+            try:
+                if component.get("delivery") == "package":
+                    lock_migration = owner_engine.package_lock_migration(component_id, component)
+                elif component.get("delivery") == "client":
+                    lock_migration = owner_engine.local_clients.lock_migration(component_id, component)
+                elif component.get("delivery") == "collection":
+                    lock_migration = skill_collections.lock_migration(component, args.codex_home)
+                elif component.get("delivery") == "plugin":
+                    migrated = owner_engine.plugin_lock_migration(component_id, component, args.codex_home)
+                    if migrated:
+                        if owner_engine._plugin_receipt(component_id, component) is None:
+                            plugin_adoption = migrated
+                        else:
+                            lock_migration = migrated
+                        lock_target = migrated
+            except (owner_engine.BootstrapError, owner_engine.local_clients.ClientError,
+                    skill_collections.CollectionError, OSError):
+                lock_migration = None
+                plugin_adoption = None
+            if lock_migration:
+                lock_target = lock_migration
+        if lock_target:
+            component["_lock_target"] = lock_target
         status = _component_status(args, component_id, component)
         if component.get("native_config"):
             try:
@@ -166,6 +218,10 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             if component_id in selected:
                 if package_state == "missing":
                     action = "install"
+                    if (component.get("package", {}).get("source") in {"official", "aur"}
+                            and config_model.config_value(kconf, "PENNIX_SYSTEM_UPGRADE") != "y"):
+                        action = "blocked"
+                        status["detail"] = "Arch 包缺失时必须由同次确认的完整系统升级提供安全安装边界"
                 elif package_state in {"match", "external"} and not package_owned:
                     action = "adopt" if config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y" else "blocked"
                 elif package_state in {"upgrade-required", "drifted", "blocked"}:
@@ -173,9 +229,12 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
                 else:
                     action = "keep"
                 if package_state == "outdated":
-                    action = "upgrade" if config_model.config_value(kconf, "PENNIX_UPDATE_COMPONENTS") == "y" else "blocked"
-                    if not package_owned:
-                        action = "adopt-upgrade" if action == "upgrade" and config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y" else "blocked"
+                    if (component.get("package", {}).get("source") in {"official", "aur"}
+                            and package_owned
+                            and config_model.config_value(kconf, "PENNIX_SYSTEM_UPGRADE") == "y"):
+                        action = "system-refresh"
+                    else:
+                        action = "blocked"
                 native_enabled = config_model.config_value(kconf, component["native_config"]["select"]) == "y"
                 native_action = ("unconfigure" if status.get("owned") else "keep") if not native_enabled else "keep" if status["state"] == "current" else (
                     "repair" if status["state"] == "drifted" else "configure"
@@ -214,15 +273,18 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 action = "keep" if status["state"] in {"match", "current", "present"} else "install"
             if status["state"] == "upgrade-required":
-                action = "upgrade" if config_model.config_value(kconf, "PENNIX_UPDATE_COMPONENTS") == "y" else "blocked"
+                action = "blocked"
             if status["state"] in {"drifted", "blocked"}:
                 action = "repair"
             if status["state"] == "adoption-required":
                 action = "adopt" if config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y" else "blocked"
             if status["state"] == "outdated":
-                action = "upgrade" if config_model.config_value(kconf, "PENNIX_UPDATE_COMPONENTS") == "y" else "blocked"
-                if component.get("delivery") == "package" and status.get("ownership") != "lifecycle":
-                    action = "adopt-upgrade" if action == "upgrade" and config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y" else "blocked"
+                if (component.get("package", {}).get("source") in {"official", "aur"}
+                        and status.get("ownership") == "lifecycle"
+                        and config_model.config_value(kconf, "PENNIX_SYSTEM_UPGRADE") == "y"):
+                    action = "system-refresh"
+                else:
+                    action = "blocked"
         else:
             if component_id == "codex-config":
                 try:
@@ -240,11 +302,34 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
                     ) else "keep"
                     if action == "keep" and status["state"] == "match":
                         status["ownership"] = "external"
+                elif component.get("delivery") == "collection":
+                    ownership = skill_collections.receipt_owned(component, args.codex_home)
+                    if ownership == "owned":
+                        action = "uninstall"
+                        status.update(state="owned-legacy", ownership="lifecycle",
+                                      detail="当前 catalog source 已变化；仍由本 Lifecycle receipt 归属")
+                    elif ownership.startswith("blocked:"):
+                        action = "blocked"
+                        status.update(detail=ownership, ownership="unknown")
+                    else:
+                        action = "keep"
                 else:
                     action = "uninstall" if status["state"] in {"match", "current", "present"} else "keep"
             if action == "uninstall" and component.get("delivery") == "collection" and not owner_engine.collection_owned(component, args.codex_home):
-                action = "keep"
-                status["ownership"] = "external"
+                if status.get("ownership") != "lifecycle":
+                    action = "keep"
+                    status["ownership"] = "external"
+        if lock_migration:
+            status["lock_migration"] = lock_migration
+        if plugin_adoption:
+            status.update(state="adoption-required", action="adopt-ponytail-plugin",
+                          plugin_adoption=plugin_adoption,
+                          detail="精确 Marketplace 来源、版本和干净完整提交匹配；等待专用接管确认")
+        installed_state = package_state if component.get("native_config") else status["state"]
+        if (component_id in selected and component.get("delivery") in {"package", "plugin", "client", "collection"}
+                and lock_target is None and installed_state != "missing"):
+            status.update(state="lock-migration-required", detail="已有安装必须先由可信 owner receipt 初始化 components.lock.json")
+            action = "blocked"
         components[component_id] = {"selected": component_id in selected, "action": action, **status}
     prefix = Path.home() / ".local"
     paseo = prefix / "bin" / "paseo"
@@ -297,8 +382,16 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
         )
     except connection_owners.ConnectionError as error:
         raise CliError(str(error)) from error
+    arch_components = [key for key, item in components.items()
+                       if item.get("selected") and catalog["components"].get(key, {}).get("package", {}).get("source") in {"official", "aur"}]
     return {"config": str(path), "codex_home": str(args.codex_home), "components": components, "connections": connections,
-            "functional_checks_requested": config_model.config_value(kconf, "PENNIX_FUNCTIONAL_CHECKS") == "y"}
+            "functional_checks_requested": config_model.config_value(kconf, "PENNIX_FUNCTIONAL_CHECKS") == "y",
+            "side_effects": {
+                "path": {"path": str(Path.home() / ".zshrc"), "prefix": str(Path.home() / ".local"), "action": "apply"},
+                "system_upgrade": config_model.config_value(kconf, "PENNIX_SYSTEM_UPGRADE") == "y",
+                "system_upgrade_command": "sudo pacman -Syu --noconfirm",
+                "system_upgrade_components": arch_components,
+            }}
 
 
 def _emit(value: Any, as_json: bool) -> None:
@@ -312,6 +405,11 @@ def _emit(value: Any, as_json: bool) -> None:
             print(f"{key}: {item['action']} ({item['state']})")
         for key, item in value.get("connections", {}).items():
             print(f"connection:{key}: {item['action']} ({item['state']})")
+        side_effects = value.get("side_effects", {})
+        if side_effects.get("path"):
+            print(f"PATH: {side_effects['path']['action']} {side_effects['path']['path']} <- {side_effects['path']['prefix']}/bin")
+        if side_effects.get("system_upgrade"):
+            print(f"system-upgrade: confirm {side_effects['system_upgrade_command']} (system-wide; lifecycle Arch components: {', '.join(side_effects['system_upgrade_components']) or 'none'})")
         return
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
@@ -338,7 +436,8 @@ def _ensure_connection_dependencies(selected: set[str], connections: dict[str, A
                 raise CliError(f"连接 {target} 依赖未选择: {component}")
 
 
-def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_id: str, operation: str, *, repair: bool = False) -> str:
+def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_id: str, operation: str, *, repair: bool = False,
+                   candidate: dict[str, Any] | None = None) -> str:
     component = catalog["components"][component_id]
     native = component.get("native_config")
     if native and operation in {"configure", "unconfigure"}:
@@ -355,6 +454,9 @@ def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_
         values = config_model.values(args.kconf)
         return codex_config.apply(args.codex_home / "config.toml", values)
     engine_args = _args_for_engine(args, operation)
+    if candidate:
+        engine_args.candidate = candidate
+        engine_args.explicit_update = operation == "upgrade"
     try:
         if component.get("delivery") in {"static", "collection"}:
             return owner_engine.static_operation(engine_args, component_id, component, operation, catalog)
@@ -397,6 +499,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     bad = []
     for item in value["components"].values():
         if not item["selected"]:
+            if item.get("action") != "uninstall":
+                continue
+            bad.append(item)
             continue
         if item.get("native_action") is not None:
             if (item["action"] != "keep" or item.get("package_state") != "match"
@@ -418,6 +523,128 @@ def cmd_check(args: argparse.Namespace) -> int:
         value["functional_checks"] = {"state": "not_requested"}
     _emit(value, args.json)
     return 1 if bad else 0
+
+
+def _apply_steps(value: dict[str, Any], args: argparse.Namespace, catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    side_effects = value.get("side_effects", {})
+    if side_effects.get("system_upgrade"):
+        steps.append({"id": "system-upgrade", "component": "system", "action": "upgrade", "target": {}})
+    if any(value["components"].get(key, {}).get("action") in {"install", "adopt", "upgrade", "adopt-upgrade"}
+           and value["components"].get(key, {}).get("selected")
+           and catalog["components"].get(key, {}).get("package", {}).get("source") == "aur"
+           for key in APPLY_ORDER):
+        steps.append({"id": "aur-helper", "component": "aur-helper", "action": "prepare", "target": {}})
+    for key, item in value["components"].items():
+        if item.get("selected") and item.get("lock_migration"):
+            steps.append({"id": f"{key}:lock-migration", "component": key,
+                          "action": "lock-migration", "target": item["lock_migration"]})
+    for key in APPLY_ORDER:
+        item = value["components"].get(key)
+        if not item:
+            continue
+        action = item.get("action")
+        if item.get("selected") and action in {"install", "adopt", "upgrade", "adopt-upgrade"}:
+            steps.append({"id": f"{key}:{action}", "component": key, "action": action,
+                          "target": args.component_lock["components"].get(key, {})})
+        if item.get("selected") and item.get("plugin_adoption"):
+            steps.append({"id": f"{key}:adopt-plugin", "component": key,
+                          "action": "adopt-plugin", "target": item["plugin_adoption"]})
+    for key in APPLY_ORDER:
+        item = value["components"].get(key)
+        if item and item.get("selected") and item.get("native_action") == "configure":
+            steps.append({"id": f"{key}:configure", "component": key, "action": "configure", "target": {}})
+    for target, item in value.get("connections", {}).items():
+        if item.get("action") in {"configure", "unconfigure"}:
+            steps.append({"id": f"connection:{target}:{item['action']}", "component": f"connection:{target}",
+                          "action": item["action"], "target": {}})
+    for key in APPLY_ORDER:
+        item = value["components"].get(key)
+        if item and item.get("native_action") == "unconfigure":
+            steps.append({"id": f"{key}:unconfigure", "component": key, "action": "unconfigure", "target": {}})
+    for key in reversed(APPLY_ORDER):
+        item = value["components"].get(key)
+        if item and not item.get("selected") and item.get("action") == "uninstall":
+            steps.append({"id": f"{key}:uninstall", "component": key, "action": "uninstall", "target":
+                          args.component_lock["components"].get(key, {})})
+    relay = value["components"].get("paseo-relay")
+    if relay and relay.get("action") in {"install", "uninstall"}:
+        steps.append({"id": f"paseo-relay:{relay['action']}", "component": "paseo-relay",
+                      "action": relay["action"], "target": {}})
+    steps.append({"id": "path-env:apply", "component": "path-env", "action": "apply", "target": {}})
+    steps.append({"id": f"paseo-autostart:{value['components']['paseo-autostart']['action']}",
+                  "component": "paseo-autostart", "action": "service", "target": {}})
+    return steps
+
+
+def _journal_for_apply(args: argparse.Namespace, value: dict[str, Any], steps: list[dict[str, Any]], *, create: bool = True) -> tuple[dict | None, bool]:
+    try:
+        active = apply_journal.read()
+    except apply_journal.JournalError as error:
+        raise CliError(f"未完成 lifecycle journal 无法读取，保留现场：{error}") from error
+    config_digest = apply_journal.digest(Path(value["config"]))
+    lock_digest = apply_journal.digest(args.component_lock_path)
+    if config_digest is None:
+        raise CliError("workflow.config 在 apply 前消失")
+    if active is not None:
+        if active["command"] != "apply" or active["component"] is not None:
+            raise CliError("存在未完成的单组件更新 journal；请使用相同的 update 入口恢复")
+        if active["config_digest"] != config_digest:
+            raise CliError("workflow.config 已改变；未完成 apply 保留现场，不能猜测续跑")
+        if apply_journal.digest(args.component_lock_path) != active["lock_digest"]:
+            expected = [step for step in active["steps"] if step["status"] == "verified" and step["target"]]
+            if not expected and not any(step["id"] == "system-upgrade" and step["status"] == "verified"
+                                        for step in active["steps"]):
+                raise CliError("components.lock.json 在未完成 apply 期间发生变化；保留现场，不能猜测续跑")
+        if apply_journal.complete(active):
+            apply_journal.clear()
+            active = None
+        else:
+            return active, True
+    if not create:
+        return None, False
+    return apply_journal.start("apply", None, config_digest, lock_digest, steps), False
+
+
+def _journal_mutate(value: dict, step_id: str, action):
+    step = apply_journal.step(value, step_id)
+    if step["status"] == "verified":
+        return value, "resumed"
+    if step["status"] in {"started", "unknown"}:
+        raise CliError(f"步骤 {step_id} 的副作用状态未知；保留 journal，需人工核验")
+    value = apply_journal.started(value, step_id)
+    try:
+        result = action()
+    except BaseException:
+        try:
+            apply_journal.unknown(value, step_id)
+        except BaseException:
+            pass
+        raise
+    return apply_journal.verified(value, step_id), result
+
+
+def _refresh_arch_receipts(args: argparse.Namespace, catalog: dict[str, Any]) -> None:
+    updates = []
+    selected = config_model.selected_components(args.kconf)
+    for component_id in selected:
+        component = catalog["components"].get(component_id)
+        package = component.get("package") if component else None
+        if not isinstance(package, dict) or package.get("source") not in {"official", "aur"}:
+            continue
+        if owner_engine._package_receipt(component_id, component) is None:
+            continue
+        identity = owner_engine.package_identity(component)
+        updates.append((component_id, component, identity["version"]))
+    for component_id, component, version in updates:
+        owner_engine._write_package_receipt(component_id, component, version)
+        args.component_lock = component_lock.set_entry(
+            args.component_lock, component_id,
+            {"source": component["lock_source"], "version": version},
+            args.component_lock_sources,
+        )
+    if updates:
+        component_lock.write(args.component_lock_path, args.component_lock, args.component_lock_sources)
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
@@ -462,110 +689,174 @@ def cmd_apply(args: argparse.Namespace) -> int:
             raise CliError(f"Codex API Key 预检失败：{error}") from error
     if value["components"]["paseo-autostart"]["mode"] != "off" and "paseo-cli" not in selected:
         raise CliError("Paseo 自启动需要选择 paseo-cli")
+    steps = _apply_steps(value, args, catalog)
+    active, resumed = _journal_for_apply(args, value, steps, create=False)
+    plugin_adoptions = {key: item["plugin_adoption"] for key, item in value["components"].items()
+                        if item.get("selected") and item.get("plugin_adoption")}
+    if active is None and value.get("side_effects", {}).get("system_upgrade"):
+        _emit(value, args.json)
+        if (not sys.stdin.isatty() or not sys.stdout.isatty()
+                or input("确认完整系统升级及本次 apply？输入 yes 继续: ").strip() != "yes"):
+            return 1
+    if active is None and plugin_adoptions:
+        _emit(value, args.json)
+        for key, target in plugin_adoptions.items():
+            print(f"将仅为现有 Codex plugin {key} 写入 Lifecycle receipt 和 components.lock.json；不会重装插件。精确身份: {target}")
+        if (not sys.stdin.isatty() or not sys.stdout.isatty()
+                or input("确认迁移 Ponytail plugin 所有权？输入 yes 继续: ").strip() != "yes"):
+            return 1
+    if active is None:
+        active, _ = _journal_for_apply(args, value, steps, create=True)
     relay_home = Path(config_model.config_value(args.kconf, "PENNIX_PASEO_HOME"))
-    relay_result = None
-    if relay and relay["action"] == "uninstall":
-        try:
-            relay_result = relay_owner.remove(
-                relay_home,
-                nas_ssh=config_model.config_value(args.kconf, "PENNIX_RELAY_NAS_SSH"),
-                router_ssh=config_model.config_value(args.kconf, "PENNIX_RELAY_ROUTER_SSH"),
-            )
-        except relay_owner.RelayError as error:
-            raise CliError(f"Paseo relay 撤回失败，未执行本地收敛：{error}") from error
-    order = [
-        "codex-cli", "trellis-cli", "pnpm", "context-mode", "codegraph-cli", "paseo-cli",
-        "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "uv", "tavily-cli", "tavily-hikari", "peon-ping",
-        "codex-config", "codex-agents", "pennix-skills-extra", "pennix-skills",
-    ]
     results: dict[str, str] = {}
-    if any(catalog["components"][key].get("package", {}).get("source") == "aur"
-           and value["components"][key]["action"] in {"install", "upgrade", "adopt-upgrade"}
-           for key in order):
-        try:
-            results["aur-helper"] = owner_engine.host.ensure_aur_helper(catalog["aur_helper"])
-        except RuntimeError as error:
-            raise CliError(str(error)) from error
-    for component_id in order:
-        item = value["components"][component_id]
-        if item["selected"] and item["action"] in {"install", "adopt", "upgrade", "adopt-upgrade"}:
-            operation = "upgrade" if item["action"] in {"upgrade", "adopt-upgrade"} else "install"
-            results[component_id] = _run_component(args, catalog, component_id, operation)
-    for component_id in order:
-        item = value["components"][component_id]
-        if item["selected"] and item.get("native_action") == "configure":
-            results[component_id] = _run_component(args, catalog, component_id, "configure")
-    for target, item in value["connections"].items():
-        if item["action"] not in {"configure", "unconfigure"}:
+    system_step = next((item for item in active["steps"] if item["id"] == "system-upgrade"), None)
+    if system_step is not None and system_step["status"] == "started":
+        raise CliError("pacman -Syu 的副作用状态未知；保留 journal，不能自动重试")
+    if system_step is not None and system_step["status"] != "verified":
+        def system_upgrade():
+            result = subprocess.run(["sudo", "pacman", "-Syu", "--noconfirm"], check=False)
+            if result.returncode:
+                raise CliError(f"完整系统升级失败: {result.returncode}")
+            _refresh_arch_receipts(args, catalog)
+            return "changed"
+        active, results["system-upgrade"] = _journal_mutate(active, "system-upgrade", system_upgrade)
+    if system_step is not None:
+        value = _plan(args)
+        _, _, catalog = _load(args)
+        relay = value["components"].get("paseo-relay")
+    for step in active["steps"]:
+        step_id, component_id, action = step["id"], step["component"], step["action"]
+        if step["status"] == "verified" or step_id == "system-upgrade":
             continue
-        try:
-            if item.get("state") == "pending-owner":
-                fresh = connection_owners.plan(args.kconf, catalog, args.codex_home,
-                    Path(config_model.config_value(args.kconf, "PENNIX_SECRETS_FILE")))[target]
-                if fresh["action"] == "blocked":
-                    raise connection_owners.ConnectionError(fresh.get("detail", "安装后 owner 仍不可用"))
-            results[f"connection:{target}"] = connection_owners.apply_target(
-                target,
-                catalog["configuration_targets"][target],
-                args.kconf,
-                args.codex_home,
-                Path(config_model.config_value(args.kconf, "PENNIX_SECRETS_FILE")),
-                item["action"],
-            )
-        except (connection_owners.ConnectionError, secret_store.SecretError) as error:
-            raise CliError(f"连接 {target} {item['action']} 失败: {error}") from error
-    for component_id in order:
-        item = value["components"][component_id]
-        if item.get("native_action") == "unconfigure":
-            results[component_id] = _run_component(args, catalog, component_id, "unconfigure")
-    for component_id in order:
-        item = value["components"][component_id]
-        if not item["selected"] and item["action"] == "uninstall":
-            results[component_id] = _run_component(args, catalog, component_id, "uninstall")
-    prefix = Path.home() / ".local"
-    results["zshrc-user-bin-path"] = path_env.apply(prefix)
-    mode = value["components"]["paseo-autostart"]["mode"]
-    paseo = prefix / "bin" / "paseo"
-    if not paseo.is_file():
-        paseo = Path(shutil.which("paseo") or paseo)
-    if config_model.config_value(args.kconf, "PENNIX_SYSTEM_UPGRADE") == "y":
-        result = subprocess.run(["sudo", "pacman", "-Syu", "--noconfirm"], check=False)
-        if result.returncode:
-            raise CliError(f"完整系统升级失败: {result.returncode}")
-        results["system-upgrade"] = "changed"
-    if relay and relay["selected"]:
-        try:
-            if relay.get("register") and relay["action"] == "install":
-                relay_owner.ensure(
-                    relay_home,
-                    nas_ssh=config_model.config_value(args.kconf, "PENNIX_RELAY_NAS_SSH"),
-                    router_ssh=config_model.config_value(args.kconf, "PENNIX_RELAY_ROUTER_SSH"),
-                )
-            endpoint = config_model.config_value(args.kconf, "PENNIX_PASEO_RELAY_ENDPOINT")
-            public_endpoint = config_model.config_value(args.kconf, "PENNIX_PASEO_RELAY_PUBLIC_ENDPOINT")
-            results["paseo-relay"] = relay_owner.configure_daemon(
-                paseo, relay_home, endpoint, public_endpoint,
-                bool(args.kconf.syms["PENNIX_PASEO_RELAY_TLS"].tri_value),
-                bool(args.kconf.syms["PENNIX_PASEO_RELAY_PUBLIC_TLS"].tri_value),
-            )
-        except relay_owner.RelayError as error:
-            raise CliError(f"Paseo relay 应用失败：{error}") from error
-    elif relay_result is not None:
-        results["paseo-relay"] = relay_result
-    try:
-        results["paseo-autostart"] = paseo_service.apply(
-            mode,
-            paseo,
-            Path(config_model.config_value(args.kconf, "PENNIX_PASEO_HOME")),
-            value["components"]["paseo-autostart"]["listen"],
-            value["components"]["paseo-autostart"]["run"],
-            restart_daemon=bool(relay and relay["selected"]),
-        )
-        if paseo_service.runtime(paseo, Path(config_model.config_value(args.kconf, "PENNIX_PASEO_HOME")), mode,
-                                 value["components"]["paseo-autostart"]["run"])["state"] != "current":
-            raise paseo_service.PaseoServiceError("Paseo 实际 daemon/enable/active/linger 后置条件未满足")
-    except paseo_service.PaseoServiceError as error:
-        raise CliError(str(error)) from error
+        if action == "prepare" and component_id == "aur-helper":
+            active, results["aur-helper"] = _journal_mutate(
+                active, step_id, lambda: owner_engine.host.ensure_aur_helper(catalog["aur_helper"]))
+            continue
+        if action == "lock-migration":
+            def migrate(step=step, component_id=component_id):
+                args.component_lock = component_lock.set_entry(args.component_lock, component_id, step["target"], args.component_lock_sources)
+                catalog["components"][component_id]["_lock_target"] = step["target"]
+                component_lock.write(args.component_lock_path, args.component_lock, args.component_lock_sources)
+                return "migrated"
+            active, results[component_id] = _journal_mutate(active, step_id, migrate)
+            continue
+        if action in {"install", "adopt", "upgrade", "adopt-upgrade"}:
+            component = catalog["components"].get(component_id)
+            if component is None:
+                raise CliError(f"journal 引用未知组件: {component_id}")
+            operation = "upgrade" if action in {"upgrade", "adopt-upgrade"} else "install"
+            target = step["target"] or args.component_lock["components"].get(component_id)
+            component["_lock_target"] = target if target else component.get("_lock_target")
+            if component.get("delivery") in {"package", "plugin", "client", "collection"}:
+                with tempfile.TemporaryDirectory(prefix="pennix-candidate-") as directory:
+                    candidate = candidates.resolve(component, Path(directory), target)
+                    candidate_target = candidates.lock_entry(candidate)
+                    if target and candidate_target != target:
+                        raise CliError(f"{component_id} 候选与 journal 精确目标不一致")
+                    if not step["target"]:
+                        active = apply_journal.set_target(active, step_id, candidate_target)
+                        target = candidate_target
+                    component["_candidate_target"] = candidate_target
+                    def install(candidate=candidate, component_id=component_id, component=component, target=target):
+                        result = _run_component(args, catalog, component_id, operation, candidate=candidate)
+                        args.component_lock = component_lock.set_entry(args.component_lock, component_id, target, args.component_lock_sources)
+                        component_lock.write(args.component_lock_path, args.component_lock, args.component_lock_sources)
+                        return result
+                    active, results[component_id] = _journal_mutate(active, step_id, install)
+            else:
+                active, results[component_id] = _journal_mutate(
+                    active, step_id, lambda component_id=component_id: _run_component(args, catalog, component_id, operation))
+            continue
+        if action == "adopt-plugin":
+            component = catalog["components"][component_id]
+            def adopt_plugin(component=component, component_id=component_id, target=step["target"]):
+                current = owner_engine.plugin_lock_migration(component_id, component, args.codex_home)
+                if current != target:
+                    raise CliError("Ponytail plugin 在恢复前身份发生变化；未接管")
+                owner_engine._write_plugin_receipt(component_id, component, current)
+                try:
+                    args.component_lock = component_lock.set_entry(args.component_lock, component_id, current, args.component_lock_sources)
+                    component_lock.write(args.component_lock_path, args.component_lock, args.component_lock_sources)
+                except BaseException:
+                    owner_engine._remove_plugin_receipt(component_id)
+                    raise
+                return "adopted"
+            active, results[component_id] = _journal_mutate(active, step_id, adopt_plugin)
+            continue
+        if action in {"configure", "unconfigure"} and component_id in catalog["components"]:
+            active, results[component_id] = _journal_mutate(
+                active, step_id, lambda component_id=component_id, action=action: _run_component(args, catalog, component_id, action))
+            continue
+        if component_id.startswith("connection:"):
+            target_name = component_id.split(":", 1)[1]
+            item = value["connections"][target_name]
+            def apply_connection(target_name=target_name, item=item):
+                try:
+                    if item.get("state") == "pending-owner":
+                        fresh = connection_owners.plan(args.kconf, catalog, args.codex_home,
+                            Path(config_model.config_value(args.kconf, "PENNIX_SECRETS_FILE")))[target_name]
+                        if fresh["action"] == "blocked":
+                            raise connection_owners.ConnectionError(fresh.get("detail", "安装后 owner 仍不可用"))
+                    return connection_owners.apply_target(target_name, catalog["configuration_targets"][target_name], args.kconf,
+                        args.codex_home, Path(config_model.config_value(args.kconf, "PENNIX_SECRETS_FILE")), action)
+                except (connection_owners.ConnectionError, secret_store.SecretError) as error:
+                    raise CliError(f"连接 {target_name} {action} 失败: {error}") from error
+            active, results[f"connection:{target_name}"] = _journal_mutate(active, step_id, apply_connection)
+            continue
+        if action == "uninstall" and component_id in catalog["components"]:
+            def uninstall(component_id=component_id):
+                result = _run_component(args, catalog, component_id, "uninstall")
+                if component_id in args.component_lock["components"]:
+                    args.component_lock = component_lock.remove_entry(args.component_lock, component_id)
+                    component_lock.write(args.component_lock_path, args.component_lock, args.component_lock_sources)
+                return result
+            active, results[component_id] = _journal_mutate(active, step_id, uninstall)
+            continue
+        if component_id == "paseo-relay":
+            def apply_relay():
+                if action == "uninstall":
+                    return relay_owner.remove(relay_home,
+                        nas_ssh=config_model.config_value(args.kconf, "PENNIX_RELAY_NAS_SSH"),
+                        router_ssh=config_model.config_value(args.kconf, "PENNIX_RELAY_ROUTER_SSH"))
+                prefix = Path.home() / ".local"
+                paseo = prefix / "bin" / "paseo"
+                if not paseo.is_file():
+                    paseo = Path(shutil.which("paseo") or paseo)
+                relay_spec = value["components"]["paseo-relay"]
+                if relay_spec.get("register"):
+                    relay_owner.ensure(relay_home,
+                        nas_ssh=config_model.config_value(args.kconf, "PENNIX_RELAY_NAS_SSH"),
+                        router_ssh=config_model.config_value(args.kconf, "PENNIX_RELAY_ROUTER_SSH"))
+                return relay_owner.configure_daemon(
+                    paseo, relay_home,
+                    config_model.config_value(args.kconf, "PENNIX_PASEO_RELAY_ENDPOINT"),
+                    config_model.config_value(args.kconf, "PENNIX_PASEO_RELAY_PUBLIC_ENDPOINT"),
+                    bool(args.kconf.syms["PENNIX_PASEO_RELAY_TLS"].tri_value),
+                    bool(args.kconf.syms["PENNIX_PASEO_RELAY_PUBLIC_TLS"].tri_value))
+            active, results["paseo-relay"] = _journal_mutate(active, step_id, apply_relay)
+            continue
+        if component_id == "path-env":
+            active, results["zshrc-user-bin-path"] = _journal_mutate(
+                active, step_id, lambda: path_env.apply(Path.home() / ".local"))
+            continue
+        if component_id == "paseo-autostart":
+            mode = value["components"]["paseo-autostart"]["mode"]
+            prefix = Path.home() / ".local"
+            paseo = prefix / "bin" / "paseo"
+            if not paseo.is_file():
+                paseo = Path(shutil.which("paseo") or paseo)
+            def apply_service():
+                result = paseo_service.apply(mode, paseo, Path(config_model.config_value(args.kconf, "PENNIX_PASEO_HOME")),
+                    value["components"]["paseo-autostart"]["listen"], value["components"]["paseo-autostart"]["run"],
+                    restart_daemon=bool(relay and relay["selected"]))
+                if paseo_service.runtime(paseo, Path(config_model.config_value(args.kconf, "PENNIX_PASEO_HOME")), mode,
+                                         value["components"]["paseo-autostart"]["run"])["state"] != "current":
+                    raise paseo_service.PaseoServiceError("Paseo 实际 daemon/enable/active/linger 后置条件未满足")
+                return result
+            active, results["paseo-autostart"] = _journal_mutate(active, step_id, apply_service)
+            continue
+        raise CliError(f"journal 步骤没有有效执行路由: {step_id}")
+    apply_journal.clear()
     _emit({"operation": "apply", "results": results}, args.json)
     return 0
 
@@ -580,7 +871,47 @@ def cmd_repair(args: argparse.Namespace) -> int:
     component = catalog["components"][args.component]
     if args.expected_sha256 is not None and args.component != "codex-agents" and component.get("delivery") != "client":
         raise CliError("--expected-sha256 只用于审阅后的 codex-agents 或固定本地客户端升级")
-    result = _run_component(args, catalog, args.component, operation)
+    if component.get("delivery") in {"package", "plugin", "client", "collection"} and not component.get("native_config"):
+        if args.component not in config_model.selected_components(kconf):
+            raise CliError(f"组件未在 workflow.config 中选择: {args.component}")
+        entry = args.component_lock["components"].get(args.component)
+        missing_lock = entry is None
+        if entry is None:
+            if component.get("delivery") == "package":
+                entry = owner_engine.package_lock_migration(args.component, component)
+            elif component.get("delivery") == "client":
+                entry = owner_engine.local_clients.lock_migration(args.component, component)
+            elif component.get("delivery") == "collection":
+                entry = skill_collections.lock_migration(component, args.codex_home)
+            elif component.get("delivery") == "plugin":
+                entry = owner_engine.plugin_lock_migration(args.component, component, args.codex_home)
+        if entry is None:
+            raise CliError("repair 需要可信 receipt 和可映射到当前来源的 lock target")
+        component["_lock_target"] = entry
+        status = _component_status(args, args.component, component)
+        if status["state"] not in {"match", "outdated"}:
+            raise CliError(f"组件状态不允许锁定目标修复: {status['state']} ({status.get('detail', '')})")
+        if component.get("delivery") == "package" and status.get("ownership") != "lifecycle":
+            raise CliError("repair 需要可信 Lifecycle package receipt")
+        if component.get("delivery") == "plugin" and not owner_engine._plugin_owned(args.component, component, args.codex_home):
+            raise CliError("repair 需要可信 Lifecycle plugin receipt")
+        if component.get("delivery") == "client" and owner_engine.local_clients.receipt(args.component, component) is None:
+            raise CliError("repair 需要可信 Lifecycle client receipt")
+        if component.get("delivery") == "collection" and not owner_engine.collection_owned(component, args.codex_home):
+            raise CliError("repair 需要可信 Lifecycle collection receipt")
+        with tempfile.TemporaryDirectory(prefix="pennix-repair-") as directory:
+            try:
+                candidate = candidates.resolve(component, Path(directory), entry)
+            except candidates.CandidateError as error:
+                raise CliError(f"无法取得锁定修复候选: {error}") from error
+            candidate_target = candidates.lock_entry(candidate)
+            component["_candidate_target"] = candidate_target
+            result = _run_component(args, catalog, args.component, operation, candidate=candidate)
+        if missing_lock:
+            args.component_lock = component_lock.set_entry(args.component_lock, args.component, candidate_target, args.component_lock_sources)
+            component_lock.write(args.component_lock_path, args.component_lock, args.component_lock_sources)
+    else:
+        result = _run_component(args, catalog, args.component, operation)
     native = component.get("native_config")
     if native and config_model.config_value(kconf, native["select"]) == "y":
         configured = _run_component(args, catalog, args.component, "configure", repair=True)
@@ -589,13 +920,96 @@ def cmd_repair(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    kconf, config_path, catalog = _load(args)
+    args.kconf = kconf
+    args.codex_home = Path(os.path.expanduser(config_model.config_value(kconf, "PENNIX_CODEX_HOME")))
+    component = catalog["components"].get(args.component)
+    if component is None or component.get("delivery") not in {"package", "plugin", "client", "collection"}:
+        raise CliError(f"不支持更新的组件: {args.component}")
+    if args.component not in config_model.selected_components(kconf):
+        raise CliError(f"组件未在 workflow.config 中选择: {args.component}")
+    try:
+        active = apply_journal.read()
+    except apply_journal.JournalError as error:
+        raise CliError(f"未完成 lifecycle journal 无法读取：{error}") from error
+    if active is not None:
+        if active["command"] != "update" or active["component"] != args.component:
+            raise CliError("存在其他未完成 lifecycle 事务；请从原入口恢复")
+        if active["config_digest"] != apply_journal.digest(config_path):
+            raise CliError("workflow.config 已改变；未完成 update 保留现场，不能猜测续跑")
+        if apply_journal.complete(active):
+            apply_journal.clear()
+            active = None
+        elif apply_journal.digest(args.component_lock_path) != active["lock_digest"]:
+            raise CliError("components.lock.json 已改变；未完成 update 保留现场，不能猜测续跑")
+        elif any(item["status"] in {"started", "unknown"} for item in active["steps"]):
+            raise CliError("update 副作用状态未知；保留 journal，不能自动重试")
+    entry = args.component_lock["components"].get(args.component)
+    if entry is None:
+        raise CliError(f"组件尚无可信 lock；先通过 apply 初始化或完成 receipt 迁移: {args.component}")
+    component["_lock_target"] = entry
+    status = _component_status(args, args.component, component)
+    if component.get("native_config"):
+        try:
+            package_state, package_observed = owner_engine.probe_component(component, args.codex_home)
+            package_owned = owner_engine.package_owned(args.component, component, package_observed, args.codex_home)
+        except owner_engine.BootstrapError as error:
+            raise CliError(f"组件状态不允许更新: {error}") from error
+        if package_state not in {"match", "outdated"}:
+            raise CliError(f"组件状态不允许更新: {package_state}")
+        if not package_owned:
+            raise CliError("组件没有可信 Lifecycle package receipt")
+    else:
+        if status["state"] not in {"match", "outdated"}:
+            raise CliError(f"组件状态不允许更新: {status['state']} ({status.get('detail', '')})")
+        if component.get("delivery") == "package" and status.get("ownership") != "lifecycle":
+            raise CliError("组件没有可信 Lifecycle package receipt")
+    if component.get("delivery") == "client" and owner_engine.local_clients.receipt(args.component, component) is None:
+        raise CliError("组件没有可信 Lifecycle client receipt")
+    if component.get("delivery") == "collection" and not owner_engine.collection_owned(component, args.codex_home):
+        raise CliError("组件没有可信 Lifecycle collection receipt")
+    if component.get("delivery") == "plugin" and not owner_engine._plugin_owned(args.component, component, args.codex_home):
+        raise CliError("组件没有可信 Lifecycle plugin receipt")
+    if active is None and (not sys.stdin.isatty() or not sys.stdout.isatty()):
+        raise CliError("pennix update 需要交互式终端")
+    with tempfile.TemporaryDirectory(prefix="pennix-update-") as directory:
+        try:
+            candidate = candidates.resolve(component, Path(directory), active["steps"][0]["target"] if active else None)
+        except candidates.CandidateError as error:
+            raise CliError(str(error)) from error
+        target = candidates.lock_entry(candidate)
+        if active and target != active["steps"][0]["target"]:
+            raise CliError("恢复候选与 journal 中已确认目标不一致")
+        if all(entry.get(key) == target.get(key) for key in ("version", "ref", "sha256")):
+            _emit({"operation": "update", "component": args.component, "status": "no-op", "target": entry}, args.json)
+            return 0
+        component["_candidate_target"] = target
+        _emit({"operation": "update", "component": args.component, "current": entry,
+               "candidate": target, "impact": candidate.get("impact", "仅替换该组件；owner 安装器影响需按计划核验")}, args.json)
+        if active is None:
+            if input("确认仅更新该组件？输入 yes 继续: ").strip() != "yes":
+                return 1
+            config_digest = apply_journal.digest(config_path)
+            lock_digest = apply_journal.digest(args.component_lock_path)
+            active = apply_journal.start("update", args.component, config_digest, lock_digest,
+                                         [{"id": f"{args.component}:upgrade", "component": args.component,
+                                           "action": "upgrade", "target": target}])
+        step_id = f"{args.component}:upgrade"
+        def update_component():
+            result = _run_component(args, catalog, args.component, "upgrade", candidate=candidate)
+            args.component_lock = component_lock.set_entry(args.component_lock, args.component, target, args.component_lock_sources)
+            component_lock.write(args.component_lock_path, args.component_lock, args.component_lock_sources)
+            return result
+        active, result = _journal_mutate(active, step_id, update_component)
+    apply_journal.clear()
+    _emit({"operation": "update", "component": args.component, "status": result, "target": target}, args.json)
+    return 0
+
+
 def _reverse_uninstall_order(catalog: dict[str, Any]) -> list[str]:
-    order = [
-        "pennix-skills", "pennix-skills-extra", "context-mode", "codegraph-cli", "codex-agents", "codex-config", "peon-ping", "tavily-hikari", "tavily-cli", "uv",
-        "aoe", "tmux-config", "tmux", "cch-status", "ponytail-plugin", "paseo-cli",
-        "pnpm", "trellis-cli", "codex-cli",
-    ]
-    return [key for key in order if key in catalog["components"] and catalog["components"][key].get("delivery") != "native"]
+    return [key for key in reversed(APPLY_ORDER)
+            if key in catalog["components"] and catalog["components"][key].get("delivery") != "native"]
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
@@ -638,8 +1052,11 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
                 if status["state"] in {"drifted", "blocked"}:
                     raise CliError(f"全量卸载预检发现集合漂移: {key}")
                 continue
-            elif delivery == "plugin" and status["state"] != "match":
-                continue
+            elif delivery == "plugin":
+                if owner_engine._plugin_receipt(key, component) is None:
+                    continue
+                if not owner_engine._plugin_owned(key, component, args.codex_home):
+                    raise CliError(f"全量卸载预检发现 plugin 归属漂移: {key}")
             if status["state"] in {"drifted", "blocked"}:
                 raise CliError(f"全量卸载预检发现配置漂移: {key}")
             targets.append(key)
@@ -692,6 +1109,9 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     for component_id in targets:
         try:
             results[component_id] = _run_component(args, catalog, component_id, "uninstall")
+            if component_id in args.component_lock["components"]:
+                args.component_lock = component_lock.remove_entry(args.component_lock, component_id)
+                component_lock.write(args.component_lock_path, args.component_lock, args.component_lock_sources)
         except CliError:
             if args.all:
                 raise
@@ -824,6 +1244,12 @@ def parser() -> argparse.ArgumentParser:
     repair.add_argument("--expected-sha256", help="仅当 AGENTS.md 与已审阅的完整摘要相符时升级")
     repair.set_defaults(function=cmd_repair)
 
+    update = sub.add_parser("update", help="明确升级一个已选择且受管的组件")
+    update.add_argument("component")
+    update.add_argument("--config")
+    update.add_argument("--json", action="store_true")
+    update.set_defaults(function=cmd_update)
+
     tool = sub.add_parser("tool", help="管理生命周期工具自身")
     tool_sub = tool.add_subparsers(dest="tool_command", required=True)
     install_tool = tool_sub.add_parser("install", help="安装当前已核验发行包")
@@ -873,7 +1299,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
         mutating = (
-            args.command in {"apply", "repair", "uninstall", "secrets", "tool"}
+            args.command in {"apply", "repair", "update", "uninstall", "secrets", "tool"}
             or (args.command == "config" and args.config_command in {"init", "edit"})
             or (args.command == "cache" and args.cache_command == "clean" and args.yes)
         )
@@ -881,7 +1307,7 @@ def main(argv: list[str] | None = None) -> int:
             with owned_files.locked():
                 return args.function(args)
         return args.function(args)
-    except (CliError, connection_owners.ConnectionError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, relay_owner.RelayError, release_owner.ReleaseError, skill_collections.CollectionError, owner_engine.local_clients.ClientError, secret_store.SecretError, owned_files.OwnershipError, native_integrations.NativeIntegrationError, native_integrations.hook_integrations.HookError, OSError) as error:
+    except (CliError, apply_journal.JournalError, connection_owners.ConnectionError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, relay_owner.RelayError, release_owner.ReleaseError, skill_collections.CollectionError, owner_engine.local_clients.ClientError, secret_store.SecretError, owned_files.OwnershipError, native_integrations.NativeIntegrationError, native_integrations.hook_integrations.HookError, OSError) as error:
         print(f"pennix: {error}", file=sys.stderr)
         return 2
 

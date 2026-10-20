@@ -9,6 +9,7 @@ import shutil
 import shlex
 import subprocess
 import tempfile
+import urllib.parse
 
 import owned_files as files
 import skill_collections
@@ -48,6 +49,29 @@ def _metadata(path: Path) -> dict | None:
     return None if raw is None else {"digest": hashlib.sha256(raw).hexdigest(), "mode": path.stat().st_mode & 0o777}
 
 
+def _source_matches(key: str, component: dict, record: dict) -> bool:
+    current = component["client"]["source"]
+    source = record["source"]
+    if all(source.get(field) == current.get(field) for field in ("repo", "path", "archive") if field in current):
+        return True
+    url = source.get("url")
+    if not isinstance(url, str):
+        return False
+    parsed = urllib.parse.urlsplit(url)
+    parts = parsed.path.strip("/").split("/")
+    if not current.get("archive") and parsed.hostname == "raw.githubusercontent.com" and len(parts) >= 4:
+        repo, ref, path = "/".join(parts[:2]), parts[2], "/".join(parts[3:])
+        owned = ".tvly-hikari-real" if key == "tavily-hikari" else path
+        return (repo == current.get("repo") and path == current.get("path")
+                and re.fullmatch(r"[0-9a-f]{40}", ref) is not None
+                and record["files"].get(owned, {}).get("digest") == source.get("sha256"))
+    if current.get("archive") and parsed.hostname == "codeload.github.com" and len(parts) == 4 and parts[2] == "tar.gz":
+        repo, ref = "/".join(parts[:2]), parts[3]
+        return (repo == current.get("repo") and re.fullmatch(r"[0-9a-f]{40}", ref) is not None
+                and re.fullmatch(r"[0-9a-f]{64}", source.get("sha256", "")) is not None)
+    return False
+
+
 def fingerprint(component: dict) -> str:
     target = root(component)
     current = {}
@@ -81,18 +105,92 @@ def inspect(key: str, component: dict) -> tuple[str, str]:
             link = Path.home() / ".local/bin" / command
             if skill_collections._link_value(link) != str(target / name):
                 return "drifted", f"本地客户端命令漂移: {command}"
-        return ("match" if record["source"] == component["client"]["source"] else "outdated"), "verified local runtime"
+        if not _source_matches(key, component, record):
+            return "blocked", "本地客户端来源归属不一致"
+        lock = component.get("_lock_target") or component.get("_candidate_target")
+        if isinstance(lock, dict) and any(record["source"].get(key) != lock.get(key)
+                                          for key in ("ref", "sha256") if key in lock):
+            return "outdated", "本地客户端需要更新到锁定身份"
+        return "match", "verified local runtime"
     except (OSError, ValueError, files.OwnershipError, ClientError, skill_collections.CollectionError) as error:
         return "blocked", str(error)
 
 
-def stage(component: dict, workspace: Path) -> dict[str, Path]:
+def lock_migration(key: str, component: dict) -> dict | None:
+    try:
+        record = receipt(key, component)
+    except ClientError:
+        return None
+    if record is None:
+        return None
+    target = root(component)
+    for name, metadata in record["files"].items():
+        if _metadata(target / name) != metadata:
+            return None
+    for command, name in record["commands"].items():
+        link = Path.home() / ".local/bin" / command
+        if skill_collections._link_value(link) != str(target / name):
+            return None
+    spec = component["client"]["source"]
+    source = record["source"]
+    repo, path, archive = spec["repo"], spec.get("path"), spec.get("archive", False)
+    ref = source.get("ref")
+    digest = source.get("sha256")
+    if _source_matches(key, component, record) and isinstance(source.get("repo"), str):
+        ref = source.get("ref")
+    elif _source_matches(key, component, record):
+        url = urllib.parse.urlsplit(source.get("url", ""))
+        parts = url.path.strip("/").split("/")
+        ref = parts[2] if not archive else parts[3]
+    elif source.get("repo") == repo and source.get("path") == path and source.get("archive", False) == archive:
+        pass
+    elif isinstance(source.get("url"), str):
+        parsed = urllib.parse.urlsplit(source["url"])
+        parts = parsed.path.strip("/").split("/")
+        if not archive and parsed.hostname == "raw.githubusercontent.com" and len(parts) >= 4:
+            old_repo, ref, old_path = "/".join(parts[:2]), parts[2], "/".join(parts[3:])
+            if old_repo != repo or old_path != path:
+                return None
+            owned_name = ".tvly-hikari-real" if key == "tavily-hikari" else path
+            if record["files"].get(owned_name, {}).get("digest") != digest:
+                return None
+        elif archive and parsed.hostname == "codeload.github.com" and len(parts) == 4 and parts[2] == "tar.gz":
+            old_repo, ref = "/".join(parts[:2]), parts[3]
+            if old_repo != repo:
+                return None
+        else:
+            return None
+    else:
+        return None
+    if not isinstance(ref, str) or not re.fullmatch(r"[0-9a-f]{40}", ref):
+        return None
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return None
+    return {"source": component["lock_source"], "ref": ref, "sha256": digest}
+
+
+def stage(component: dict, workspace: Path, candidate: dict | None = None) -> dict[str, Path]:
     spec = component["client"]
     asset = workspace / "asset"
-    files.download(spec["source"]["url"], asset)
-    if hashlib.sha256(asset.read_bytes()).hexdigest() != spec["source"]["sha256"]:
-        raise ClientError("本地客户端固定资产 SHA-256 不符")
-    checkout = files.extract(asset, workspace / "source") if spec["source"].get("archive") else None
+    if candidate:
+        staged = Path(candidate["path"])
+        if hashlib.sha256(staged.read_bytes()).hexdigest() != (candidate.get("sha256") or candidate.get("archive_sha256")):
+            raise ClientError("本地客户端候选摘要不符")
+        source = spec["source"]
+        checkout = Path(candidate["checkout"]) if candidate.get("checkout") else None
+        if source.get("repo") != candidate.get("repo"):
+            raise ClientError("本地客户端候选来源不符")
+        if source.get("archive") and checkout is None:
+            raise ClientError("本地客户端归档候选缺少校验后的源码树")
+        if not source.get("archive"):
+            asset = staged
+    else:
+        if "url" not in spec["source"] or "sha256" not in spec["source"]:
+            raise ClientError("本地客户端尚未解析精确候选")
+        files.download(spec["source"]["url"], asset)
+        if hashlib.sha256(asset.read_bytes()).hexdigest() != spec["source"]["sha256"]:
+            raise ClientError("本地客户端固定资产 SHA-256 不符")
+        checkout = files.extract(asset, workspace / "source") if spec["source"].get("archive") else None
     result = {}
     for name in spec["paths"]:
         skill_collections.relative(name)
@@ -107,39 +205,31 @@ def stage(component: dict, workspace: Path) -> dict[str, Path]:
             raise ClientError(f"固定客户端资产缺少文件: {name}")
     if not result:
         raise ClientError("客户端运行文件为空")
-    if "installer" in spec:
-        installer = workspace / "install.sh"
-        files.download(spec["installer"]["url"], installer)
-        if hashlib.sha256(installer.read_bytes()).hexdigest() != spec["installer"]["sha256"]:
-            raise ClientError("本地客户端 installer SHA-256 不符")
+    if component.get("id") == "tavily-hikari":
         if not shutil.which("tvly"):
-            raise ClientError("Hikari 原生 installer 前必须先完成官方 tvly 交付")
+            raise ClientError("Hikari 客户端需要先完成官方 tvly 交付")
         version = subprocess.run(["tvly", "--version"], capture_output=True, text=True, timeout=10, check=False)
         parsed = re.search(r"\d+\.\d+\.\d+", version.stdout)
         if version.returncode or not parsed or tuple(map(int, parsed[0].split("."))) < (0, 1, 3):
-            raise ClientError("Hikari 所需 tvly 未达到原生最低版本；未调用 installer")
+            raise ClientError("Hikari 所需 tvly 未达到最低版本")
         generated = workspace / "generated"
+        generated.mkdir(mode=0o700)
         config = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "tavily-hikari-cli"
-        process = subprocess.run(["bash", str(installer), "--install-dir", str(generated), "--config-dir", str(config)],
-            env={**os.environ, "HIKARI_INSTALL_LOCAL_TVLY_HIKARI": str(asset)},
-            capture_output=True, text=True, timeout=60, check=False)
-        if process.returncode or (generated / ".tvly-hikari-real").read_bytes() != asset.read_bytes():
-            raise ClientError("无凭据 Hikari 原生客户端生成失败")
+        real = generated / ".tvly-hikari-real"
+        real.write_bytes(asset.read_bytes())
+        real.chmod(0o700)
         wrapper = generated / "tvly-hikari"
-        before = wrapper.read_text()
-        expected = ("#!/usr/bin/env bash\nset -euo pipefail\n"
-                    'if [[ -z "${TAVILY_HIKARI_CONFIG_DIR:-}" && -z "${TAVILY_HIKARI_CONFIG_FILE:-}" ]]; then\n'
-                    f"  export TAVILY_HIKARI_CONFIG_DIR={shlex.quote(str(config))}\nfi\n"
-                    f'exec {shlex.quote(str(generated / ".tvly-hikari-real"))} "$@"\n')
-        if before != expected:
-            raise ClientError("Hikari 原生 wrapper 生成合同变化")
-        wrapper.write_text(before.replace(shlex.quote(str(generated / ".tvly-hikari-real")),
-                                         shlex.quote(str(root(component) / ".tvly-hikari-real"))))
+        wrapper.write_text("#!/usr/bin/env bash\nset -euo pipefail\n"
+                           'if [[ -z "${TAVILY_HIKARI_CONFIG_DIR:-}" && -z "${TAVILY_HIKARI_CONFIG_FILE:-}" ]]; then\n'
+                           f"  export TAVILY_HIKARI_CONFIG_DIR={shlex.quote(str(config))}\nfi\n"
+                           f'exec {shlex.quote(str(root(component) / ".tvly-hikari-real"))} "$@"\n')
+        wrapper.chmod(0o700)
         result = {name: generated / name for name in ("tvly-hikari", ".tvly-hikari-real")}
     return result
 
 
-def operate(key: str, component: dict, operation: str, *, adopt: bool = False, expected_sha256: str | None = None) -> str:
+def operate(key: str, component: dict, operation: str, *, adopt: bool = False, expected_sha256: str | None = None,
+            candidate: dict | None = None) -> str:
     state, detail = inspect(key, component)
     old = receipt(key, component)
     reviewed = expected_sha256 is not None and operation == "upgrade" and fingerprint(component) == expected_sha256
@@ -149,11 +239,11 @@ def operate(key: str, component: dict, operation: str, *, adopt: bool = False, e
         return "preserved"
     if state == "blocked" or state == "drifted" and not reviewed or state == "external" and not (adopt or reviewed):
         raise ClientError(f"拒绝操作本地客户端 {key}: {detail}")
-    if state == "match" and operation != "uninstall":
+    if state == "match" and operation != "uninstall" and candidate is None:
         return "no-op"
     target = root(component)
     with tempfile.TemporaryDirectory(prefix="pennix-client-") as directory:
-        incoming = stage(component, Path(directory)) if operation != "uninstall" else {}
+        incoming = stage(component, Path(directory), candidate) if operation != "uninstall" else {}
         old_files = old["files"] if old else {}
         before = {name: files.read(target / name) for name in old_files.keys() | incoming.keys()}
         modes = {name: (target / name).stat().st_mode & 0o777 for name, raw in before.items() if raw is not None}
@@ -171,7 +261,12 @@ def operate(key: str, component: dict, operation: str, *, adopt: bool = False, e
             if skill_collections._link_value(link) != (str(target / old_commands[link.name]) if link.name in old_commands else None):
                 raise ClientError(f"客户端命令不是本工具归属: {link.name}")
         previous = files.read(receipt_path(key), private=True)
-        output = files.json_bytes({"schema": 1, "root": str(target), "source": component["client"]["source"],
+        receipt_source = ({key: value for key, value in component["client"]["source"].items()
+                          if key in {"repo", "path", "archive"}} | {
+                              key: candidate.get(key, candidate.get("archive_sha256"))
+                              for key in ("ref", "sha256") if candidate and key in candidate
+                          }) if candidate else component["client"]["source"]
+        output = files.json_bytes({"schema": 1, "root": str(target), "source": receipt_source,
                                    "files": {name: {"digest": hashlib.sha256(path.read_bytes()).hexdigest(),
                                                     "mode": modes.get(name, 0o700 if path.stat().st_mode & 0o111 or name.endswith(".sh") or key == "tavily-hikari" else 0o600)}
                                              for name, path in incoming.items()}, "commands": commands}) if incoming else None

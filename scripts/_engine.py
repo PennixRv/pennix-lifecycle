@@ -74,12 +74,15 @@ def load_catalog(path: Path) -> dict[str, Any]:
             raise BootstrapError(f"catalog delivery is invalid: {key}")
         if component.get("delivery") != "state" and not isinstance(component.get("actions"), dict):
             raise BootstrapError(f"catalog actions are missing: {key}")
+        if (component.get("delivery") in {"package", "plugin", "client", "collection"}
+                and (not isinstance(component.get("lock_source"), str) or not component["lock_source"])):
+            raise BootstrapError(f"catalog lock source is missing: {key}")
         if component.get("delivery") == "collection":
             contract = component.get("collection_contract")
             if not isinstance(contract, dict) or set(contract) != {"directory", "source"}:
                 raise BootstrapError(f"collection manifest contract is invalid: {key}")
             source = contract["source"]
-            if not isinstance(source, dict) or set(source) != {"repo", "ref", "manifest"}:
+            if not isinstance(source, dict) or set(source) not in ({"repo", "manifest"}, {"repo", "ref", "manifest"}):
                 raise BootstrapError(f"collection source contract is invalid: {key}")
     return value
 
@@ -125,8 +128,9 @@ def _version(component: dict[str, Any], command: str) -> str | None:
 
 
 def _target_version(component: dict[str, Any]) -> str | None:
-    value = component.get("approved_version")
-    return normalize_version(str(value)) if isinstance(value, str) else None
+    target = component.get("_candidate_target") or component.get("_lock_target")
+    value = target.get("version") if isinstance(target, dict) else None
+    return value if isinstance(value, str) else None
 
 
 def _static_target(component_id: str, codex_home: Path) -> Path:
@@ -148,11 +152,6 @@ def _template(component: dict[str, Any]) -> str:
         raise BootstrapError(f"static template is unavailable: {name}") from error
     if not value.strip():
         raise BootstrapError(f"static template is empty: {name}")
-    revision = component["template"].get("revision")
-    if isinstance(revision, str) and revision.startswith("sha256:"):
-        digest = "sha256:" + hashlib.sha256(value.encode()).hexdigest()
-        if digest != revision:
-            raise BootstrapError(f"static template hash mismatch: {name}")
     return value
 
 
@@ -285,37 +284,141 @@ def _collection_state(component: dict[str, Any], codex_home: Path) -> str:
     return skill_collections.inspect(component, codex_home)[0]
 
 
-def _operate_collection(component: dict[str, Any], codex_home: Path, operation: str) -> str:
+def _operate_collection(component: dict[str, Any], codex_home: Path, operation: str, *, candidate: dict | None = None) -> str:
     try:
-        return skill_collections.operate(component, codex_home, operation)
+        return skill_collections.operate(component, codex_home, operation, candidate=candidate)
     except (skill_collections.CollectionError, OSError, subprocess.TimeoutExpired) as error:
         raise BootstrapError(str(error)) from error
+
+
+def _plugin_snapshot(component: dict[str, Any], codex_home: Path) -> dict[str, str] | None:
+    plugin = component.get("plugin")
+    if not isinstance(plugin, dict):
+        return None
+    codex = shutil.which("codex")
+    if not codex:
+        return None
+    result = subprocess.run([codex, "plugin", "list", "--json"], capture_output=True, text=True, check=False,
+                            env={**os.environ, "CODEX_HOME": str(codex_home)}, timeout=30)
+    if result.returncode:
+        return None
+    try:
+        installed = [item for item in json.loads(result.stdout).get("installed", [])
+                     if isinstance(item, dict) and item.get("pluginId") == plugin.get("id")]
+        if len(installed) != 1:
+            return None
+        item = installed[0]
+        market_result = subprocess.run([codex, "plugin", "marketplace", "list", "--json"], capture_output=True,
+                                       text=True, check=False,
+                                       env={**os.environ, "CODEX_HOME": str(codex_home)}, timeout=30)
+        if market_result.returncode:
+            return None
+        marketplaces = [market for market in json.loads(market_result.stdout).get("marketplaces", [])
+                        if isinstance(market, dict) and market.get("name") == plugin["marketplace"]["name"]]
+        if len(marketplaces) != 1 or item.get("enabled") is not True:
+            return None
+        market = marketplaces[0]
+        if (market.get("marketplaceSource", {}).get("source") != plugin["marketplace"]["source"]
+                or item.get("source", {}).get("url") != plugin["marketplace"]["source"]):
+            return None
+        root = Path(market.get("root", ""))
+        head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              timeout=15, check=False)
+        dirty = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "status", "--porcelain",
+                                "--untracked-files=all"], capture_output=True, text=True, timeout=15, check=False)
+        try:
+            manifest = json.loads((root / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        version = item.get("version")
+        name = plugin["id"].split("@", 1)[0]
+        if (head.returncode or dirty.returncode or dirty.stdout.strip()
+                or not re.fullmatch(r"[0-9a-f]{40}", head.stdout.strip())
+                or not isinstance(version, str) or manifest.get("name") != name
+                or manifest.get("version") != version):
+            return None
+        snapshot = {"source": component["lock_source"], "version": version, "ref": head.stdout.strip()}
+        selected_plugin = {**plugin, "marketplace": {**plugin["marketplace"], "ref": snapshot["ref"]}}
+        if not _plugin_refs(codex, codex_home, selected_plugin, version):
+            return None
+        return snapshot
+    except (json.JSONDecodeError, TypeError, KeyError, OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _plugin_receipt_path(component_id: str) -> Path:
+    if not PACKAGE_NAME.fullmatch(component_id):
+        raise BootstrapError("plugin identity is invalid")
+    return owned_files.state_root() / "plugins" / f"{component_id}.json"
+
+
+def _plugin_receipt(component_id: str, component: dict[str, Any]) -> dict[str, str] | None:
+    value = owned_files.read_json(_plugin_receipt_path(component_id))
+    if value is None:
+        return None
+    plugin = component["plugin"]
+    if (not isinstance(value, dict) or set(value) != {"schema", "component", "id", "source", "version", "ref"}
+            or type(value["schema"]) is not int or value["schema"] != 1 or value["component"] != component_id
+            or value["id"] != plugin["id"] or value["source"] != component["lock_source"]
+            or not isinstance(value["version"], str) or not re.fullmatch(r"[0-9a-f]{40}", value["ref"])):
+        raise BootstrapError(f"plugin ownership receipt is invalid: {component_id}")
+    return {key: value[key] for key in ("source", "version", "ref")}
+
+
+def plugin_lock_migration(component_id: str, component: dict[str, Any], codex_home: Path) -> dict[str, str] | None:
+    snapshot = _plugin_snapshot(component, codex_home)
+    if snapshot is None:
+        return None
+    receipt = _plugin_receipt(component_id, component)
+    if receipt is not None and receipt != snapshot:
+        return None
+    return snapshot
+
+
+def _plugin_owned(component_id: str, component: dict[str, Any], codex_home: Path) -> bool:
+    receipt = _plugin_receipt(component_id, component)
+    return receipt is not None and receipt == _plugin_snapshot(component, codex_home)
+
+
+def _write_plugin_receipt(component_id: str, component: dict[str, Any], snapshot: dict[str, str]) -> None:
+    path = _plugin_receipt_path(component_id)
+    before = owned_files.read(path, private=True)
+    record = {"schema": 1, "component": component_id, "id": component["plugin"]["id"],
+              **snapshot}
+    owned_files.replace(path, owned_files.json_bytes(record), before)
+
+
+def _remove_plugin_receipt(component_id: str) -> None:
+    path = _plugin_receipt_path(component_id)
+    before = owned_files.read(path, private=True)
+    if before is not None:
+        owned_files.replace(path, None, before)
 
 
 def _plugin_status(component: dict[str, Any], codex_home: Path) -> tuple[str, str | None]:
     plugin = component.get("plugin")
     if not isinstance(plugin, dict):
         return "blocked", None
-    codex = shutil.which("codex")
-    if not codex:
-        return "missing", None
-    result = subprocess.run([codex, "plugin", "list", "--json"], capture_output=True, text=True, check=False,
-                            env={**os.environ, "CODEX_HOME": str(codex_home)}, timeout=30)
-    if result.returncode:
-        return "blocked", None
-    try:
-        installed = json.loads(result.stdout).get("installed", [])
-    except json.JSONDecodeError:
-        return "blocked", None
-    for item in installed:
-        if isinstance(item, dict) and item.get("pluginId") == plugin.get("id"):
-            version = str(item.get("version", ""))
-            source = item.get("source", {})
-            matches = (item.get("enabled") is True and version == component.get("approved_version")
-                       and source.get("url") == plugin["marketplace"]["source"]
-                       and _plugin_refs(codex, codex_home, plugin, version))
-            return ("match" if matches else "outdated"), version
-    return "missing", None
+    snapshot = _plugin_snapshot(component, codex_home)
+    if snapshot is None:
+        codex = shutil.which("codex")
+        if not codex:
+            return "missing", None
+        result = subprocess.run([codex, "plugin", "list", "--json"], capture_output=True, text=True, check=False,
+                                env={**os.environ, "CODEX_HOME": str(codex_home)}, timeout=30)
+        if result.returncode:
+            return "blocked", None
+        try:
+            installed = [item for item in json.loads(result.stdout).get("installed", [])
+                         if isinstance(item, dict) and item.get("pluginId") == plugin.get("id")]
+        except (json.JSONDecodeError, TypeError):
+            return "blocked", None
+        return ("blocked", str(installed[0].get("version", ""))) if installed else ("missing", None)
+    target = component.get("_candidate_target") or component.get("_lock_target")
+    if not isinstance(target, dict):
+        return "outdated", snapshot["version"]
+    matches = all(snapshot.get(key) == target.get(key) for key in ("source", "version", "ref") if key in target)
+    return ("match" if matches else "outdated"), snapshot["version"]
 
 
 def _plugin_refs(codex: str, home: Path, plugin: dict, version: str) -> bool:
@@ -383,13 +486,14 @@ def probe_component(component: dict[str, Any], codex_home: Path | None = None, d
     observed = _version(component, command)
     if observed is None:
         return "blocked", command
+    package = component.get("package")
+    if isinstance(package, dict) and package.get("source") in {"official", "aur"}:
+        try:
+            observed = package_identity(component)["version"]
+        except BootstrapError:
+            return "blocked", command
     expected = _target_version(component)
-    policy = component.get("version_policy", "pinned")
-    if policy == "repository-latest":
-        installed = package_identity(component)
-        state = "match" if installed["version"] == package_candidate(component) else "outdated"
-    else:
-        state = "match" if expected is None or observed == expected else "outdated"
+    state = "match" if expected is None or observed == expected else "outdated"
     return state, observed
 
 
@@ -506,6 +610,31 @@ def package_owned(
     return observed is not None and receipt["version"] == observed
 
 
+def package_lock_migration(component_id: str, component: dict[str, Any]) -> dict[str, str] | None:
+    """Map only receipts whose owner source also identifies the catalog delivery."""
+    package = component.get("package")
+    receipt = _package_receipt(component_id, component)
+    if not isinstance(package, dict) or receipt is None:
+        return None
+    source = package.get("source")
+    lock_source = component.get("lock_source")
+    manager = {"npm": "npm", "uv": "uv", "official": "pacman", "aur": "pacman"}.get(source)
+    if (manager is None or receipt["source"] != source or receipt["name"] != package.get("name")
+            or not isinstance(lock_source, str)
+            or source == "npm" and not lock_source.startswith(f"npm:{package['name']}:")
+            or source == "uv" and lock_source != f"pypi:{package['name']}"
+            or source == "official" and not lock_source.startswith("arch:")
+            or source == "aur" and lock_source != f"aur:{package['name']}"):
+        return None
+    try:
+        identity = package_identity(component)
+    except BootstrapError:
+        return None
+    if identity["manager"] != manager or identity["name"] != package["name"] or identity["version"] != receipt["version"]:
+        return None
+    return {"source": lock_source, "version": identity["version"]}
+
+
 def _write_package_receipt(component_id: str, component: dict[str, Any], observed: str) -> None:
     package_identity(component)
     package = component["package"]
@@ -547,23 +676,36 @@ def _ensure_npm_prefix(metadata: dict[str, Any]) -> None:
             raise BootstrapError("npm user prefix verification failed")
 
 
-def _plugin_operation(component: dict[str, Any], codex_home: Path, operation: str) -> str:
+def _plugin_operation(component_id: str, component: dict[str, Any], codex_home: Path, operation: str) -> str:
     plugin = component["plugin"]
     codex = shutil.which("codex")
     if not codex:
         raise BootstrapError("Codex CLI is unavailable")
+    env = {**os.environ, "CODEX_HOME": str(codex_home)}
     state, _ = _plugin_status(component, codex_home)
     if operation == "uninstall":
         if state == "missing":
             return "no-op"
-        result = subprocess.run([codex, "plugin", "remove", plugin["id"], "--json"], check=False)
+        if not _plugin_owned(component_id, component, codex_home):
+            raise BootstrapError("refusing external or drifted Codex plugin uninstall")
+        result = subprocess.run([codex, "plugin", "remove", plugin["id"], "--json"], check=False, env=env)
         if result.returncode:
             raise BootstrapError("Codex plugin removal failed")
+        if _plugin_status(component, codex_home)[0] != "missing":
+            raise BootstrapError("Codex plugin removal postcondition failed")
+        _remove_plugin_receipt(component_id)
         return "changed"
-    if state == "match":
-        return "no-op"
-    marketplace = plugin["marketplace"]
-    env = {**os.environ, "CODEX_HOME": str(codex_home)}
+    if state == "match" and operation != "upgrade":
+        if _plugin_owned(component_id, component, codex_home):
+            return "no-op"
+        raise BootstrapError("Codex plugin must pass the dedicated adoption gate")
+    if state != "missing" and not _plugin_owned(component_id, component, codex_home):
+        raise BootstrapError("refusing external or drifted Codex plugin update")
+    target = component.get("_candidate_target") or component.get("_lock_target")
+    marketplace = ({**plugin["marketplace"], "ref": target.get("ref")}
+                   if isinstance(target, dict) else plugin["marketplace"])
+    if not isinstance(marketplace.get("ref"), str):
+        raise BootstrapError("Codex plugin requires a locked marketplace commit")
     _prepare_plugin_marketplace(codex, codex_home, marketplace)
     result = subprocess.run([codex, "plugin", "marketplace", "add", marketplace["source"], "--ref", marketplace["ref"], "--json"], check=False, env=env)
     if result.returncode:
@@ -573,19 +715,24 @@ def _plugin_operation(component: dict[str, Any], codex_home: Path, operation: st
         raise BootstrapError("Codex plugin installation failed")
     if _plugin_status(component, codex_home)[0] != "match":
         raise BootstrapError("Codex plugin version/source postcondition failed")
+    snapshot = _plugin_snapshot(component, codex_home)
+    if snapshot is None or snapshot["version"] != (target or {}).get("version") or snapshot["ref"] != (target or {}).get("ref"):
+        raise BootstrapError("Codex plugin exact target verification failed")
+    _write_plugin_receipt(component_id, component, snapshot)
     return "changed"
 
 
 def component_operation(args: Any, catalog: dict[str, Any], key: str, component: dict[str, Any], operation: str) -> str:
     codex_home = args.codex_home
+    candidate = getattr(args, "candidate", None)
     if component.get("delivery") == "client":
         return local_clients.operate(key, component, operation,
             adopt=bool(getattr(args, "kconf", None) and args.kconf.syms["PENNIX_ADOPT_EXISTING_PACKAGES"].tri_value),
-            expected_sha256=getattr(args, "expected_sha256", None))
+            expected_sha256=getattr(args, "expected_sha256", None), candidate=candidate)
     if isinstance(component.get("plugin"), dict):
-        return _plugin_operation(component, codex_home, operation)
+        return _plugin_operation(key, component, codex_home, operation)
     if component.get("delivery") == "collection":
-        return _operate_collection(component, codex_home, operation)
+        return _operate_collection(component, codex_home, operation, candidate=candidate)
     if component.get("delivery") == "native":
         if operation != "uninstall":
             raise BootstrapError(f"{key} is owned by its native installer")
@@ -626,11 +773,10 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
         else:
             adopted_now = False
         kconf = getattr(args, "kconf", None)
-        update = bool(kconf and kconf.syms["PENNIX_UPDATE_COMPONENTS"].tri_value)
-        if state == "match":
+        if state == "match" and not getattr(args, "explicit_update", False):
             return "adopted" if adopted_now else "no-op"
-        if not update:
-            raise BootstrapError(f"package update requires PENNIX_UPDATE_COMPONENTS: {key}")
+        if not getattr(args, "explicit_update", False):
+            raise BootstrapError(f"package updates require pennix update: {key}")
     installer = current_host["installers"].get(metadata.get("source"))
     if not isinstance(installer, str):
         raise BootstrapError(f"no installer for {key}")
@@ -640,8 +786,36 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
     if metadata.get("source") == "uv" and expected:
         install_name = f"{package_name}=={expected}"
     with tempfile.TemporaryDirectory(prefix="pennix-package-") as directory:
+        candidate = getattr(args, "candidate", None)
+        package_file = None
+        if candidate:
+            install_name = candidate["path"]
+            if metadata.get("source") == "official":
+                installer = "pacman"
+                package_file = Path(candidate["path"])
+            elif metadata.get("source") == "aur":
+                source_tree = Path(candidate["path"])
+                build = subprocess.run(
+                    ["makepkg", "--cleanbuild", "--force", "--noconfirm"], cwd=source_tree,
+                    env={**os.environ, "BUILDDIR": str(source_tree), "PKGDEST": str(source_tree),
+                         "SRCDEST": str(source_tree / "sources")},
+                    capture_output=True, text=True, timeout=1800, check=False,
+                )
+                if build.returncode:
+                    raise BootstrapError(f"fixed AUR candidate build failed: {key}")
+                artifacts = sorted(source_tree.glob(f"{metadata['name']}-*.pkg.tar.*"))
+                if len(artifacts) != 1:
+                    raise BootstrapError(f"fixed AUR candidate did not produce one package: {key}")
+                identity = subprocess.run(["pacman", "-Qp", str(artifacts[0])], capture_output=True,
+                                          text=True, timeout=30, check=False)
+                fields = identity.stdout.split()
+                if (identity.returncode or len(fields) != 2 or fields[0] != metadata["name"]
+                        or fields[1] != expected):
+                    raise BootstrapError(f"fixed AUR package identity mismatch: {key}")
+                installer = "pacman"
+                package_file = artifacts[0]
         asset = metadata.get("asset")
-        if asset:
+        if asset and not candidate:
             path = Path(directory) / "package.tgz"
             if asset.get("private"):
                 downloaded = subprocess.run(["gh", "release", "download", asset["tag"], "--repo", asset["repo"],
@@ -654,10 +828,11 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
             if hashlib.sha256(path.read_bytes()).hexdigest() != asset["sha256"]:
                 raise BootstrapError("package asset SHA-256 mismatch")
             install_name = str(path)
-        result = subprocess.run(
-            host.package_install_command(installer, install_name, metadata.get("registry"), metadata.get("prefix"), metadata.get("allow_scripts")),
-            check=False,
-        )
+        install_command = (["sudo", "pacman", "-U", "--needed", "--noconfirm", str(package_file)]
+                           if package_file is not None else
+                           host.package_install_command(installer, install_name, metadata.get("registry"),
+                                                        metadata.get("prefix"), metadata.get("allow_scripts")))
+        result = subprocess.run(install_command, check=False)
     if result.returncode:
         raise BootstrapError(f"package install failed: {key}")
     new_state, _ = probe_component(component, codex_home)

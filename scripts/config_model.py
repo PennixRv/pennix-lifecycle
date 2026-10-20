@@ -14,7 +14,7 @@ import owned_files as files
 
 ROOT = Path(__file__).resolve().parents[1]
 KCONFIG_FILE = ROOT / "config/Kconfig"
-FORMAT_VERSION = "4"
+FORMAT_VERSION = "5"
 HEADER = f"# Pennix workflow.config format: {FORMAT_VERSION}\n"
 PATH_KEYS = {"PENNIX_CODEX_HOME", "PENNIX_PASEO_HOME", "PENNIX_SECRETS_FILE"}
 ASSIGN = re.compile(r"^\s*(?:CONFIG_)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")

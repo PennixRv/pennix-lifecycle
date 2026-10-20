@@ -78,6 +78,48 @@ class LocalClientTests(unittest.TestCase):
         self.assertTrue(command.is_symlink())
         self.assertEqual(local_clients.inspect("client", self.component)[0], "match")
 
+    def test_explicit_candidate_replaces_a_matching_client(self):
+        self.component["id"] = "client"
+        self.component["client"]["source"] = {
+            "repo": "example/client", "path": "client", "archive": False,
+            "url": "https://example.test/client",
+            "sha256": hashlib.sha256(self.content).hexdigest(),
+        }
+        with patch.object(local_clients.files, "download", side_effect=lambda url, path: path.write_bytes(self.content)):
+            local_clients.operate("client", self.component, "install", adopt=True)
+        replacement = self.home / "replacement"
+        replacement.write_bytes(b"#!/bin/sh\nexit 1\n")
+        candidate = {"repo": "example/client", "ref": "a" * 40,
+                     "sha256": hashlib.sha256(replacement.read_bytes()).hexdigest(),
+                     "path": str(replacement)}
+        self.assertEqual(local_clients.operate("client", self.component, "upgrade", candidate=candidate),
+                         "changed; preserved adjacent user data")
+        self.assertEqual((self.home / ".client/client").read_bytes(), replacement.read_bytes())
+
+    def test_hikari_staging_generates_wrapper_without_running_upstream_installer(self):
+        config = self.home / ".config/tavily-hikari-cli"
+        config.mkdir(parents=True)
+        sentinel = config / "config.json"
+        sentinel.write_text("user data")
+        component = {"id": "tavily-hikari", "client": {
+            "root": "$HOME/.local/lib/pennix-clients/tavily-hikari",
+            "source": {"url": "https://example.test/tvly-hikari", "archive": False,
+                       "sha256": hashlib.sha256(self.content).hexdigest()},
+            "paths": ["tvly-hikari"], "commands": {"tvly-hikari": "tvly-hikari"},
+        }}
+        workspace = self.home / "staging"
+        workspace.mkdir()
+        with patch.object(local_clients.files, "download", side_effect=lambda url, path: path.write_bytes(self.content)) as download:
+            with patch.object(local_clients.shutil, "which", return_value="/usr/bin/tvly"):
+                with patch.object(local_clients.subprocess, "run", return_value=type("Result", (), {"returncode": 0, "stdout": "tvly 0.1.8"})()) as run:
+                    staged = local_clients.stage(component, workspace)
+        self.assertEqual([call.args[0] for call in download.call_args_list], ["https://example.test/tvly-hikari"])
+        self.assertEqual(run.call_args.args[0], ["tvly", "--version"])
+        self.assertEqual(staged[".tvly-hikari-real"].read_bytes(), self.content)
+        self.assertIn(str(component["client"]["root"]).replace("$HOME", str(self.home)),
+                      staged["tvly-hikari"].read_text())
+        self.assertEqual(sentinel.read_text(), "user data")
+
     def test_hooks_adopt_only_exact_entries_and_keep_other_owners(self):
         home = self.home / ".codex"
         home.mkdir()

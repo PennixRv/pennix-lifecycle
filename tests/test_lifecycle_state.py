@@ -17,6 +17,13 @@ import pennix
 
 
 class LifecycleStateTests(unittest.TestCase):
+    def test_component_routes_are_closed_and_uninstall_is_the_reverse_order(self):
+        catalog = engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
+        routable = {key for key, item in catalog["components"].items() if item.get("delivery") != "state"}
+        self.assertEqual(set(pennix.APPLY_ORDER), routable)
+        self.assertEqual(len(pennix.APPLY_ORDER), len(set(pennix.APPLY_ORDER)))
+        self.assertEqual(pennix._reverse_uninstall_order(catalog), list(reversed(pennix.APPLY_ORDER)))
+
     def test_check_rejects_pending_connections_and_external_packages(self):
         value = {"components": {"package": {"selected": True, "action": "keep", "state": "match"}},
                  "connections": {"service": {"selected": True, "action": "keep", "state": "current"}}}
@@ -32,27 +39,27 @@ class LifecycleStateTests(unittest.TestCase):
             self.assertEqual(pennix.cmd_check(args), 0)
 
     def test_plugin_version_and_source_are_required(self):
-        component = {"approved_version": "5.3.2", "plugin": {"id": "ponytail@ponytail",
-                     "marketplace": {"source": "https://example.test/plugin.git", "ref": "a" * 40}}}
-        installed = {"pluginId": "ponytail@ponytail", "enabled": True, "version": "5.3.1",
-                     "source": {"url": "https://example.test/plugin.git", "ref": "a" * 40}}
-        with patch.object(engine.shutil, "which", return_value="codex"), patch.object(engine.subprocess, "run") as run, \
-             patch.object(engine, "_plugin_refs", return_value=True):
-            run.return_value = SimpleNamespace(returncode=0, stdout=json.dumps({"installed": [installed]}))
+        component = {"lock_source": "codex-marketplace:example", "_lock_target": {"source": "codex-marketplace:example", "version": "5.3.2", "ref": "a" * 40},
+                     "plugin": {"id": "ponytail@ponytail", "marketplace": {"source": "https://example.test/plugin.git"}}}
+        with patch.object(engine, "_plugin_snapshot", side_effect=[
+                {"source": "codex-marketplace:example", "version": "5.3.1", "ref": "a" * 40},
+                {"source": "codex-marketplace:example", "version": "5.3.2", "ref": "a" * 40}]) as snapshot:
             self.assertEqual(engine._plugin_status(component, Path("/tmp/codex"))[0], "outdated")
-            installed["version"] = "5.3.2"
-            run.return_value.stdout = json.dumps({"installed": [installed]})
             self.assertEqual(engine._plugin_status(component, Path("/tmp/codex"))[0], "match")
-            self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], "/tmp/codex")
+            self.assertEqual(snapshot.call_count, 2)
 
     def test_plugin_operation_refreshes_same_source_marketplace(self):
-        component = {"plugin": {"id": "ponytail@ponytail",
+        component = {"lock_source": "codex-marketplace:example", "_candidate_target": {"source": "codex-marketplace:example", "version": "5.3.2", "ref": "b" * 40},
+                     "plugin": {"id": "ponytail@ponytail",
                      "marketplace": {"name": "ponytail", "source": "https://example.test/plugin.git",
                                       "ref": "b" * 40}}}
         marketplace = {"name": "ponytail", "marketplaceSource": {
             "sourceType": "git", "source": "https://example.test/plugin.git"}}
         with patch.object(engine.shutil, "which", return_value="codex"), \
-             patch.object(engine, "_plugin_status", side_effect=[("outdated", "5.3.1"), ("match", "5.3.2")]), \
+             patch.object(engine, "_plugin_status", side_effect=[("match", "5.3.2"), ("match", "5.3.2")]), \
+             patch.object(engine, "_plugin_owned", return_value=True), \
+             patch.object(engine, "_plugin_snapshot", return_value={"source": "codex-marketplace:example", "version": "5.3.2", "ref": "b" * 40}), \
+             patch.object(engine, "_write_plugin_receipt") as receipt, \
              patch.object(engine.subprocess, "run") as run:
             run.side_effect = [
                 SimpleNamespace(returncode=0, stdout=json.dumps({"marketplaces": [marketplace]})),
@@ -60,23 +67,34 @@ class LifecycleStateTests(unittest.TestCase):
                 SimpleNamespace(returncode=0),
                 SimpleNamespace(returncode=0),
             ]
-            self.assertEqual(engine._plugin_operation(component, Path("/tmp/codex"), "upgrade"), "changed")
+            self.assertEqual(engine._plugin_operation("ponytail-plugin", component, Path("/tmp/codex"), "upgrade"), "changed")
             self.assertEqual(run.call_args_list[1].args[0][:5],
                              ["codex", "plugin", "marketplace", "remove", "ponytail"])
+            receipt.assert_called_once()
+
+    def test_plugin_uninstall_uses_the_requested_codex_home(self):
+        component = {"lock_source": "codex-marketplace:example",
+                     "plugin": {"id": "ponytail@ponytail",
+                                 "marketplace": {"name": "ponytail", "source": "https://example.test/plugin.git"}}}
+        with patch.object(engine.shutil, "which", return_value="codex"), \
+             patch.object(engine, "_plugin_status", side_effect=[("match", "5.3.2"), ("missing", None)]), \
+             patch.object(engine, "_plugin_owned", return_value=True), \
+             patch.object(engine, "_remove_plugin_receipt"), \
+             patch.object(engine.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
+            self.assertEqual(engine._plugin_operation("ponytail-plugin", component, Path("/tmp/target-codex"), "uninstall"), "changed")
+        self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], "/tmp/target-codex")
 
     def test_rolling_packages_compare_native_full_versions(self):
-        component = {"delivery": "package", "probe": "codex", "version_policy": "repository-latest"}
+        component = {"delivery": "package", "probe": "codex", "_lock_target": {"version": "0.1.0-2"}}
         with patch.object(engine, "_command", return_value="codex"), patch.object(engine, "_version", return_value="0.1.0"), \
-             patch.object(engine, "package_identity", return_value={"version": "0.1.0-1"}), \
-             patch.object(engine, "package_candidate", return_value="0.1.0-2"):
+             patch.object(engine, "package_identity", return_value={"version": "0.1.0-1"}):
             self.assertEqual(engine.probe_component(component)[0], "outdated")
 
     def test_adoption_does_not_skip_requested_update(self):
         component = {"delivery": "package", "approved_version": "2.0.0", "probe": "test",
                      "package": {"source": "official", "name": "test"}}
-        kconf = SimpleNamespace(syms={key: SimpleNamespace(tri_value=2) for key in
-                                     ["PENNIX_ADOPT_EXISTING_PACKAGES", "PENNIX_UPDATE_COMPONENTS"]})
-        args = SimpleNamespace(codex_home=Path("/tmp/codex"), kconf=kconf)
+        kconf = SimpleNamespace(syms={"PENNIX_ADOPT_EXISTING_PACKAGES": SimpleNamespace(tri_value=2)})
+        args = SimpleNamespace(codex_home=Path("/tmp/codex"), kconf=kconf, explicit_update=True)
         with patch.object(engine.host, "detect_host", return_value={"supported": True, "installers": {"official": "pacman"}}), \
              patch.object(engine, "probe_component", side_effect=[("outdated", "1.0.0"), ("match", "2.0.0"), ("match", "2.0.0")]), \
              patch.object(engine, "package_owned", return_value=False), patch.object(engine, "package_identity"), \

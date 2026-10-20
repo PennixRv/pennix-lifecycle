@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -51,11 +52,15 @@ def destination(component: dict, codex_home: Path) -> Path:
 
 def source_identity(component: dict) -> dict:
     source = component["collection_contract"]["source"]
-    if (set(source) != {"repo", "ref", "manifest"} or not REPO.fullmatch(source["repo"])
-            or not SHA.fullmatch(source["ref"])):
-        raise CollectionError("集合来源必须固定到完整提交及自身 manifest")
+    target = component.get("_lock_target") or component.get("_candidate_target")
+    ref = target.get("ref") if isinstance(target, dict) else source.get("ref")
+    if not ref and component.get("_receipt_ref"):
+        ref = component["_receipt_ref"]
+    if (set(source) not in ({"repo", "manifest"}, {"repo", "ref", "manifest"})
+            or not REPO.fullmatch(source["repo"]) or not SHA.fullmatch(ref or "")):
+        raise CollectionError("集合来源必须由锁固定到完整提交及自身 manifest")
     relative(source["manifest"])
-    return source.copy()
+    return {"repo": source["repo"], "ref": ref, "manifest": source["manifest"]}
 
 
 def validate_manifest(value: dict, name: str) -> None:
@@ -170,9 +175,13 @@ def _verified(path: Path) -> dict:
 def inspect(component: dict, codex_home: Path) -> tuple[str, str]:
     try:
         path = destination(component, codex_home)
-        source = source_identity(component)
         if not path.exists():
             return ("blocked", "孤立集合 receipt") if receipt_path(path).exists() else ("missing", str(path))
+        if not component.get("_lock_target") and not component.get("_candidate_target") and path.exists():
+            receipt = read_receipt(path)
+            if receipt and receipt["source"].get("ref"):
+                component = {**component, "_receipt_ref": receipt["source"]["ref"]}
+        source = source_identity(component)
         value = _verified(path)
         if any(value["source"][key] != source[key] for key in ("repo", "manifest")):
             return "blocked", "集合来源归属不一致"
@@ -185,11 +194,44 @@ def owned(component: dict, codex_home: Path) -> bool:
     return inspect(component, codex_home)[0] in {"match", "upgrade-required"}
 
 
-def _stage(component: dict, workspace: Path) -> tuple[Path, dict]:
+def receipt_owned(component: dict, codex_home: Path) -> str:
+    """Check Lifecycle ownership without requiring the current catalog source."""
+    path = destination(component, codex_home)
+    if not receipt_path(path).exists():
+        return "missing"
+    try:
+        _verified(path)
+    except (CollectionError, OSError, ValueError, KeyError, TypeError) as error:
+        return f"blocked: {error}"
+    return "owned"
+
+
+def lock_migration(component: dict, codex_home: Path) -> dict | None:
+    path = destination(component, codex_home)
+    if not path.exists():
+        return None
+    receipt = _verified(path)
+    expected = component["collection_contract"]["source"]
+    source = receipt["source"]
+    if (source.get("repo") != expected.get("repo") or source.get("manifest") != expected.get("manifest")
+            or not SHA.fullmatch(source.get("ref", ""))):
+        return None
+    return {"source": component["lock_source"], "ref": source["ref"]}
+
+
+def _stage(component: dict, workspace: Path, candidate: dict | None = None) -> tuple[Path, dict]:
     source = source_identity(component)
-    archive = workspace / "source.tar.gz"
-    files.download(f"https://codeload.github.com/{source['repo']}/tar.gz/{source['ref']}", archive)
-    checkout = files.extract(archive, workspace / "source")
+    if candidate:
+        archive = Path(candidate["path"])
+        if candidate.get("repo") != source["repo"] or candidate.get("ref") != source["ref"]:
+            raise CollectionError("集合候选来源或提交与锁不符")
+        if hashlib.sha256(archive.read_bytes()).hexdigest() != candidate.get("sha256", candidate.get("archive_sha256")):
+            raise CollectionError("集合候选摘要不符")
+        checkout = Path(candidate["checkout"])
+    else:
+        archive = workspace / "source.tar.gz"
+        files.download(f"https://codeload.github.com/{source['repo']}/tar.gz/{source['ref']}", archive)
+        checkout = files.extract(archive, workspace / "source")
     import json
     manifest = json.loads((checkout / source["manifest"]).read_bytes(), object_pairs_hook=files.unique_pairs)
     validate_manifest(manifest, component["collection_contract"]["directory"])
@@ -208,23 +250,30 @@ def _stage(component: dict, workspace: Path) -> tuple[Path, dict]:
     return staging, manifest
 
 
-def operate(component: dict, codex_home: Path, operation: str) -> str:
+def operate(component: dict, codex_home: Path, operation: str, *, candidate: dict | None = None) -> str:
     path = destination(component, codex_home)
     files.ensure_parent(path)
     receipt = receipt_path(path)
-    state, reason = inspect(component, codex_home)
-    if operation == "uninstall" and files.read(receipt) is None:
-        return "preserved" if path.exists() else "no-op"
+    if operation == "uninstall":
+        if files.read(receipt) is None:
+            return "preserved" if path.exists() else "no-op"
+        try:
+            old = _verified(path)
+        except (CollectionError, OSError, ValueError, KeyError, TypeError) as error:
+            raise CollectionError(f"拒绝卸载漂移集合: {error}") from error
+        state, reason = "match", str(path)
+    else:
+        state, reason = inspect(component, codex_home)
     if state not in {"missing", "match", "upgrade-required"}:
         raise CollectionError(f"拒绝操作 {state} 集合: {reason}")
-    if state == "match" and operation != "uninstall":
+    if state == "match" and operation != "uninstall" and candidate is None:
         return "no-op"
-    old = _verified(path) if path.exists() else None
+    old = old if operation == "uninstall" else (_verified(path) if path.exists() else None)
     old_raw = files.read(receipt, private=True)
     workspace = Path(tempfile.mkdtemp(prefix=f".{path.name}.stage-", dir=path.parent))
     recoverable = False
     try:
-        staging, manifest = _stage(component, workspace) if operation != "uninstall" else (None, None)
+        staging, manifest = _stage(component, workspace, candidate) if operation != "uninstall" else (None, None)
         old_links = links(old["manifest"], path) if old else {}
         new_links = links(manifest, path) if manifest else {}
         before_links = {link: _link_value(link) for link in old_links.keys() | new_links.keys()}
