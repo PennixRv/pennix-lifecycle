@@ -34,7 +34,7 @@
 - 工具调用按操作语义遵守对应组件规定的接口；调用形式或可执行位置不改变该要求。不猜造身份、手写任务运行状态或模拟工具协议。
 - 工具可用性以宿主声明和实际回执为准；单一调用入口未暴露工具或调用失败，不代表该工具在宿主中不可用。
 - 加载 Skill 前，先从当前宿主清单取得该 Skill 的声明路径；短路径只按宿主映射展开根别名，保留其余目录层级并原样读取。相对引用以实际 SKILL.md 所在目录为准，不从 Skill 名称反推路径。职责不清或跨组件时用 $pennix-workflow-routing，不预读整个集合。
-- 本地检索、命令执行和大输出处理优先使用 context-mode；完整读取、执行边界与原生入口见 $pennix-context-mode-integration，跨组件选择见 $pennix-workflow-routing。
+- 本地检索、内容分析、非交互命令和大输出处理默认使用 Context Mode；筛选、解析、比较和汇总在执行器内完成，只返回所需结果。完整读取、工具选择与原生入口边界见 $pennix-context-mode-integration，跨组件选择见 $pennix-workflow-routing。
 - 撰写、改写、校对或审阅中文技术文档时，用 $pennix-chinese-tech-writing 按内容类型加载写作规范。
 - 系统部署用 $pennix-component-lifecycle，各安装集合按组件清单声明的动作归属执行；项目初始化需明确授权和项目根目录，不随系统部署自动执行。
 - CodeGraph 的项目配置、使用边界和原生 MCP/CLI 手册索引用 $pennix-codegraph-integration；不因普通检索自动初始化或重建索引。
