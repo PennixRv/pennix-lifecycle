@@ -15,3 +15,9 @@ CCH v0.1.48 正式 npm tgz 有唯一的 package/package.json，GitHub digest、�
 根任务使用经核验的正式 bootstrap，固定 v0.2.27 安装工具，由原生 release owner 切换受管入口及工具 receipt；只清除该 owner 能证明安全的旧工具发行，漂移则阻断。确认配置、组件锁、已有 receipt 和 journal 状态后，重新运行原生 pennix update cch-status，候选须与已验收 v0.1.48 的 ref/digest 一致。无全量 apply、配置迁移或其他升级。
 
 遵守根任务唯一完成停止点：正式制品、工具安装、CCH 原生更新、项目资产、实际宿主、根组合门禁均须完成；本维护记录及代码/版本/最终证据全部提交推送 main，最终 HEAD 与实时 origin/main 相同、ahead/behind=0/0。必要现场重连时保留未完成断点，不将源码或发行通过视为整体完成。
+
+## 已完成的发布现场
+
+`f0678c3` 已推送 `main` 并标记 `v0.2.27`。Release CI `39447772572` 成功；正式 `pennix-lifecycle-0.2.27.tar.gz` 的 GitHub digest 与独立 checksum 均为 `be65bf51bbe23efce3cb4dd754850a172f8b5c0be67b521875f7755f6baf74b9`，官方 `bootstrap.sh` SHA-256 为 `09cb43eb95a186013cc71c9710929dacadc9cb474096b2294ff74d592515cb73`，且与源码逐字节相同。固定 `v0.2.27` 的官方 bootstrap 已成功安装，入口解析到该 release。
+
+使用更新后的 Lifecycle 原生重试同一 CCH 候选，回执为 `v0.1.48`、ref `v0.1.48`、SHA-256 `5b8fbc648193681cc8e92a66dacc9375e34320f132dd133a3dd2166477dec55a`，确认后更新成功。随后 `pennix status --json`、`plan --json`、`check --json` 均将 `cch-status` 报为 `0.1.48`/`match`，功能网络检查仍为 `not_requested`，未产生 apply journal。
