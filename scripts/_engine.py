@@ -866,5 +866,5 @@ def static_operation(args: Any, key: str, component: dict[str, Any], operation: 
     if key == "codex-config":
         raise BootstrapError("codex-config is owned by the TOML writer")
     if component.get("delivery") == "collection":
-        return _operate_collection(component, args.codex_home, operation)
+        return _operate_collection(component, args.codex_home, operation, candidate=getattr(args, "candidate", None))
     return _operate_static(key, args.codex_home, component, operation, getattr(args, "expected_sha256", None))

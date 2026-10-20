@@ -56,6 +56,14 @@ class LifecycleStateTests(unittest.TestCase):
                     return_value=SimpleNamespace(returncode=0, stdout=output)):
                 self.assertEqual(engine._plugin_tree_clean(root), expected)
 
+    def test_static_collection_operation_forwards_the_exact_candidate(self):
+        candidate = {"ref": "a" * 40, "sha256": "b" * 64, "path": "/tmp/candidate.tar.gz"}
+        args = SimpleNamespace(codex_home=Path("/tmp/codex"), candidate=candidate)
+        component = {"delivery": "collection"}
+        with patch.object(engine, "_operate_collection", return_value="changed") as operate:
+            self.assertEqual(engine.static_operation(args, "pennix-skills", component, "upgrade"), "changed")
+        operate.assert_called_once_with(component, args.codex_home, "upgrade", candidate=candidate)
+
     def test_package_lock_migration_accepts_legacy_pacman_receipt_version(self):
         component = {"delivery": "package", "lock_source": "arch:extra/tmux",
                      "package": {"source": "official", "name": "tmux"}, "probe": "tmux"}
