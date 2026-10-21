@@ -13,3 +13,7 @@
 候选 0.2.28 经远端 tag 不占用检查后准备；完整 unittest 97 项、bootstrap／build-release Bash 语法和 diff check 通过。正式 build-release 必须基于提交后的准确 ref，尚未执行，不以工作树模板替代正式包。
 
 安装前 pennix plan／status 退出 0，check 退出 1：仅 Context Mode native configuration 漂移，包归属及版本匹配。只读审阅确认 MCP 等于 receipt，差异为六 Hook 使用相对命令且五个事件增加空 matcher。后续仅使用已批准的原生 repair，不修改 receipt／配置来掩盖漂移。其余已选组件和连接保持 current；functional checks 未请求。正式发行、bootstrap 升级和 codex-agents repair 仍待执行。
+
+源码／发行提交 d06f08157509cd86b9dbf316354f53bcd410393b 已推送 main，tag v0.2.28 的官方 release 39525593084 success。原生 build-release 基于提交 HEAD 通过，下载的正式包与本地包完全一致，SHA-256 为 0ae4bda6b9bb4f222dfd345a0b458c82930739cb1deeeb2af10df2b3410da061；Release 资产摘要、checksum、VERSION 及目标模板内容核验通过。正式 bootstrap SHA-256 为 09cb43eb95a186013cc71c9710929dacadc9cb474096b2294ff74d592515cb73。后续部署和根验收仍待执行。
+
+根已用固定正式 bootstrap 安装 Lifecycle `v0.2.28`，原生更新、`repair context-mode` 与 `repair codex-agents` 均已完成。全局 AGENTS 与本仓库安装模板摘要一致；安装后 `pennix status`、`plan`、`check` 退出码均为 0。保护快照中的 18 个非目标组件、6 个连接与 Codex config 未变；未执行全量 apply 或系统升级。真实宿主加载状态及组合门禁仍由根任务待宿主重载后验收。
