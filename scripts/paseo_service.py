@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import os
 import hashlib
+import ipaddress
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -19,6 +20,7 @@ class PaseoServiceError(RuntimeError):
 
 
 LISTEN = re.compile(r"^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+):[1-9][0-9]{0,4}$")
+OFFICIAL_SKILLS = ("paseo", "paseo-advisor", "paseo-committee", "paseo-handoff", "paseo-help", "paseo-plugin")
 
 
 def unit_path() -> Path:
@@ -102,17 +104,31 @@ def inspect(paseo: Path, home: Path) -> str:
 
 def runtime(paseo: Path, home: Path, mode: str, run: bool) -> dict:
     """Keep unit ownership separate from enablement and the actual daemon."""
-    result = {"state": "current", "running": False, "enabled": False, "linger": False}
-    if not run and mode == "off":
-        return result
+    result = {"state": "current", "running": False, "healthy": False,
+              "enabled": False, "linger": False, "daemon_version": None}
     try:
         status = subprocess.run([str(paseo), "daemon", "status", "--home", str(home), "--json"],
                                 capture_output=True, text=True, timeout=15, check=False)
-        value = json.loads(status.stdout) if status.returncode == 0 else {}
-        result["running"] = (isinstance(value.get("pid"), int) and value["pid"] > 0
-                             and value.get("home") == str(home))
+        if status.returncode:
+            raise PaseoServiceError("Paseo daemon status 不可核验")
+        value = json.loads(status.stdout)
+        if not isinstance(value, dict):
+            raise PaseoServiceError("Paseo daemon status 回执无效")
+        pid = value.get("pid")
+        if pid is not None and (type(pid) is not int or pid <= 0):
+            raise PaseoServiceError("Paseo daemon PID 回执无效")
+        result["running"] = pid is not None and value.get("home") == str(home)
+        result["healthy"] = (
+            result["running"] and value.get("localDaemon") == "running"
+            and isinstance(value.get("listen"), str) and bool(value["listen"])
+            and value.get("connectedDaemon") == "reachable"
+        )
+        daemon_version = value.get("daemonVersion")
+        if daemon_version is not None and not isinstance(daemon_version, str):
+            raise PaseoServiceError("Paseo daemon version 回执无效")
+        result["daemon_version"] = daemon_version
         if result["running"]:
-            os.kill(value["pid"], 0)
+            os.kill(pid, 0)
         if mode != "off":
             enabled = subprocess.run(["systemctl", "--user", "is-enabled", unit_path().stem],
                                      capture_output=True, text=True, timeout=15, check=False)
@@ -124,10 +140,13 @@ def runtime(paseo: Path, home: Path, mode: str, run: bool) -> dict:
             linger = subprocess.run(["loginctl", "show-user", str(os.getuid()), "--property=Linger", "--value"],
                                     capture_output=True, text=True, timeout=15, check=False)
             result["linger"] = linger.returncode == 0 and linger.stdout.strip() == "yes"
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, PaseoServiceError, subprocess.TimeoutExpired):
         result["state"] = "unknown"
         return result
-    if not result["running"] or mode != "off" and not (result["enabled"] and result.get("active")) or mode == "linger" and not result["linger"]:
+    if (run or mode != "off") and (
+            not result["healthy"]
+            or mode != "off" and not (result["enabled"] and result.get("active"))
+            or mode == "linger" and not result["linger"]):
         result["state"] = "start-required"
     return result
 
@@ -159,53 +178,210 @@ def _run_daemon(paseo: Path, home: Path, action: str) -> None:
         raise PaseoServiceError(f"Paseo daemon {action} 失败")
 
 
-def _config_get(paseo: Path, home: Path) -> tuple[bool, str | None]:
+def _config_get(paseo: Path, home: Path, key: str) -> tuple[bool, object]:
     result = subprocess.run(
-        [str(paseo), "daemon", "config", "get", "daemon.listen", "--home", str(home), "--json"],
+        [str(paseo), "daemon", "config", "get", key, "--home", str(home), "--json"],
         check=False,
         capture_output=True,
         text=True,
         timeout=60,
     )
     if result.returncode:
-        raise PaseoServiceError("Paseo 监听地址读取失败")
+        raise PaseoServiceError(f"Paseo 配置读取失败: {key}")
     try:
         value = json.loads(result.stdout)
     except (ValueError, UnicodeError) as error:
-        raise PaseoServiceError("Paseo 监听地址回执无效") from error
+        raise PaseoServiceError(f"Paseo 配置回执无效: {key}") from error
     if not isinstance(value, dict) or not isinstance(value.get("set"), bool):
-        raise PaseoServiceError("Paseo 监听地址回执无效")
+        raise PaseoServiceError(f"Paseo 配置回执无效: {key}")
     previous = value.get("value")
-    if value["set"] and not isinstance(previous, str):
-        raise PaseoServiceError("Paseo 监听地址类型无效")
+    if value["set"] and not isinstance(previous, (str, dict, list, bool, int, float)):
+        raise PaseoServiceError(f"Paseo 配置类型无效: {key}")
     return value["set"], previous
 
 
-def _set_listen(paseo: Path, home: Path, listen: str) -> tuple[bool, str | None]:
+def _restore_config(paseo: Path, home: Path, key: str, previous: tuple[bool, object]) -> None:
+    if previous[0]:
+        value = (previous[1] if isinstance(previous[1], str)
+                 else json.dumps(previous[1], ensure_ascii=False, separators=(",", ":")))
+        command = [str(paseo), "daemon", "config", "set", key, value]
+        if isinstance(previous[1], str):
+            command.append("--string")
+        command.extend(["--home", str(home), "--json"])
+    else:
+        command = [str(paseo), "daemon", "config", "unset", key, "--home", str(home), "--json"]
+    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=60)
+    if result.returncode or _config_get(paseo, home, key) != previous:
+        raise PaseoServiceError(f"Paseo 配置恢复失败: {key}")
+
+
+def _set_config(paseo: Path, home: Path, key: str, value: object) -> tuple[tuple[bool, object], bool]:
+    previous = _config_get(paseo, home, key)
+    if previous == (True, value):
+        return previous, False
+    encoded = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    command = [str(paseo), "daemon", "config", "set", key, encoded]
+    if isinstance(value, str):
+        command.append("--string")
+    command.extend(["--home", str(home), "--json"])
+    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=60)
+    try:
+        if result.returncode or _config_get(paseo, home, key) != (True, value):
+            raise PaseoServiceError(f"Paseo 配置写入或回读核验失败: {key}")
+    except BaseException as error:
+        try:
+            _restore_config(paseo, home, key, previous)
+        except BaseException as restore_error:
+            raise PaseoServiceError(f"Paseo 配置写入失败且恢复失败: {key}") from restore_error
+        raise error
+    return previous, True
+
+
+def _set_listen(paseo: Path, home: Path, listen: str) -> tuple[tuple[bool, object], bool]:
     if not LISTEN.fullmatch(listen):
         raise PaseoServiceError("Paseo 监听地址必须是 host:port 或 [IPv6]:port")
-    previous = _config_get(paseo, home)
-    result = subprocess.run(
-        [str(paseo), "daemon", "config", "set", "daemon.listen", listen,
-         "--string", "--home", str(home), "--json"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=60,
+    return _set_config(paseo, home, "daemon.listen", listen)
+
+
+def configure(paseo: Path, home: Path, listen: str) -> str:
+    """Commit only Lifecycle's target daemon fields, preserving them on partial failure."""
+    changes: list[tuple[str, tuple[bool, object]]] = []
+    try:
+        previous, changed = _set_listen(paseo, home, listen)
+        if changed:
+            changes.append(("daemon.listen", previous))
+        previous, changed = _set_config(paseo, home, "agents.skills.selection", {"mode": "all"})
+        if changed:
+            changes.append(("agents.skills.selection", previous))
+    except BaseException as error:
+        try:
+            for key, previous in reversed(changes):
+                _restore_config(paseo, home, key, previous)
+        except BaseException as restore_error:
+            raise PaseoServiceError("Paseo 目标配置失败且已写入字段恢复失败") from restore_error
+        raise error
+    return "changed" if changes else "no-op"
+
+
+def _managed_skills() -> list[str]:
+    root = Path.home() / ".agents" / "skills"
+    if root.is_symlink() or not root.is_dir():
+        return []
+    managed = []
+    for name in OFFICIAL_SKILLS:
+        skill = root / name
+        manifest = skill / ".paseo-managed-files.json"
+        if skill.is_symlink() or not skill.is_dir() or manifest.is_symlink() or not manifest.is_file():
+            continue
+        try:
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError):
+            continue
+        if isinstance(value, dict) and value.get("version") == 1 and isinstance(value.get("files"), dict) and value["files"]:
+            managed.append(name)
+    return managed
+
+
+def observe(paseo: Path, home: Path, listen: str, cli_version: str | None, runtime_state: dict) -> dict:
+    result = {
+        "state": "unknown",
+        "listen": {"state": "unknown", "expected": listen},
+        "skills_selection": {"state": "unknown", "expected": {"mode": "all"}},
+        "skills_sync": {"state": "unknown", "managed_skills": _managed_skills(),
+                        "expected": list(OFFICIAL_SKILLS)},
+        "versions": {"cli": cli_version, "daemon": runtime_state.get("daemon_version"), "state": "unknown"},
+        "restart_required": False,
+    }
+    try:
+        set_listen, actual_listen = _config_get(paseo, home, "daemon.listen")
+        set_selection, actual_selection = _config_get(paseo, home, "agents.skills.selection")
+    except (OSError, PaseoServiceError, subprocess.TimeoutExpired):
+        return result
+    result["listen"]["state"] = "current" if set_listen and actual_listen == listen else "mismatch"
+    result["skills_selection"]["state"] = (
+        "current" if set_selection and actual_selection == {"mode": "all"} else "mismatch"
     )
-    if result.returncode:
-        raise PaseoServiceError("Paseo 监听地址写入失败")
-    return previous
-
-
-def _restore_listen(paseo: Path, home: Path, previous: tuple[bool, str | None]) -> None:
-    if previous[0]:
-        command = [str(paseo), "daemon", "config", "set", "daemon.listen", previous[1] or "", "--string", "--home", str(home), "--json"]
+    synced = set(result["skills_sync"]["managed_skills"])
+    if synced == set(OFFICIAL_SKILLS):
+        result["skills_sync"]["state"] = "current"
+    elif not synced:
+        result["skills_sync"]["state"] = "not-installed"
     else:
-        command = [str(paseo), "daemon", "config", "unset", "daemon.listen", "--home", str(home), "--json"]
-    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=60)
-    if result.returncode:
-        raise PaseoServiceError("Paseo 监听地址恢复失败")
+        result["skills_sync"]["state"] = "incomplete"
+    daemon_version = result["versions"]["daemon"]
+    if cli_version and daemon_version:
+        result["versions"]["state"] = "current" if cli_version == daemon_version else "mismatch"
+    result["restart_required"] = (
+        result["listen"]["state"] != "current"
+        or result["skills_selection"]["state"] != "current"
+        or result["skills_sync"]["state"] == "incomplete"
+        or result["versions"]["state"] == "mismatch"
+    )
+    if (result["listen"]["state"] == "current" and result["skills_selection"]["state"] == "current"
+            and result["skills_sync"]["state"] == "current" and result["versions"]["state"] == "current"
+            and runtime_state.get("state") == "current"):
+        result["state"] = "current"
+    else:
+        result["state"] = "pending"
+    return result
+
+
+def preflight(home: Path, listen: str, mode: str, run: bool, *, needs_systemd: bool | None = None) -> None:
+    if mode not in {"off", "login", "linger"}:
+        raise PaseoServiceError(f"未知 Paseo 自启动模式: {mode}")
+    if not home.is_absolute():
+        raise PaseoServiceError("PASEO_HOME 必须是绝对路径")
+    owned_files.safe_path(home)
+    parent = next((path for path in (home, *home.parents) if path.exists()), None)
+    if parent is None or not parent.is_dir() or not os.access(parent, os.W_OK | os.X_OK):
+        raise PaseoServiceError("PASEO_HOME 目标路径不可用")
+    if not LISTEN.fullmatch(listen):
+        raise PaseoServiceError("Paseo 监听地址格式无效")
+    raw_host, raw_port = listen.rsplit(":", 1)
+    host = raw_host.strip("[]")
+    if int(raw_port) > 65535:
+        raise PaseoServiceError("Paseo 监听端口必须在 1 到 65535 之间")
+    try:
+        if host.lower() != "localhost" and not ipaddress.ip_address(host).is_loopback:
+            raise PaseoServiceError("Paseo 监听地址必须绑定 loopback")
+    except ValueError as error:
+        raise PaseoServiceError("Paseo 监听地址必须是 loopback IP") from error
+    if needs_systemd is None:
+        needs_systemd = mode != "off"
+    if needs_systemd:
+        if not shutil.which("systemctl"):
+            raise PaseoServiceError("systemctl 不可用")
+        manager = subprocess.run(["systemctl", "--user", "show-environment"],
+                                 check=False, capture_output=True, text=True, timeout=15)
+        if manager.returncode:
+            raise PaseoServiceError("systemd user manager 不可用；未执行组件变更")
+    if mode == "linger" and not shutil.which("loginctl"):
+        raise PaseoServiceError("loginctl 不可用")
+
+
+def assert_no_active_work(paseo: Path, home: Path) -> dict[str, int]:
+    try:
+        workspaces = subprocess.run([str(paseo), "workspace", "ls", "--json", "--home", str(home)],
+                                    check=False, capture_output=True, text=True, timeout=30)
+        agents = subprocess.run([str(paseo), "ls", "--all", "--json", "--home", str(home)],
+                                check=False, capture_output=True, text=True, timeout=30)
+        if workspaces.returncode or agents.returncode:
+            raise PaseoServiceError("Paseo workspace/agent 运行态不可核验；拒绝 daemon restart")
+        workspace_values = json.loads(workspaces.stdout)
+        agent_values = json.loads(agents.stdout)
+        if (not isinstance(workspace_values, list) or not isinstance(agent_values, list)
+                or any(not isinstance(item, dict) for item in workspace_values + agent_values)
+                or any(not isinstance(item.get("status"), str) for item in agent_values)):
+            raise PaseoServiceError("Paseo workspace/agent 回执无效；拒绝 daemon restart")
+        active_agents = sum(1 for item in agent_values if item["status"] == "running")
+        counts = {"workspaces": len(workspace_values), "agents": active_agents}
+    except (OSError, ValueError, UnicodeError, subprocess.TimeoutExpired) as error:
+        raise PaseoServiceError("Paseo workspace/agent 运行态不可核验；拒绝 daemon restart") from error
+    if counts["workspaces"] or counts["agents"]:
+        raise PaseoServiceError(
+            f"存在活动 Paseo workspace/agent（workspace={counts['workspaces']}，agent={counts['agents']}）；拒绝 daemon restart"
+        )
+    return counts
 
 
 def _restore_unit(path: Path, before: bytes | None) -> None:
@@ -242,6 +418,17 @@ def apply(
     state = inspect(paseo, home)
     if state in {"blocked", "drifted", "external"}:
         raise PaseoServiceError(f"Paseo unit 状态为 {state}")
+    current_runtime = runtime(paseo, home, mode, run)
+    if current_runtime["state"] == "unknown" and (run or mode != "off" or state == "current"):
+        raise PaseoServiceError("Paseo daemon 运行态不可核验；未修改服务")
+    if run:
+        if _config_get(paseo, home, "daemon.listen") != (True, listen):
+            raise PaseoServiceError("Paseo daemon.listen 尚未由独立配置步骤提交")
+        if _config_get(paseo, home, "agents.skills.selection") != (True, {"mode": "all"}):
+            raise PaseoServiceError("Paseo Skills selection 尚未由独立配置步骤提交")
+    if current_runtime["running"] and (restart_daemon or state == "current" and mode == "off"
+                                        or mode != "off" and state == "absent"):
+        assert_no_active_work(paseo, home)
     if mode == "off":
         changed = False
         if state == "current":
@@ -266,15 +453,17 @@ def apply(
         if run:
             if not paseo.is_file():
                 raise PaseoServiceError(f"Paseo 可执行文件不存在: {paseo}")
-            _set_listen(paseo, home, listen)
             _run_daemon(paseo, home, "restart" if restart_daemon else "start")
             return "changed" if changed else "started"
+        if restart_daemon and state == "absent" and current_runtime["running"]:
+            _run_daemon(paseo, home, "restart")
+            return "restarted"
         return "changed" if changed else "no-op"
     if not paseo.is_file():
         raise PaseoServiceError(f"Paseo 可执行文件不存在: {paseo}")
     if mode == "linger" and not shutil.which("loginctl"):
         raise PaseoServiceError("loginctl 不可用，无法启用 linger")
-    previous_listen = _set_listen(paseo, home, listen)
+    daemon_was_running = current_runtime["running"] and not current_runtime.get("active", False)
     before = path.read_bytes() if path.exists() else None
     before_receipt = owned_files.read(_receipt_path(), private=True)
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -290,7 +479,9 @@ def apply(
         temporary.unlink(missing_ok=True)
     try:
         _systemctl("daemon-reload")
-        if restart_daemon and state == "current":
+        if daemon_was_running:
+            _run_daemon(paseo, home, "stop")
+        if restart_daemon and current_runtime["running"] and state == "current":
             _systemctl("enable", path.stem)
             _systemctl("restart", path.stem)
         else:
@@ -310,10 +501,29 @@ def apply(
         try:
             _restore_unit(path, before)
             _systemctl("daemon-reload")
-            _restore_listen(paseo, home, previous_listen)
             if owned_files.read(_receipt_path(), private=True) != before_receipt:
                 owned_files.replace(_receipt_path(), before_receipt, owned_files.read(_receipt_path(), private=True))
+            if daemon_was_running:
+                _run_daemon(paseo, home, "start")
         except BaseException as rollback:
             raise PaseoServiceError("Paseo unit 启用失败且恢复失败") from rollback
         raise error
     return "changed"
+
+
+def restart(paseo: Path, home: Path, mode: str) -> dict:
+    assert_no_active_work(paseo, home)
+    current = runtime(paseo, home, mode, True)
+    if current["state"] == "unknown":
+        raise PaseoServiceError("Paseo daemon 运行态不可核验")
+    if mode == "off":
+        _run_daemon(paseo, home, "restart" if current["running"] else "start")
+    else:
+        if current.get("active"):
+            _systemctl("restart", unit_path().stem)
+        else:
+            _systemctl("enable", "--now", unit_path().stem)
+    state = runtime(paseo, home, mode, True)
+    if state["state"] != "current":
+        raise PaseoServiceError("Paseo daemon 重启后未达到期望运行态")
+    return state

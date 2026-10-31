@@ -341,8 +341,16 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
     run = config_model.config_value(kconf, "PENNIX_PASEO_RUN") == "y"
     listen = config_model.config_value(kconf, "PENNIX_PASEO_LISTEN")
     paseo_home = Path(config_model.config_value(kconf, "PENNIX_PASEO_HOME"))
+    service_selected = mode != "off" or run
     service_state = paseo_service.inspect(paseo, paseo_home)
-    runtime = paseo_service.runtime(paseo, paseo_home, mode, run)
+    runtime = (paseo_service.runtime(paseo, paseo_home, mode, run)
+               if service_selected or service_state == "current"
+               or config_model.config_value(kconf, "PENNIX_PASEO_RELAY") == "y"
+               else {"state": "current", "running": False, "enabled": False,
+                     "linger": False, "daemon_version": None})
+    cli_lock = args.component_lock["components"].get("paseo-cli", {})
+    paseo_config = (paseo_service.observe(paseo, paseo_home, listen, cli_lock.get("version"), runtime)
+                    if service_selected else None)
     if mode != "off" and not run:
         service_action = "blocked"
         service_detail = "Paseo 自启动需要同时启用保持运行"
@@ -357,18 +365,27 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             "uninstall" if mode == "off" else "install"
         )
         service_detail = None
-    if service_action == "keep" and runtime["state"] != "current":
+    if service_action == "keep" and service_selected and runtime["state"] != "current":
         service_action = "start"
         service_detail = "daemon、unit enable/active 或 linger 尚未达到期望"
+    if service_action == "keep" and service_selected and paseo_config["state"] != "current":
+        service_action = "start" if paseo_config["restart_required"] else "configure"
+        service_detail = "Paseo 目标配置、Skills 同步或 CLI/daemon 版本尚未一致"
+    if (service_selected and service_action != "blocked" and paseo_config
+            and paseo_config["skills_sync"]["state"] == "not-installed"):
+        service_action = "blocked"
+        service_detail = "Paseo daemon 自动同步不能完成首次 Skills 安装；请先通过 Paseo 原生 Skills 管理入口安装官方 Skills"
     components["paseo-autostart"] = {
-        "selected": mode != "off" or run,
+        "selected": service_selected,
         "mode": mode,
         "run": run,
         "listen": listen,
         "action": service_action,
-        "state": ("current" if service_action == "keep" and runtime["state"] == "current" else service_state),
+        "state": ("current" if service_action == "keep" and runtime["state"] == "current"
+                  and (paseo_config is None or paseo_config["state"] == "current") else service_state),
         "unit_state": service_state,
         "runtime": runtime,
+        **({"paseo_config": paseo_config} if paseo_config is not None else {}),
         **({"detail": service_detail} if service_detail else {}),
     }
     relay = _relay_plan(args, kconf)
@@ -514,7 +531,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     bad.extend(item for item in value["connections"].values() if item["selected"] and (
         item["action"] != "keep" or item["state"] != "current"))
     service = value["components"].get("paseo-autostart")
-    if service and service["action"] == "blocked":
+    if service and (service["action"] == "blocked" or service["selected"] and (
+            service["action"] != "keep" or service.get("state") != "current")):
         bad.append(service)
     if value.get("functional_checks_requested"):
         _, _, catalog = _load(args)
@@ -548,10 +566,16 @@ def _apply_steps(value: dict[str, Any], args: argparse.Namespace, catalog: dict[
         action = item.get("action")
         if item.get("selected") and action in {"install", "adopt", "upgrade", "adopt-upgrade"}:
             steps.append({"id": f"{key}:{action}", "component": key, "action": action,
-                          "target": args.component_lock["components"].get(key, {})})
+                          "target": item.get("candidate_target") or args.component_lock["components"].get(key, {})})
         if item.get("selected") and item.get("plugin_adoption"):
             steps.append({"id": f"{key}:adopt-plugin", "component": key,
                           "action": "adopt-plugin", "target": item["plugin_adoption"]})
+        if key == "paseo-cli" and value["components"]["paseo-autostart"].get("selected"):
+            steps.append({"id": "paseo-config:configure", "component": "paseo-config",
+                          "action": "configure", "target": {
+                              "listen": value["components"]["paseo-autostart"]["listen"],
+                              "skills_selection": {"mode": "all"},
+                          }})
     for key in APPLY_ORDER:
         item = value["components"].get(key)
         if item and item.get("selected") and item.get("native_action") == "configure":
@@ -570,12 +594,23 @@ def _apply_steps(value: dict[str, Any], args: argparse.Namespace, catalog: dict[
             steps.append({"id": f"{key}:uninstall", "component": key, "action": "uninstall", "target":
                           args.component_lock["components"].get(key, {})})
     relay = value["components"].get("paseo-relay")
-    if relay and relay.get("action") in {"install", "uninstall"}:
+    if relay and relay.get("action") in {"install", "configure", "uninstall"}:
         steps.append({"id": f"paseo-relay:{relay['action']}", "component": "paseo-relay",
                       "action": relay["action"], "target": {}})
     steps.append({"id": "path-env:apply", "component": "path-env", "action": "apply", "target": {}})
-    steps.append({"id": f"paseo-autostart:{value['components']['paseo-autostart']['action']}",
-                  "component": "paseo-autostart", "action": "service", "target": {}})
+    service = value["components"]["paseo-autostart"]
+    paseo_action = value["components"].get("paseo-cli", {}).get("action")
+    restart_daemon = bool(service["runtime"].get("running") and (
+        service.get("paseo_config", {}).get("restart_required")
+        or service["action"] in {"configure", "start", "install", "uninstall"}
+        or paseo_action in {"install", "upgrade", "adopt-upgrade"}
+        or relay and relay.get("action") in {"configure", "install"}
+    ))
+    if (service.get("selected") or service.get("unit_state") == "current"
+            or relay and relay.get("action") in {"install", "configure", "uninstall"}):
+        steps.append({"id": f"paseo-autostart:{service['action']}",
+                      "component": "paseo-autostart", "action": "service",
+                      "target": {"restart_daemon": restart_daemon}})
     return steps
 
 
@@ -697,10 +732,57 @@ def cmd_apply(args: argparse.Namespace) -> int:
             secret_store.get(Path(config_model.config_value(args.kconf, "PENNIX_SECRETS_FILE")), "codex", "api_key")
         except secret_store.SecretError as error:
             raise CliError(f"Codex API Key 预检失败：{error}") from error
-    if value["components"]["paseo-autostart"]["mode"] != "off" and "paseo-cli" not in selected:
-        raise CliError("Paseo 自启动需要选择 paseo-cli")
+    if value["components"]["paseo-autostart"]["run"] and "paseo-cli" not in selected:
+        raise CliError("Paseo daemon 运行需要选择 paseo-cli")
     steps = _apply_steps(value, args, catalog)
     active, resumed = _journal_for_apply(args, value, steps, create=False)
+    service = value["components"]["paseo-autostart"]
+    if (active and service["selected"] and service["run"]
+            and not any(item["id"] == "paseo-config:configure" for item in active["steps"])):
+        raise CliError("未完成 apply journal 缺少 Paseo 配置步骤；保留现场，不能猜测续跑")
+    paseo_home = Path(config_model.config_value(args.kconf, "PENNIX_PASEO_HOME"))
+    prefix = Path.home() / ".local"
+    paseo = prefix / "bin" / "paseo"
+    if not paseo.is_file():
+        paseo = Path(shutil.which("paseo") or paseo)
+    paseo_needed = service["selected"] or service["unit_state"] == "current" or bool(relay and relay["selected"])
+    if paseo_needed:
+        try:
+            paseo_service.preflight(
+                paseo_home, service["listen"], service["mode"], service["run"],
+                needs_systemd=service["mode"] != "off" or service["unit_state"] == "current",
+            )
+            if paseo.is_file() and service["runtime"]["state"] == "unknown":
+                raise paseo_service.PaseoServiceError("Paseo daemon 运行态不可核验")
+            restart_needed = bool(service["runtime"].get("running") and (
+                service.get("paseo_config", {}).get("restart_required")
+                or service["action"] in {"configure", "start", "install", "uninstall"}
+                or value["components"].get("paseo-cli", {}).get("action") in {"install", "upgrade", "adopt-upgrade"}
+                or relay and relay.get("action") in {"configure", "install"}
+            ))
+            if restart_needed:
+                paseo_service.assert_no_active_work(paseo, paseo_home)
+        except paseo_service.PaseoServiceError as error:
+            raise CliError(f"Paseo 只读预检失败；未执行组件变更：{error}") from error
+    plan_steps = active["steps"] if active else steps
+    paseo_step = next((item for item in plan_steps if item["component"] == "paseo-cli"
+                       and item["action"] in {"install", "adopt", "upgrade", "adopt-upgrade"}
+                       and (active is None or item["status"] != "verified")), None)
+    if paseo_step is not None:
+        component = catalog["components"]["paseo-cli"]
+        target = paseo_step["target"] or None
+        try:
+            with tempfile.TemporaryDirectory(prefix="pennix-paseo-preflight-") as directory:
+                candidate = candidates.resolve(component, Path(directory), target)
+                candidate_target = candidates.lock_entry(candidate)
+        except candidates.CandidateError as error:
+            raise CliError(f"Paseo CLI 来源或摘要预检失败；未执行组件变更：{error}") from error
+        if target and candidate_target != target:
+            raise CliError("Paseo CLI 候选与 journal 精确目标不一致；未执行组件变更")
+        if active:
+            active = apply_journal.set_target(active, paseo_step["id"], candidate_target)
+        else:
+            paseo_step["target"] = candidate_target
     plugin_adoptions = {key: item["plugin_adoption"] for key, item in value["components"].items()
                         if item.get("selected") and item.get("plugin_adoption")}
     if active is None and value.get("side_effects", {}).get("system_upgrade"):
@@ -717,7 +799,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
             return 1
     if active is None:
         active, _ = _journal_for_apply(args, value, steps, create=True)
-    relay_home = Path(config_model.config_value(args.kconf, "PENNIX_PASEO_HOME"))
+    relay_home = paseo_home
     results: dict[str, str] = {}
     system_step = next((item for item in active["steps"] if item["id"] == "system-upgrade"), None)
     if system_step is not None and system_step["status"] == "started":
@@ -749,6 +831,13 @@ def cmd_apply(args: argparse.Namespace) -> int:
                 component_lock.write(args.component_lock_path, args.component_lock, args.component_lock_sources)
                 return "migrated"
             active, results[component_id] = _journal_mutate(active, step_id, migrate)
+            continue
+        if component_id == "paseo-config":
+            def configure_paseo(step=step):
+                return paseo_service.configure(
+                    paseo, paseo_home, step["target"]["listen"]
+                )
+            active, results[component_id] = _journal_mutate(active, step_id, configure_paseo)
             continue
         if action in {"install", "adopt", "upgrade", "adopt-upgrade"}:
             component = catalog["components"].get(component_id)
@@ -851,17 +940,21 @@ def cmd_apply(args: argparse.Namespace) -> int:
             continue
         if component_id == "paseo-autostart":
             mode = value["components"]["paseo-autostart"]["mode"]
-            prefix = Path.home() / ".local"
-            paseo = prefix / "bin" / "paseo"
-            if not paseo.is_file():
-                paseo = Path(shutil.which("paseo") or paseo)
             def apply_service():
-                result = paseo_service.apply(mode, paseo, Path(config_model.config_value(args.kconf, "PENNIX_PASEO_HOME")),
+                result = paseo_service.apply(mode, paseo, paseo_home,
                     value["components"]["paseo-autostart"]["listen"], value["components"]["paseo-autostart"]["run"],
-                    restart_daemon=bool(relay and relay["selected"]))
-                if paseo_service.runtime(paseo, Path(config_model.config_value(args.kconf, "PENNIX_PASEO_HOME")), mode,
-                                         value["components"]["paseo-autostart"]["run"])["state"] != "current":
+                    restart_daemon=bool(step["target"].get("restart_daemon")))
+                runtime_state = paseo_service.runtime(
+                    paseo, paseo_home, mode, value["components"]["paseo-autostart"]["run"])
+                if runtime_state["state"] != "current":
                     raise paseo_service.PaseoServiceError("Paseo 实际 daemon/enable/active/linger 后置条件未满足")
+                if value["components"]["paseo-autostart"]["selected"]:
+                    cli_version = args.component_lock["components"].get("paseo-cli", {}).get("version")
+                    observed = paseo_service.observe(
+                        paseo, paseo_home, value["components"]["paseo-autostart"]["listen"],
+                        cli_version, runtime_state)
+                    if observed["state"] != "current":
+                        raise paseo_service.PaseoServiceError("Paseo 配置、Skills 同步或 CLI/daemon 版本后置条件未满足")
                 return result
             active, results["paseo-autostart"] = _journal_mutate(active, step_id, apply_service)
             continue
@@ -952,8 +1045,12 @@ def cmd_update(args: argparse.Namespace) -> int:
             apply_journal.clear()
             active = None
         elif apply_journal.digest(args.component_lock_path) != active["lock_digest"]:
-            raise CliError("components.lock.json 已改变；未完成 update 保留现场，不能猜测续跑")
-        elif any(item["status"] == "started" for item in active["steps"]):
+            upgrade = apply_journal.step(active, f"{args.component}:upgrade")
+            if (upgrade["status"] != "verified"
+                    or args.component_lock["components"].get(args.component) != upgrade["target"]):
+                raise CliError("components.lock.json 已改变；未完成 update 保留现场，不能猜测续跑")
+        elif any(item["status"] == "started" and item["id"] != "paseo-daemon:restart"
+                 for item in active["steps"]):
             raise CliError("update 步骤仍处于 started；保留 journal，不能自动重试")
     entry = args.component_lock["components"].get(args.component)
     if entry is None:
@@ -983,7 +1080,8 @@ def cmd_update(args: argparse.Namespace) -> int:
         raise CliError("组件没有可信 Lifecycle plugin receipt")
     if active is not None:
         step_id = f"{args.component}:upgrade"
-        active = _retry_unknown_update(active, step_id, status["state"])
+        if apply_journal.step(active, step_id)["status"] != "verified":
+            active = _retry_unknown_update(active, step_id, status["state"])
     if active is None and (not sys.stdin.isatty() or not sys.stdout.isatty()):
         raise CliError("pennix update 需要交互式终端")
     with tempfile.TemporaryDirectory(prefix="pennix-update-") as directory:
@@ -994,7 +1092,59 @@ def cmd_update(args: argparse.Namespace) -> int:
         target = candidates.lock_entry(candidate)
         if active and target != active["steps"][0]["target"]:
             raise CliError("恢复候选与 journal 中已确认目标不一致")
-        if all(entry.get(key) == target.get(key) for key in ("version", "ref", "sha256")):
+        upgrade_step_id = f"{args.component}:upgrade"
+        restart_step_id = "paseo-daemon:restart"
+        already_current = all(entry.get(key) == target.get(key) for key in ("version", "ref", "sha256"))
+        if already_current and active is None:
+            _emit({"operation": "update", "component": args.component, "status": "no-op", "target": entry}, args.json)
+            return 0
+        restart_state = None
+        if args.component == "paseo-cli":
+            paseo_home = Path(config_model.config_value(kconf, "PENNIX_PASEO_HOME"))
+            mode = config_model.choice_value(kconf, "PENNIX_PASEO_AUTOSTART_")
+            run = config_model.config_value(kconf, "PENNIX_PASEO_RUN") == "y"
+            paseo = Path(shutil.which("paseo") or Path.home() / ".local/bin/paseo")
+            restart_state = paseo_service.runtime(paseo, paseo_home, mode, run)
+            if restart_state["state"] == "unknown":
+                raise CliError("Paseo daemon 运行态不可核验；未执行 CLI 更新")
+            needs_restart = bool(restart_state["running"] and restart_state["daemon_version"] != target.get("version"))
+            if needs_restart:
+                try:
+                    paseo_service.preflight(paseo_home, config_model.config_value(kconf, "PENNIX_PASEO_LISTEN"),
+                                            mode, run, needs_systemd=mode != "off")
+                    paseo_service.assert_no_active_work(paseo, paseo_home)
+                except paseo_service.PaseoServiceError as error:
+                    raise CliError(f"Paseo CLI 更新预检失败；未执行更新：{error}") from error
+        has_restart_step = bool(args.component == "paseo-cli" and (
+            any(item["id"] == restart_step_id for item in active["steps"])
+            if active else restart_state["running"] and restart_state["daemon_version"] != target.get("version")))
+        restart_pending = has_restart_step
+        if (active is not None and apply_journal.step(active, upgrade_step_id)["status"] == "verified"
+                and restart_pending):
+            restart_step = apply_journal.step(active, restart_step_id)
+            cli_version = args.component_lock["components"][args.component].get("version")
+            if restart_state["running"] and restart_state["daemon_version"] == cli_version:
+                active = apply_journal.verified(active, restart_step_id, {"daemon_version": cli_version, "running": True})
+                if apply_journal.complete(active):
+                    apply_journal.clear()
+                    _emit({"operation": "update", "component": args.component,
+                           "status": "recovered", "target": args.component_lock["components"][args.component]}, args.json)
+                    return 0
+            elif not restart_state["running"] and not restart_step["target"].get("was_running"):
+                active = apply_journal.verified(active, restart_step_id, {"running": False})
+                if apply_journal.complete(active):
+                    apply_journal.clear()
+                    _emit({"operation": "update", "component": args.component,
+                           "status": "recovered", "target": args.component_lock["components"][args.component]}, args.json)
+                    return 0
+            elif restart_step["status"] == "unknown":
+                active = apply_journal.retry(active, restart_step_id)
+            elif restart_step["status"] == "started":
+                raise CliError("Paseo daemon restart 状态不确定且版本仍不一致；保留 journal，需人工核验")
+            elif restart_step["status"] == "verified":
+                raise CliError("Paseo daemon restart 回执与当前版本不一致；保留 journal，需人工核验")
+        if already_current and not (active is not None and restart_pending
+                                    and apply_journal.step(active, restart_step_id)["status"] != "verified"):
             _emit({"operation": "update", "component": args.component, "status": "no-op", "target": entry}, args.json)
             return 0
         component["_candidate_target"] = target
@@ -1005,9 +1155,13 @@ def cmd_update(args: argparse.Namespace) -> int:
                 return 1
             config_digest = apply_journal.digest(config_path)
             lock_digest = apply_journal.digest(args.component_lock_path)
-            active = apply_journal.start("update", args.component, config_digest, lock_digest,
-                                         [{"id": f"{args.component}:upgrade", "component": args.component,
-                                           "action": "upgrade", "target": target}])
+            steps = [{"id": upgrade_step_id, "component": args.component,
+                      "action": "upgrade", "target": target}]
+            if has_restart_step:
+                steps.append({"id": restart_step_id, "component": "paseo-daemon",
+                              "action": "restart", "target": {"mode": mode,
+                                                                      "was_running": bool(restart_state["running"])}})
+            active = apply_journal.start("update", args.component, config_digest, lock_digest, steps)
         step_id = f"{args.component}:upgrade"
         def update_component():
             result = _run_component(args, catalog, args.component, "upgrade", candidate=candidate)
@@ -1015,6 +1169,24 @@ def cmd_update(args: argparse.Namespace) -> int:
             component_lock.write(args.component_lock_path, args.component_lock, args.component_lock_sources)
             return result
         active, result = _journal_mutate(active, step_id, update_component)
+        if restart_pending:
+            def restart_paseo():
+                current = paseo_service.runtime(paseo, paseo_home, mode, run)
+                if current["state"] == "unknown":
+                    raise paseo_service.PaseoServiceError("Paseo daemon 运行态不可核验")
+                if not current["running"]:
+                    if step_target_running:
+                        state = paseo_service.restart(paseo, paseo_home, mode)
+                        if state.get("daemon_version") != args.component_lock["components"][args.component].get("version"):
+                            raise paseo_service.PaseoServiceError("Paseo CLI 与 daemon 版本不一致")
+                        return "restarted"
+                    return "not-running"
+                state = paseo_service.restart(paseo, paseo_home, mode)
+                if state.get("daemon_version") != args.component_lock["components"][args.component].get("version"):
+                    raise paseo_service.PaseoServiceError("Paseo CLI 与 daemon 版本不一致")
+                return "restarted"
+            step_target_running = bool(apply_journal.step(active, restart_step_id)["target"].get("was_running"))
+            active, results = _journal_mutate(active, restart_step_id, restart_paseo)
     apply_journal.clear()
     _emit({"operation": "update", "component": args.component, "status": result, "target": target}, args.json)
     return 0

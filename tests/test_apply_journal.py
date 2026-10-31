@@ -37,6 +37,22 @@ class ApplyJournalTests(unittest.TestCase):
                 apply_journal.retry(value, "pennix-skills:upgrade")
             apply_journal.clear()
 
+    def test_paseo_config_receipt_survives_later_service_failure(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                apply_journal.owned_files, "state_root", return_value=Path(directory)):
+            value = apply_journal.start("apply", None, "a" * 64, None, [
+                {"id": "paseo-config:configure", "component": "paseo-config",
+                 "action": "configure", "target": {"listen": "127.0.0.1:6767"}},
+                {"id": "paseo-autostart:start", "component": "paseo-autostart",
+                 "action": "service", "target": {}},
+            ])
+            value = apply_journal.verified(value, "paseo-config:configure", {"state": "current"})
+            value = apply_journal.started(value, "paseo-autostart:start")
+            value = apply_journal.unknown(value, "paseo-autostart:start")
+            self.assertEqual([step["status"] for step in value["steps"]], ["verified", "unknown"])
+            self.assertFalse(apply_journal.complete(value))
+            apply_journal.clear()
+
 
 if __name__ == "__main__":
     unittest.main()

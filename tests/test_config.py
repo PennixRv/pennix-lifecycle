@@ -74,6 +74,8 @@ class ConfigModelTests(unittest.TestCase):
         self.assertEqual(declared, {key for key, item in catalog["components"].items() if item["delivery"] != "state"})
         self.assertEqual(config_model.config_value(loaded, "PENNIX_CODEX_HOME"), str(self.home / ".codex"))
         self.assertEqual(config_model.config_value(loaded, "PENNIX_PASEO_HOME"), str(self.home / ".paseo"))
+        self.assertEqual(config_model.config_value(loaded, "PENNIX_PASEO_RUN"), "y")
+        self.assertEqual(config_model.choice_value(loaded, "PENNIX_PASEO_AUTOSTART_"), "login")
         self.assertEqual(config_model.config_value(loaded, "PENNIX_PASEO_RELAY"), "n")
 
     def test_catalog_does_not_claim_cch_is_a_public_npm_package(self) -> None:
@@ -301,6 +303,134 @@ class ConfigModelTests(unittest.TestCase):
         self.assertEqual(paseo_service.inspect(paseo, home), "current")
         path.write_text("[Service]\n", encoding="utf-8")
         self.assertEqual(paseo_service.inspect(paseo, home), "drifted")
+
+    def test_paseo_config_restore_places_string_flag_before_home(self) -> None:
+        paseo = self.home / "bin/paseo"
+        home = self.home / "paseo"
+        with mock.patch.object(paseo_service.subprocess, "run",
+                               return_value=SimpleNamespace(returncode=0, stdout="{}", stderr="")) as run, \
+             mock.patch.object(paseo_service, "_config_get", return_value=(True, "127.0.0.1:6767")):
+            paseo_service._restore_config(paseo, home, "daemon.listen", (True, "127.0.0.1:6767"))
+        self.assertEqual(run.call_args.args[0], [
+            str(paseo), "daemon", "config", "set", "daemon.listen", "127.0.0.1:6767",
+            "--string", "--home", str(home), "--json",
+        ])
+
+    def test_paseo_config_commits_only_target_fields_and_restores_partial_failure(self) -> None:
+        paseo = self.home / "bin/paseo"
+        home = self.home / "paseo"
+        state = {"daemon.listen": "0.0.0.0:6767", "unrelated.setting": {"keep": True}}
+
+        def run(command, **_kwargs):
+            action, key = command[3], command[4]
+            if action == "get":
+                return SimpleNamespace(returncode=0, stdout=json.dumps({"set": key in state,
+                                                                        "value": state.get(key)}), stderr="")
+            if action == "set":
+                if key == "agents.skills.selection" and self.fail_selection:
+                    return SimpleNamespace(returncode=1, stdout="", stderr="failure")
+                raw = command[5]
+                state[key] = raw if "--string" in command else json.loads(raw)
+            elif action == "unset":
+                state.pop(key, None)
+            return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+        self.fail_selection = False
+        with mock.patch.object(paseo_service.subprocess, "run", side_effect=run):
+            self.assertEqual(paseo_service.configure(paseo, home, "127.0.0.1:6767"), "changed")
+        self.assertEqual(state, {
+            "daemon.listen": "127.0.0.1:6767", "unrelated.setting": {"keep": True},
+            "agents.skills.selection": {"mode": "all"},
+        })
+        state.pop("agents.skills.selection")
+        state["daemon.listen"] = "0.0.0.0:6767"
+        self.fail_selection = True
+        with mock.patch.object(paseo_service.subprocess, "run", side_effect=run):
+            with self.assertRaises(paseo_service.PaseoServiceError):
+                paseo_service.configure(paseo, home, "127.0.0.1:6767")
+        self.assertEqual(state, {"daemon.listen": "0.0.0.0:6767", "unrelated.setting": {"keep": True}})
+
+    def test_paseo_preflight_accepts_localhost_and_rejects_non_loopback_or_invalid_port(self) -> None:
+        paseo_service.preflight(self.home / ".paseo", "localhost:6767", "off", True)
+        with self.assertRaisesRegex(paseo_service.PaseoServiceError, "loopback"):
+            paseo_service.preflight(self.home / ".paseo", "0.0.0.0:6767", "off", True)
+        with self.assertRaisesRegex(paseo_service.PaseoServiceError, "端口"):
+            paseo_service.preflight(self.home / ".paseo", "127.0.0.1:65536", "off", True)
+
+    def test_paseo_preflight_rejects_missing_systemd_user_manager(self) -> None:
+        with mock.patch.object(paseo_service.shutil, "which", return_value="/usr/bin/systemctl"), \
+             mock.patch.object(paseo_service.subprocess, "run",
+                               return_value=SimpleNamespace(returncode=1, stdout="", stderr="")):
+            with self.assertRaisesRegex(paseo_service.PaseoServiceError, "systemd user manager"):
+                paseo_service.preflight(self.home / ".paseo", "127.0.0.1:6767", "login", True)
+
+    def test_paseo_observe_requires_selection_sync_and_matching_daemon_version(self) -> None:
+        skills = self.home / ".agents" / "skills"
+        for name in paseo_service.OFFICIAL_SKILLS:
+            directory = skills / name
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / ".paseo-managed-files.json").write_text(
+                json.dumps({"version": 1, "files": {"SKILL.md": "hash"}}), encoding="utf-8")
+        paseo = self.home / "bin/paseo"
+        home = self.home / "paseo"
+        with mock.patch.object(paseo_service, "_config_get", side_effect=[
+                (True, "127.0.0.1:6767"), (True, {"mode": "all"})]):
+            result = paseo_service.observe(
+                paseo, home, "127.0.0.1:6767", "0.14.0",
+                {"state": "current", "daemon_version": "0.14.0"})
+        self.assertEqual(result["state"], "current")
+        self.assertEqual(result["skills_sync"]["state"], "current")
+        self.assertEqual(result["skills_sync"]["managed_skills"], list(paseo_service.OFFICIAL_SKILLS))
+        self.assertFalse(result["restart_required"])
+
+    def test_paseo_observe_does_not_treat_empty_skill_install_as_restart_repairable(self) -> None:
+        paseo = self.home / "bin/paseo"
+        home = self.home / "paseo"
+        with mock.patch.object(paseo_service, "_config_get", side_effect=[
+                (True, "127.0.0.1:6767"), (True, {"mode": "all"})]):
+            result = paseo_service.observe(
+                paseo, home, "127.0.0.1:6767", "0.14.0",
+                {"state": "current", "daemon_version": "0.14.0"})
+        self.assertEqual(result["skills_sync"]["state"], "not-installed")
+        self.assertEqual(result["state"], "pending")
+        self.assertFalse(result["restart_required"])
+
+    def test_paseo_runtime_reads_daemon_version_without_starting_disabled_service(self) -> None:
+        paseo = self.home / "bin/paseo"
+        home = self.home / "paseo"
+        reply = SimpleNamespace(returncode=0, stdout=json.dumps({
+            "home": str(home), "pid": None, "daemonVersion": "0.14.0"}), stderr="")
+        with mock.patch.object(paseo_service.subprocess, "run", return_value=reply) as run:
+            state = paseo_service.runtime(paseo, home, "off", False)
+        self.assertEqual(state["daemon_version"], "0.14.0")
+        self.assertEqual(state["state"], "current")
+        self.assertEqual(run.call_count, 1)
+
+    def test_paseo_runtime_requires_a_listening_reachable_daemon_when_enabled(self) -> None:
+        paseo = self.home / "bin/paseo"
+        home = self.home / "paseo"
+        reply = SimpleNamespace(returncode=0, stdout=json.dumps({
+            "home": str(home), "pid": 1234, "daemonVersion": "0.14.0",
+            "localDaemon": "running", "listen": "127.0.0.1:6767",
+            "connectedDaemon": "unreachable",
+        }), stderr="")
+        with mock.patch.object(paseo_service.subprocess, "run", return_value=reply), \
+             mock.patch.object(paseo_service, "_systemctl"), \
+             mock.patch.object(paseo_service.os, "kill"):
+            state = paseo_service.runtime(paseo, home, "off", True)
+        self.assertTrue(state["running"])
+        self.assertFalse(state["healthy"])
+        self.assertEqual(state["state"], "start-required")
+
+    def test_paseo_busy_guard_rejects_malformed_agent_receipt(self) -> None:
+        paseo = self.home / "bin/paseo"
+        home = self.home / "paseo"
+        with mock.patch.object(paseo_service.subprocess, "run", side_effect=[
+                SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+                SimpleNamespace(returncode=0, stdout='[{"id":"hidden"}]', stderr=""),
+        ]):
+            with self.assertRaisesRegex(paseo_service.PaseoServiceError, "回执无效"):
+                paseo_service.assert_no_active_work(paseo, home)
 
     def test_relay_daemon_config_restores_partial_write(self) -> None:
         paseo = self.home / "bin/paseo"
