@@ -57,7 +57,7 @@ class LifecycleStateTests(unittest.TestCase):
         self.assertLess(ids.index("paseo-config:configure"), ids.index("paseo-autostart:start"))
         self.assertEqual(steps[-1]["target"]["restart_daemon"], True)
 
-    def test_plan_blocks_service_apply_when_paseo_skills_need_first_install(self):
+    def test_plan_allows_native_paseo_skill_sync_when_skills_are_not_installed(self):
         kconf = SimpleNamespace()
         values = {
             "PENNIX_CODEX_HOME": "/tmp/codex", "PENNIX_PASEO_RUN": "y",
@@ -79,8 +79,11 @@ class LifecycleStateTests(unittest.TestCase):
              patch.object(pennix, "_relay_plan", return_value=None), \
              patch.object(pennix.connection_owners, "plan", return_value={}):
             result = pennix._plan(args)
-        self.assertEqual(result["components"]["paseo-autostart"]["action"], "blocked")
-        self.assertIn("首次 Skills 安装", result["components"]["paseo-autostart"]["detail"])
+        self.assertEqual(result["components"]["paseo-autostart"]["action"], "configure")
+        self.assertEqual(
+            result["components"]["paseo-autostart"]["paseo_config"]["skills_sync"]["state"],
+            "not-installed",
+        )
 
     def test_apply_preflights_paseo_before_creating_journal_and_rejects_lock_mismatch(self):
         target = {"source": "npm:@getpaseo/cli:latest", "version": "0.13.0", "sha256": "a" * 64}

@@ -371,10 +371,6 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
     if service_action == "keep" and service_selected and paseo_config["state"] != "current":
         service_action = "start" if paseo_config["restart_required"] else "configure"
         service_detail = "Paseo 目标配置、Skills 同步或 CLI/daemon 版本尚未一致"
-    if (service_selected and service_action != "blocked" and paseo_config
-            and paseo_config["skills_sync"]["state"] == "not-installed"):
-        service_action = "blocked"
-        service_detail = "Paseo daemon 自动同步不能完成首次 Skills 安装；请先通过 Paseo 原生 Skills 管理入口安装官方 Skills"
     components["paseo-autostart"] = {
         "selected": service_selected,
         "mode": mode,
