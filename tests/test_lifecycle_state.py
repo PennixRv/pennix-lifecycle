@@ -222,6 +222,60 @@ class LifecycleStateTests(unittest.TestCase):
             with self.assertRaisesRegex(pennix.CliError, "restart 回执与当前版本不一致"):
                 pennix.cmd_update(args)
 
+    def test_update_restarts_daemon_after_verified_cli_upgrade(self):
+        target = {"source": "npm:@getpaseo/cli:latest", "version": "0.14.0", "sha256": "b" * 64}
+        active = {"command": "update", "component": "paseo-cli", "config_digest": "config",
+                  "lock_digest": "old-lock", "steps": [
+                      {"id": "paseo-cli:upgrade", "status": "verified", "target": target},
+                      {"id": "paseo-daemon:restart", "status": "pending",
+                       "target": {"mode": "login", "was_running": True}},
+                  ]}
+        args = SimpleNamespace(component="paseo-cli", config=Path("/tmp/workflow.config"),
+                               component_lock_path=Path("/tmp/components.lock"),
+                               component_lock={"components": {"paseo-cli": target}},
+                               component_lock_sources={}, json=True)
+        kconf = SimpleNamespace()
+        component = {"delivery": "package", "package": {"source": "npm"}}
+        catalog = {"components": {"paseo-cli": component}}
+        candidate = {"impact": "test"}
+        old_runtime = {"state": "current", "running": True, "daemon_version": "0.13.0"}
+
+        def mutate(value, step_id, action):
+            if step_id == "paseo-cli:upgrade":
+                return value, "resumed"
+            return value, action()
+
+        with patch.object(pennix, "_load", return_value=(kconf, Path("/tmp/workflow.config"), catalog)), \
+             patch.object(config_model, "selected_components", return_value={"paseo-cli"}), \
+             patch.object(pennix.apply_journal, "read", return_value=active), \
+             patch.object(pennix.apply_journal, "digest", side_effect=["config", "new-lock"]), \
+             patch.object(pennix, "_component_status", return_value={"state": "match", "ownership": "lifecycle"}), \
+             patch.object(pennix.candidates, "resolve", return_value=candidate), \
+             patch.object(pennix.candidates, "lock_entry", return_value=target), \
+             patch.object(config_model, "config_value", side_effect=lambda _kconf, key:
+                          {"PENNIX_CODEX_HOME": "/tmp/codex", "PENNIX_PASEO_HOME": "/tmp/paseo",
+                           "PENNIX_PASEO_RUN": "y", "PENNIX_PASEO_LISTEN": "127.0.0.1:6767"}[key]), \
+             patch.object(config_model, "choice_value", return_value="login"), \
+             patch.object(pennix.shutil, "which", return_value="/tmp/paseo-cli"), \
+             patch.object(pennix.paseo_service, "runtime", side_effect=[old_runtime, old_runtime]), \
+             patch.object(pennix.paseo_service, "preflight") as preflight, \
+             patch.object(pennix.paseo_service, "assert_no_active_work") as busy_check, \
+             patch.object(pennix.paseo_service, "restart", return_value={
+                 "state": "current", "daemon_version": "0.14.0"}) as restart, \
+             patch.object(pennix, "_journal_mutate", side_effect=mutate), \
+             patch.object(pennix, "_run_component") as run_component, \
+             patch.object(pennix.apply_journal, "clear") as clear, \
+             patch.object(pennix, "_emit") as emit:
+            self.assertEqual(pennix.cmd_update(args), 0)
+
+        preflight.assert_called_once()
+        busy_check.assert_called_once()
+        restart.assert_called_once_with(Path("/tmp/paseo-cli"), Path("/tmp/paseo"), "login")
+        run_component.assert_not_called()
+        clear.assert_called_once()
+        self.assertEqual(emit.call_count, 2)
+        self.assertEqual(emit.call_args.args[0]["status"], "resumed")
+
     def test_package_lock_migration_accepts_legacy_pacman_receipt_version(self):
         component = {"delivery": "package", "lock_source": "arch:extra/tmux",
                      "package": {"source": "official", "name": "tmux"}, "probe": "tmux"}
