@@ -94,6 +94,13 @@ class ConfigModelTests(unittest.TestCase):
         self.assertEqual(component["lock_source_aliases"], ["npm:@pennixrv/context-mode:latest"])
         self.assertEqual(component["package"]["tag"], "beta")
 
+    def test_trellis_uses_stable_latest_with_beta_lock_alias(self) -> None:
+        catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
+        component = catalog["components"]["trellis-cli"]
+        self.assertEqual(component["lock_source"], "npm:@pennixrv/trellis:latest")
+        self.assertEqual(component["lock_source_aliases"], ["npm:@pennixrv/trellis:beta"])
+        self.assertEqual(component["package"]["tag"], "latest")
+
     def test_catalog_rejects_invalid_lock_source_aliases(self) -> None:
         path = self.home / "catalog.json"
         for aliases in ([], [""], ["npm:example:beta"], ["legacy", "legacy"], "legacy"):

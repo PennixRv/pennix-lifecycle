@@ -113,6 +113,9 @@
     "trellis-cli": {
       "delivery": "package",
       "lock_source": "npm:@pennixrv/trellis:latest",
+      "lock_source_aliases": [
+        "npm:@pennixrv/trellis:beta"
+      ],
       "source": "native Trellis installation",
       "owner": "trellis",
       "scope": "global/project",
