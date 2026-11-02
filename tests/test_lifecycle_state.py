@@ -57,7 +57,7 @@ class LifecycleStateTests(unittest.TestCase):
         self.assertLess(ids.index("paseo-config:configure"), ids.index("paseo-autostart:start"))
         self.assertEqual(steps[-1]["target"]["restart_daemon"], True)
 
-    def test_plan_allows_native_paseo_skill_sync_when_skills_are_not_installed(self):
+    def test_plan_blocks_paseo_apply_until_the_official_skills_first_install(self):
         kconf = SimpleNamespace()
         values = {
             "PENNIX_CODEX_HOME": "/tmp/codex", "PENNIX_PASEO_RUN": "y",
@@ -79,11 +79,73 @@ class LifecycleStateTests(unittest.TestCase):
              patch.object(pennix, "_relay_plan", return_value=None), \
              patch.object(pennix.connection_owners, "plan", return_value={}):
             result = pennix._plan(args)
-        self.assertEqual(result["components"]["paseo-autostart"]["action"], "configure")
+        self.assertEqual(result["components"]["paseo-autostart"]["action"], "blocked")
+        self.assertIn("首次安装", result["components"]["paseo-autostart"]["detail"])
         self.assertEqual(
             result["components"]["paseo-autostart"]["paseo_config"]["skills_sync"]["state"],
             "not-installed",
         )
+
+    def test_apply_blocks_uninstalled_paseo_skills_before_creating_journal(self):
+        value = {"components": {
+            "paseo-autostart": {"selected": True, "action": "blocked", "detail": "Skills 首次安装"},
+        }, "connections": {}, "side_effects": {}}
+        args = SimpleNamespace(component_lock={"components": {}}, json=True)
+        catalog = {"components": {}}
+        with patch.object(pennix, "_plan", return_value=value), \
+             patch.object(pennix, "_load", return_value=(SimpleNamespace(), Path("/tmp/config"), catalog)), \
+             patch.object(pennix, "_journal_for_apply") as journal, \
+             patch.object(pennix, "_run_component") as run_component:
+            with self.assertRaisesRegex(pennix.CliError, "首次安装"):
+                pennix.cmd_apply(args)
+        journal.assert_not_called()
+        run_component.assert_not_called()
+
+    def test_apply_ignores_blocked_unselected_paseo_service_for_unrelated_components(self):
+        value = {"components": {
+            "unrelated-component": {"selected": True, "action": "keep"},
+            "paseo-autostart": {
+                "selected": False, "action": "blocked", "detail": "外部 unit 未由 Lifecycle 管理",
+                "run": False, "unit_state": "external",
+            },
+        }, "connections": {}, "side_effects": {}}
+        args = SimpleNamespace(component_lock={"components": {}}, json=True)
+        catalog = {"components": {}}
+
+        class ApplyStepsReached(Exception):
+            pass
+
+        with patch.object(pennix, "_plan", return_value=value), \
+             patch.object(pennix, "_load", return_value=(SimpleNamespace(), Path("/tmp/config"), catalog)), \
+             patch.object(pennix, "_apply_steps", side_effect=ApplyStepsReached):
+            with self.assertRaises(ApplyStepsReached):
+                pennix.cmd_apply(args)
+
+    def test_plan_blocks_unowned_active_paseo_unit_before_apply(self):
+        kconf = SimpleNamespace()
+        values = {
+            "PENNIX_CODEX_HOME": "/tmp/codex", "PENNIX_PASEO_RUN": "y",
+            "PENNIX_PASEO_LISTEN": "127.0.0.1:6767", "PENNIX_PASEO_HOME": "/tmp/paseo",
+            "PENNIX_PASEO_RELAY": "n", "PENNIX_SECRETS_FILE": "/tmp/secrets.json",
+            "PENNIX_FUNCTIONAL_CHECKS": "n", "PENNIX_SYSTEM_UPGRADE": "n",
+        }
+        catalog = {"components": {}, "configuration_targets": {}}
+        args = SimpleNamespace(component_lock={"components": {}})
+        runtime = {"state": "start-required", "running": True, "enabled": True,
+                   "active": True, "linger": False, "daemon_version": "0.14.0"}
+        with patch.object(pennix, "_load", return_value=(kconf, Path("/tmp/workflow.config"), catalog)), \
+             patch.object(config_model, "selected_components", return_value=set()), \
+             patch.object(config_model, "config_value", side_effect=lambda _kconf, key: values[key]), \
+             patch.object(config_model, "choice_value", return_value="login"), \
+             patch.object(pennix.paseo_service, "inspect", return_value="absent"), \
+             patch.object(pennix.paseo_service, "runtime", return_value=runtime), \
+             patch.object(pennix.paseo_service, "observe", return_value={"state": "pending"}), \
+             patch.object(pennix, "_relay_plan", return_value=None), \
+             patch.object(pennix.connection_owners, "plan", return_value={}):
+            result = pennix._plan(args)
+        service = result["components"]["paseo-autostart"]
+        self.assertEqual(service["action"], "blocked")
+        self.assertIn("未由 Lifecycle 管理", service["detail"])
 
     def test_apply_preflights_paseo_before_creating_journal_and_rejects_lock_mismatch(self):
         target = {"source": "npm:@getpaseo/cli:latest", "version": "0.13.0", "sha256": "a" * 64}

@@ -129,7 +129,7 @@ def runtime(paseo: Path, home: Path, mode: str, run: bool) -> dict:
         result["daemon_version"] = daemon_version
         if result["running"]:
             os.kill(pid, 0)
-        if mode != "off":
+        if mode != "off" or unit_path().is_file():
             enabled = subprocess.run(["systemctl", "--user", "is-enabled", unit_path().stem],
                                      capture_output=True, text=True, timeout=15, check=False)
             active = subprocess.run(["systemctl", "--user", "is-active", unit_path().stem],
@@ -277,7 +277,21 @@ def _managed_skills() -> list[str]:
             value = json.loads(manifest.read_text(encoding="utf-8"))
         except (OSError, ValueError, UnicodeError):
             continue
-        if isinstance(value, dict) and value.get("version") == 1 and isinstance(value.get("files"), dict) and value["files"]:
+        files = value.get("files") if isinstance(value, dict) and value.get("version") == 1 else None
+        if not isinstance(files, dict) or not files:
+            continue
+        skill_root = skill.resolve()
+        for relative, expected_hash in files.items():
+            if not isinstance(relative, str) or not relative or not isinstance(expected_hash, str):
+                break
+            try:
+                target = (skill / relative).resolve(strict=True)
+                target.relative_to(skill_root)
+                if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != expected_hash:
+                    break
+            except (OSError, ValueError):
+                break
+        else:
             managed.append(name)
     return managed
 
@@ -361,9 +375,9 @@ def preflight(home: Path, listen: str, mode: str, run: bool, *, needs_systemd: b
 
 def assert_no_active_work(paseo: Path, home: Path) -> dict[str, int]:
     try:
-        workspaces = subprocess.run([str(paseo), "workspace", "ls", "--json", "--home", str(home)],
+        workspaces = subprocess.run([str(paseo), "workspace", "ls", "--background", "--json", "--home", str(home)],
                                     check=False, capture_output=True, text=True, timeout=30)
-        agents = subprocess.run([str(paseo), "ls", "--all", "--json", "--home", str(home)],
+        agents = subprocess.run([str(paseo), "ls", "-g", "--background", "--json", "--home", str(home)],
                                 check=False, capture_output=True, text=True, timeout=30)
         if workspaces.returncode or agents.returncode:
             raise PaseoServiceError("Paseo workspace/agent 运行态不可核验；拒绝 daemon restart")
@@ -373,7 +387,8 @@ def assert_no_active_work(paseo: Path, home: Path) -> dict[str, int]:
                 or any(not isinstance(item, dict) for item in workspace_values + agent_values)
                 or any(not isinstance(item.get("status"), str) for item in agent_values)):
             raise PaseoServiceError("Paseo workspace/agent 回执无效；拒绝 daemon restart")
-        active_agents = sum(1 for item in agent_values if item["status"] == "running")
+        active_agents = sum(1 for item in agent_values
+                            if item["status"] in {"initializing", "idle", "running"})
         counts = {"workspaces": len(workspace_values), "agents": active_agents}
     except (OSError, ValueError, UnicodeError, subprocess.TimeoutExpired) as error:
         raise PaseoServiceError("Paseo workspace/agent 运行态不可核验；拒绝 daemon restart") from error
@@ -401,6 +416,11 @@ def _restore_unit(path: Path, before: bytes | None) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _restore_activation(unit: str, enabled: bool, active: bool) -> None:
+    _systemctl("enable" if enabled else "disable", unit)
+    _systemctl("start" if active else "stop", unit)
+
+
 def apply(
     mode: str,
     paseo: Path,
@@ -421,6 +441,9 @@ def apply(
     current_runtime = runtime(paseo, home, mode, run)
     if current_runtime["state"] == "unknown" and (run or mode != "off" or state == "current"):
         raise PaseoServiceError("Paseo daemon 运行态不可核验；未修改服务")
+    if mode != "off" and state == "absent" and (
+            current_runtime.get("enabled") or current_runtime.get("active")):
+        raise PaseoServiceError("存在未由 Lifecycle 管理的同名 Paseo user unit")
     if run:
         if _config_get(paseo, home, "daemon.listen") != (True, listen):
             raise PaseoServiceError("Paseo daemon.listen 尚未由独立配置步骤提交")
@@ -443,7 +466,9 @@ def apply(
                 try:
                     _restore_unit(path, before)
                     _systemctl("daemon-reload")
-                    _systemctl("enable", "--now", path.stem)
+                    _restore_activation(
+                        path.stem, current_runtime["enabled"], current_runtime.get("active", False)
+                    )
                     if owned_files.read(_receipt_path(), private=True) != before_receipt:
                         owned_files.replace(_receipt_path(), before_receipt, owned_files.read(_receipt_path(), private=True))
                 except BaseException as rollback:
@@ -464,6 +489,9 @@ def apply(
     if mode == "linger" and not shutil.which("loginctl"):
         raise PaseoServiceError("loginctl 不可用，无法启用 linger")
     daemon_was_running = current_runtime["running"] and not current_runtime.get("active", False)
+    daemon_stop_attempted = False
+    activation_attempted = False
+    linger_attempted = False
     before = path.read_bytes() if path.exists() else None
     before_receipt = owned_files.read(_receipt_path(), private=True)
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -480,13 +508,17 @@ def apply(
     try:
         _systemctl("daemon-reload")
         if daemon_was_running:
+            daemon_stop_attempted = True
             _run_daemon(paseo, home, "stop")
         if restart_daemon and current_runtime["running"] and state == "current":
+            activation_attempted = True
             _systemctl("enable", path.stem)
             _systemctl("restart", path.stem)
         else:
+            activation_attempted = True
             _systemctl("enable", "--now", path.stem)
         if mode == "linger":
+            linger_attempted = True
             result = subprocess.run(
                 ["loginctl", "enable-linger", str(os.getuid())],
                 check=False,
@@ -499,12 +531,32 @@ def apply(
         _write_receipt(paseo, home)
     except BaseException as error:
         try:
+            if activation_attempted and before is None:
+                _restore_activation(path.stem, False, False)
             _restore_unit(path, before)
             _systemctl("daemon-reload")
+            if activation_attempted and before is not None:
+                _restore_activation(
+                    path.stem, current_runtime["enabled"], current_runtime.get("active", False)
+                )
             if owned_files.read(_receipt_path(), private=True) != before_receipt:
                 owned_files.replace(_receipt_path(), before_receipt, owned_files.read(_receipt_path(), private=True))
-            if daemon_was_running:
-                _run_daemon(paseo, home, "start")
+            if linger_attempted and not current_runtime.get("linger", False):
+                result = subprocess.run(
+                    ["loginctl", "disable-linger", str(os.getuid())],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                if result.returncode:
+                    raise PaseoServiceError("无法恢复当前用户 linger")
+            if daemon_stop_attempted:
+                restored_runtime = runtime(paseo, home, mode, run)
+                if restored_runtime["state"] == "unknown":
+                    raise PaseoServiceError("无法核验 Paseo daemon 是否需要恢复")
+                if not restored_runtime["running"]:
+                    _run_daemon(paseo, home, "start")
         except BaseException as rollback:
             raise PaseoServiceError("Paseo unit 启用失败且恢复失败") from rollback
         raise error

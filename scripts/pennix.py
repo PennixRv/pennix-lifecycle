@@ -351,7 +351,11 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
     cli_lock = args.component_lock["components"].get("paseo-cli", {})
     paseo_config = (paseo_service.observe(paseo, paseo_home, listen, cli_lock.get("version"), runtime)
                     if service_selected else None)
-    if mode != "off" and not run:
+    if (mode != "off" and service_state == "absent"
+            and (runtime.get("enabled") or runtime.get("active"))):
+        service_action = "blocked"
+        service_detail = "存在未由 Lifecycle 管理的同名 Paseo user unit"
+    elif mode != "off" and not run:
         service_action = "blocked"
         service_detail = "Paseo 自启动需要同时启用保持运行"
     elif service_state in {"blocked", "drifted", "external"}:
@@ -365,6 +369,13 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             "uninstall" if mode == "off" else "install"
         )
         service_detail = None
+    if (service_action != "blocked" and service_selected and paseo_config
+            and paseo_config["skills_sync"]["state"] == "not-installed"):
+        service_action = "blocked"
+        service_detail = (
+            "Paseo 官方 Skills 尚无可验证的安装项；daemon 启动不会完成首次安装，"
+            "请先通过 Paseo 官方 Skills 管理入口完成首次安装，再运行 apply"
+        )
     if service_action == "keep" and service_selected and runtime["state"] != "current":
         service_action = "start"
         service_detail = "daemon、unit enable/active 或 linger 尚未达到期望"
@@ -714,7 +725,8 @@ def cmd_apply(args: argparse.Namespace) -> int:
         )
         raise CliError(f"连接预检失败，未执行任何动作：{details}")
     service = value["components"]["paseo-autostart"]
-    if service["action"] == "blocked":
+    paseo_needed = service["selected"] or service["unit_state"] == "current" or bool(relay and relay["selected"])
+    if service["action"] == "blocked" and paseo_needed:
         raise CliError(f"Paseo 服务预检失败，未执行任何动作：{service.get('detail', '配置不一致')}")
     blocked = [key for key, item in value["components"].items()
                if item.get("action") == "blocked" and (key in selected or item.get("native_action") == "blocked")]
@@ -741,7 +753,6 @@ def cmd_apply(args: argparse.Namespace) -> int:
     paseo = prefix / "bin" / "paseo"
     if not paseo.is_file():
         paseo = Path(shutil.which("paseo") or paseo)
-    paseo_needed = service["selected"] or service["unit_state"] == "current" or bool(relay and relay["selected"])
     if paseo_needed:
         try:
             paseo_service.preflight(
