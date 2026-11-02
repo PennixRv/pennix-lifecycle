@@ -112,7 +112,7 @@
     },
     "trellis-cli": {
       "delivery": "package",
-      "lock_source": "npm:@pennixrv/trellis:beta",
+      "lock_source": "npm:@pennixrv/trellis:latest",
       "source": "native Trellis installation",
       "owner": "trellis",
       "scope": "global/project",
@@ -134,7 +134,7 @@
         "source": "npm",
         "name": "@pennixrv/trellis",
         "registry": "https://registry.npmjs.org/",
-        "tag": "beta",
+        "tag": "latest",
         "prefix": "$HOME/.local",
         "install_owner": "user"
       }
