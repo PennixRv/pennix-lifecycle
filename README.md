@@ -54,6 +54,9 @@ npm 组件可用 `pennix update trellis-cli --version 0.7.1-beta.0` 选择精确
 为 verified；副作用状态未知时保留 journal 并阻断自动重试。`update` 只能在当前
 owner 与旧锁定目标仍完全匹配且 receipt 有效时，通过同一入口重试原先确认的目标；
 否则保留 journal 并要求人工核验。
+若旧 `apply` 仅剩 Paseo 服务步骤为 `started` 或 `unknown`，且配置、锁未改变，
+配置步骤已核验，当前 unit、daemon、配置及 Skills 同步均达到期望，重新执行 `apply`
+只核验并结束该旧事务，不重启服务，也不执行新计划；其他未知步骤仍保持阻断。
 
 秘密位于 `secrets.toml`，由 `pennix secrets edit` 打开并以明文编辑，文件权限为
 0600；其中只保存凭据字段，普通 URL、ID 和路径属于 `workflow.config`。JSON 输出

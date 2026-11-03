@@ -17,6 +17,70 @@ import pennix
 
 
 class LifecycleStateTests(unittest.TestCase):
+    def test_apply_finishes_only_observed_service_step_without_replaying_actions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "workflow.config"
+            lock = root / "components.lock.json"
+            config.write_text("unchanged config")
+            lock.write_text("unchanged lock")
+            args = SimpleNamespace(json=True, component_lock_path=lock)
+            service = {"selected": True, "action": "keep", "unit_state": "current",
+                       "runtime": {"state": "current", "healthy": True},
+                       "paseo_config": {"state": "current"}}
+            value = {"config": str(config), "components": {
+                "paseo-autostart": service, "unrelated": {"action": "blocked"}}}
+            steps = [
+                {"id": "paseo-config:configure", "component": "paseo-config",
+                 "action": "configure", "target": {}},
+                {"id": "paseo-autostart:install", "component": "paseo-autostart",
+                 "action": "service", "target": {"restart_daemon": False}},
+            ]
+            with patch.object(pennix.apply_journal, "path", return_value=root / "journal.json"):
+                active = pennix.apply_journal.start("apply", None,
+                    pennix.apply_journal.digest(config), pennix.apply_journal.digest(lock), steps)
+                active = pennix.apply_journal.verified(active, steps[0]["id"])
+                active = pennix.apply_journal.unknown(active, steps[1]["id"])
+                before = (root / "journal.json").read_bytes()
+                for field in ("unit_state", "runtime", "paseo_config"):
+                    changed = copy.deepcopy(value)
+                    changed["components"]["paseo-autostart"][field] = (
+                        "absent" if field == "unit_state" else {"state": "pending"})
+                    self.assertFalse(pennix._finish_observed_paseo_apply(args, changed))
+                    self.assertEqual((root / "journal.json").read_bytes(), before)
+                lock.write_text("changed lock")
+                with self.assertRaisesRegex(pennix.CliError, "配置或锁已改变"):
+                    pennix._finish_observed_paseo_apply(args, value)
+                self.assertEqual((root / "journal.json").read_bytes(), before)
+                lock.write_text("unchanged lock")
+                with patch.object(pennix, "_plan", return_value=value), \
+                     patch.object(pennix, "_emit") as emit, \
+                     patch.object(pennix, "_load") as load, \
+                     patch.object(pennix.paseo_service, "apply") as apply_service:
+                    self.assertEqual(pennix.cmd_apply(args), 0)
+                load.assert_not_called()
+                apply_service.assert_not_called()
+                emit.assert_called_once_with({"operation": "apply", "results": {
+                    "paseo-autostart": "verified-current"}}, True)
+                self.assertIsNone(pennix.apply_journal.read())
+
+    def test_observed_service_does_not_finish_other_unknown_steps(self):
+        service = {"selected": True, "action": "keep", "unit_state": "current",
+                   "runtime": {"state": "current"}, "paseo_config": {"state": "current"}}
+        value = {"components": {"paseo-autostart": service}}
+        for steps in [
+            [{"id": "another:install", "component": "another", "action": "install", "status": "unknown"}],
+            [{"id": "paseo-autostart:install", "component": "paseo-autostart",
+              "action": "service", "status": "unknown"}],
+        ]:
+            with patch.object(pennix.apply_journal, "read", return_value={
+                    "command": "apply", "steps": steps}), \
+                 patch.object(pennix.apply_journal, "verified") as verified, \
+                 patch.object(pennix.apply_journal, "clear") as clear:
+                self.assertFalse(pennix._finish_observed_paseo_apply(SimpleNamespace(), value))
+            verified.assert_not_called()
+            clear.assert_not_called()
+
     def test_component_routes_are_closed_and_uninstall_is_the_reverse_order(self):
         catalog = engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
         routable = {key for key, item in catalog["components"].items() if item.get("delivery") != "state"}

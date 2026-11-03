@@ -35,6 +35,19 @@
 上述原生入口，保留同一次候选确认与后置核验。真实发行及安装结果由根协调任务记录，
 本文件不将静态通过等同于现场验收。
 
+## 已成功服务步骤的事务收敛
+
+真实重装时发现此前 `apply` 仍保留 Paseo 服务的 `unknown` 步骤。用户要求先核验
+systemd，正常则结束。原生宿主核验 unit 已启用且运行正常，daemon、配置、Skills
+同步和版本均达到期望；Context Mode 子进程未继承用户 D-Bus 环境，不能替代这项核验。
+
+`0.2.32` 在既有 `apply` 入口补充有限的只读后置核验：仅当旧事务最后一个未核验
+步骤为 Paseo 服务的 `started` 或 `unknown`、配置步骤已核验、配置和锁摘要未变，
+且完整服务观测已为 `current`，才由 owner 核验该步骤并结束旧事务。此路径不执行
+新计划、不启动或重启服务；其他未知步骤、缺失配置步骤和摘要变化均不得据此收敛。
+回归使用临时真实 journal 验证成功结束及失败时原记录逐字保留，不手改真实运行态。
+增量完成后重新运行全部 127 项测试且全部通过，Bash 语法和差异检查通过。
+
 源码验证：`python3 -m unittest discover -s pennix-lifecycle/tests -p 'test_*.py'`
 完成 125 项测试且全部通过，Bash 语法和 `git diff --check` 通过。CodeGraph 核对
 `cmd_update`、`resolve_npm` 和 `_check_target` 的现有边界；候选解析器、安装 owner、

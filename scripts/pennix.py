@@ -700,8 +700,39 @@ def _refresh_arch_receipts(args: argparse.Namespace, catalog: dict[str, Any]) ->
         component_lock.write(args.component_lock_path, args.component_lock, args.component_lock_sources)
 
 
+def _finish_observed_paseo_apply(args: argparse.Namespace, value: dict[str, Any]) -> bool:
+    service = value["components"].get("paseo-autostart", {})
+    if (not service.get("selected") or service.get("action") != "keep"
+            or service.get("unit_state") != "current"
+            or service.get("runtime", {}).get("state") != "current"
+            or service.get("paseo_config", {}).get("state") != "current"):
+        return False
+    active = apply_journal.read()
+    if active is None or active["command"] != "apply":
+        return False
+    remaining = [step for step in active["steps"] if step["status"] != "verified"]
+    if (len(remaining) != 1 or remaining[0]["component"] != "paseo-autostart"
+            or remaining[0]["action"] != "service"
+            or remaining[0]["status"] not in {"started", "unknown"}
+            or not any(step["id"] == "paseo-config:configure" and step["status"] == "verified"
+                       for step in active["steps"])):
+        return False
+    if (active["config_digest"] != apply_journal.digest(Path(value["config"]))
+            or active["lock_digest"] != apply_journal.digest(args.component_lock_path)):
+        raise CliError("配置或锁已改变；不能结束未完成的 Paseo apply，保留 journal")
+    # Only acknowledge observed postconditions; never replay an unknown service action.
+    apply_journal.verified(active, remaining[0]["id"], {
+        "runtime": service["runtime"], "paseo_config": service["paseo_config"],
+    })
+    apply_journal.clear()
+    return True
+
+
 def cmd_apply(args: argparse.Namespace) -> int:
     value = _plan(args)
+    if _finish_observed_paseo_apply(args, value):
+        _emit({"operation": "apply", "results": {"paseo-autostart": "verified-current"}}, args.json)
+        return 0
     _, _, catalog = _load(args)
     selected = {key for key, item in value["components"].items() if item["selected"]}
     repair = [key for key, item in value["components"].items()
