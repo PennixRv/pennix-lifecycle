@@ -251,6 +251,51 @@ class LifecycleStateTests(unittest.TestCase):
                 pennix._retry_unknown_update(active, "pennix-skills:upgrade", "drifted")
             retry.assert_not_called()
 
+    def test_update_pins_exact_npm_version_and_refuses_retargeting_a_pending_transaction(self):
+        version = "0.7.1-beta.0"
+        target = {"source": "npm:@pennixrv/trellis:latest", "version": version, "sha256": "b" * 64}
+        args = pennix.parser().parse_args(["update", "trellis-cli", "--version", version, "--json"])
+        args.component_lock = {"components": {"trellis-cli": target}}
+        args.component_lock_path = Path("/tmp/components.lock")
+        component = {"delivery": "package", "package": {"source": "npm"}}
+        catalog = {"components": {"trellis-cli": component}}
+        with patch.object(pennix, "_load", return_value=(SimpleNamespace(), Path("/tmp/workflow.config"), catalog)), \
+             patch.object(config_model, "selected_components", return_value={"trellis-cli"}), \
+             patch.object(config_model, "config_value", return_value="/tmp/codex"), \
+             patch.object(pennix.apply_journal, "read", return_value=None), \
+             patch.object(pennix, "_component_status", return_value={"state": "match", "ownership": "lifecycle"}), \
+             patch.object(pennix.sys.stdin, "isatty", return_value=True), \
+             patch.object(pennix.sys.stdout, "isatty", return_value=True), \
+             patch.object(pennix.candidates, "resolve", return_value=target) as resolve, \
+             patch.object(pennix, "_emit"):
+            self.assertEqual(pennix.cmd_update(args), 0)
+            self.assertEqual(resolve.call_args.args[2], {"version": version})
+            args.version = None
+            self.assertEqual(pennix.cmd_update(args), 0)
+            self.assertIsNone(resolve.call_args.args[2])
+            for invalid in ("latest", "beta", "^0.7.1", "0.7", "0.7.1 || 1.0.0", "0.7.1-", "00.7.1"):
+                args.version = invalid
+                with self.subTest(version=invalid), self.assertRaisesRegex(pennix.CliError, "精确 npm 版本"):
+                    pennix.cmd_update(args)
+            args.version = version
+            component["package"]["source"] = "pypi"
+            with self.assertRaisesRegex(pennix.CliError, "仅支持 npm"):
+                pennix.cmd_update(args)
+            component["package"]["source"] = "npm"
+            active = {"command": "update", "component": "trellis-cli", "config_digest": "config",
+                      "lock_digest": "config", "steps": [
+                          {"id": "trellis-cli:upgrade", "status": "pending",
+                           "target": {**target, "version": "0.7.1-beta.1"}},
+                      ]}
+            with patch.object(pennix.apply_journal, "read", return_value=active), \
+                 patch.object(pennix.apply_journal, "digest", return_value="config"), \
+                 patch.object(pennix.apply_journal, "complete", return_value=False), \
+                 patch.object(pennix.apply_journal, "clear") as clear:
+                with self.assertRaisesRegex(pennix.CliError, "已确认目标不一致"):
+                    pennix.cmd_update(args)
+                clear.assert_not_called()
+            self.assertEqual(resolve.call_count, 2)
+
     def test_update_refuses_verified_restart_receipt_with_mismatched_daemon(self):
         target = {"source": "npm:@getpaseo/cli:latest", "version": "0.14.0", "sha256": "b" * 64}
         active = {"command": "update", "component": "paseo-cli", "config_digest": "config",

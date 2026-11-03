@@ -7,6 +7,7 @@ import argparse
 import copy
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -1039,6 +1040,15 @@ def cmd_update(args: argparse.Namespace) -> int:
         raise CliError(f"不支持更新的组件: {args.component}")
     if args.component not in config_model.selected_components(kconf):
         raise CliError(f"组件未在 workflow.config 中选择: {args.component}")
+    version = getattr(args, "version", None)
+    if version is not None:
+        if component.get("package", {}).get("source") != "npm":
+            raise CliError("--version 仅支持 npm 组件")
+        if not re.fullmatch(
+                r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+                r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+                r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?", version):
+            raise CliError("--version 必须是精确 npm 版本，不能使用 tag 或范围")
     try:
         active = apply_journal.read()
     except apply_journal.JournalError as error:
@@ -1059,6 +1069,8 @@ def cmd_update(args: argparse.Namespace) -> int:
         elif any(item["status"] == "started" and item["id"] != "paseo-daemon:restart"
                  for item in active["steps"]):
             raise CliError("update 步骤仍处于 started；保留 journal，不能自动重试")
+    if active and version is not None and active["steps"][0]["target"].get("version") != version:
+        raise CliError("--version 与未完成 update 已确认目标不一致；保留 journal")
     entry = args.component_lock["components"].get(args.component)
     if entry is None:
         raise CliError(f"组件尚无可信 lock；先通过 apply 初始化或完成 receipt 迁移: {args.component}")
@@ -1093,7 +1105,9 @@ def cmd_update(args: argparse.Namespace) -> int:
         raise CliError("pennix update 需要交互式终端")
     with tempfile.TemporaryDirectory(prefix="pennix-update-") as directory:
         try:
-            candidate = candidates.resolve(component, Path(directory), active["steps"][0]["target"] if active else None)
+            candidate = candidates.resolve(component, Path(directory),
+                                           active["steps"][0]["target"] if active else
+                                           ({"version": version} if version is not None else None))
         except candidates.CandidateError as error:
             raise CliError(str(error)) from error
         target = candidates.lock_entry(candidate)
@@ -1438,6 +1452,7 @@ def parser() -> argparse.ArgumentParser:
 
     update = sub.add_parser("update", help="明确升级一个已选择且受管的组件")
     update.add_argument("component")
+    update.add_argument("--version", help="指定 npm 组件的精确版本；默认仍跟踪登记通道")
     update.add_argument("--config")
     update.add_argument("--json", action="store_true")
     update.set_defaults(function=cmd_update)

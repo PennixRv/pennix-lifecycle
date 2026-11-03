@@ -43,6 +43,11 @@ receipt 会先回填锁。已有安装缺少可信 receipt 时，`apply` 会阻�
 `pennix update <component>`，该命令先展示精确候选和影响，再在同一次交互确认后
 执行单组件替换。
 
+npm 组件可用 `pennix update trellis-cli --version 0.7.1-beta.0` 选择精确版本，仍由
+登记的 registry 校验版本、包名和完整性，并沿同一次确认、事务、锁及 receipt 完成
+替换；不修改组件的默认通道。此参数不接受 tag 或版本范围，也不适用于非 npm 组件。
+恢复未完成的 update 时，指定版本必须与事务已确认目标一致；省略参数仍恢复原目标。
+
 启用 `PENNIX_SYSTEM_UPGRADE` 时，`apply` 会在完整计划中显示并确认
 `sudo pacman -Syu --noconfirm`；缺少或更新 Arch/AUR 组件时，必须沿这条同次确认的
 路径执行。Lifecycle 变更会在私有状态目录写入 journal，步骤只有完成后置核验才标记

@@ -82,6 +82,29 @@ class CandidateTests(unittest.TestCase):
                 with self.assertRaises(candidates.CandidateError):
                     candidates.resolve_npm(component, Path(directory), {"version": "1.0.0"})
 
+    def test_exact_npm_prerelease_uses_registry_integrity_without_changing_default_tag(self):
+        raw = b"verified prerelease"
+        version = "0.7.1-beta.0"
+        metadata = {"name": "@pennixrv/trellis", "version": version, "dist": {
+            "tarball": "https://registry.test/package.tgz",
+            "integrity": "sha512-" + base64.b64encode(hashlib.sha512(raw).digest()).decode(),
+        }}
+        component = {"lock_source": "npm:@pennixrv/trellis:latest", "package": {
+            "name": "@pennixrv/trellis", "registry": "https://registry.test/", "tag": "latest"}}
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(candidates, "_json", return_value=metadata) as query, \
+             patch.object(candidates.owned_files, "download", side_effect=lambda url, path: path.write_bytes(raw)):
+            value = candidates.resolve_npm(component, Path(directory), {"version": version})
+            self.assertEqual(query.call_args.args[0], "https://registry.test/%40pennixrv%2Ftrellis/" + version)
+            self.assertEqual(candidates.lock_entry(value), {
+                "source": component["lock_source"], "version": version,
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            })
+            metadata["dist"]["integrity"] = "sha512-" + base64.b64encode(b"wrong").decode()
+            with self.assertRaisesRegex(candidates.CandidateError, "integrity mismatch"):
+                candidates.resolve_npm(component, Path(directory), {"version": version})
+        self.assertEqual(component["package"]["tag"], "latest")
+
     def test_archive_digest_uses_the_same_lock_identity_as_file_digest(self):
         digest = "a" * 64
         candidate = {"source": "git:example/repo:runtime", "ref": "b" * 40, "sha256": digest}
