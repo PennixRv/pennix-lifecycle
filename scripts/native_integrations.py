@@ -15,10 +15,11 @@ import tomlkit
 
 import owned_files
 import hook_integrations
+import context_mode_integration as context_mode
+import sys
 
 
-class NativeIntegrationError(RuntimeError):
-    pass
+NativeIntegrationError = context_mode.ContextModeError
 
 
 EVENTS = {"PreToolUse", "PostToolUse", "SessionStart", "PreCompact", "UserPromptSubmit", "Stop"}
@@ -82,28 +83,7 @@ def _edit_hooks(codex_home: Path, previous: dict, desired: dict, *, remove_empty
 
 
 def _context_target(codex_home: Path) -> dict:
-    root = Path.home() / ".local/lib/node_modules/@pennixrv/context-mode"
-    command = Path.home() / ".local/bin/context-mode"
-    try:
-        package = json.loads(owned_files.read(root / "package.json") or b"{}")
-        if package.get("name") != "@pennixrv/context-mode" or command.resolve(strict=True) != root / "cli.bundle.mjs":
-            raise NativeIntegrationError("context-mode 包和受管绝对入口归属不一致")
-        raw = owned_files.read(root / "configs/codex/hooks.json")
-        hooks = json.loads(raw or b"{}", object_pairs_hook=owned_files.unique_pairs)["hooks"]
-        if not isinstance(hooks, dict) or set(hooks) != EVENTS:
-            raise NativeIntegrationError("已安装包未声明完整六类 Codex Hook")
-        hooks = copy.deepcopy(hooks)
-        for event, entries in hooks.items():
-            if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
-                raise NativeIntegrationError("包内 Hook 结构不符合合同")
-            dispatch = entries[0].get("hooks")
-            if dispatch != [{"type": "command", "command": f"context-mode hook codex {event.lower()}"}]:
-                raise NativeIntegrationError("包内 Hook 命令不符合合同")
-            dispatch[0]["command"] = f"{shlex.quote(str(command))} hook codex {event.lower()}"
-    except (OSError, ValueError, KeyError, TypeError) as error:
-        raise NativeIntegrationError("无法核验 context-mode 程序与包内 Hook 来源") from error
-    return {"mcp": {"command": str(command), "env": {"CONTEXT_MODE_PLATFORM": "codex", "CODEX_HOME": str(codex_home)}},
-            "hooks": hooks}
+    return context_mode.target(codex_home)
 
 
 def _desired(key: str, codex_home: Path, *, enabled: bool) -> dict:
@@ -134,6 +114,8 @@ def _read_receipt(key: str) -> dict | None:
     value = owned_files.read_json(_receipt_path(key))
     if value is None:
         return None
+    if key == "context-mode":
+        return context_mode.validate_receipt(value)
     fields = {"schema", "key", "codex_home", "desired_digest"}
     if key == "context-mode":
         fields |= {"mcp", "hooks", "hooks_file_created"}
@@ -148,10 +130,11 @@ def _read_receipt(key: str) -> dict | None:
     return value
 
 
-def _write_receipt(key: str, desired: dict, *, previous: bytes | None, hooks_file_created: bool = False, baseline: dict | None = None) -> None:
+def _write_receipt(key: str, desired: dict, *, previous: bytes | None, hooks_file_created: bool = False, baseline: dict | None = None, trust: dict | None = None) -> None:
     record = {"schema": 1, "key": key, "codex_home": desired["codex_home"], "desired_digest": _digest(desired)}
     if key == "context-mode":
-        record.update(mcp=desired["mcp"], hooks=desired["hooks"], hooks_file_created=hooks_file_created)
+        record.update(schema=2, mcp=desired["mcp"], hooks=desired["hooks"], hooks_file_created=hooks_file_created,
+                      trust=trust, skills=desired["skills"])
     else:
         record.update(mcp=desired["mcp"], baseline=baseline)
     owned_files.replace(_receipt_path(key), owned_files.json_bytes(record), previous)
@@ -193,8 +176,7 @@ def _context_present(codex_home: Path) -> bool:
 
 
 def _context_matches(codex_home: Path, record: dict) -> bool:
-    document, _ = _hooks(codex_home)
-    return _server("context-mode", codex_home) == record["mcp"] and _managed_hooks(document) == record["hooks"]
+    return context_mode.matches(sys.modules[__name__], codex_home, record)
 
 
 def inspect(key: str, codex_home: Path, *, enabled: bool) -> dict[str, object]:
@@ -223,9 +205,23 @@ def _mcp_add(codex_home: Path, expected: dict) -> None:
     if _server("context-mode", codex_home) is not None:
         raise NativeIntegrationError("拒绝覆盖已有 context-mode MCP")
     args = [_command("context-mode"), "mcp", "add", "context-mode"]
-    for key, value in expected["env"].items():
+    for key, value in expected.get("env", {}).items():
         args += ["--env", f"{key}={value}"]
-    _run([*args, "--", expected["command"]], codex_home)
+    _run([*args, "--", expected["command"], *expected.get("args", [])], codex_home)
+    extras = {key: value for key, value in expected.items() if key not in {"command", "args", "env"}}
+    if extras:
+        path = codex_home / "config.toml"
+        before = owned_files.read(path)
+        document = tomlkit.parse(before.decode() if before else "")
+        current = document.get("mcp_servers", {}).get("context-mode")
+        core = {key: value for key, value in expected.items() if key in {"command", "args", "env"}}
+        if current != core:
+            raise NativeIntegrationError("native MCP add 结果与计划不一致")
+        for key, value in extras.items():
+            current[key] = value
+        owned_files.replace(path, tomlkit.dumps(document).encode(), before)
+    if _server("context-mode", codex_home) != expected:
+        raise NativeIntegrationError("native MCP 写入后核验失败")
 
 
 def _mcp_remove(codex_home: Path, expected: dict) -> None:
@@ -235,66 +231,7 @@ def _mcp_remove(codex_home: Path, expected: dict) -> None:
 
 
 def _context_apply(codex_home: Path, desired: dict, receipt: dict | None, *, repair: bool = False) -> str:
-    if _toml(codex_home / "config.toml").get("features", {}).get("hooks") is not True:
-        raise NativeIntegrationError("context-mode 要求已启用 Codex features.hooks")
-    before_receipt = owned_files.read(_receipt_path("context-mode"), private=True)
-    if receipt and not _context_matches(codex_home, receipt):
-        if repair:
-            if _server("context-mode", codex_home) != receipt["mcp"]:
-                raise NativeIntegrationError("context-mode MCP 发生漂移，拒绝 repair")
-            document, _ = _hooks(codex_home)
-            current_hooks = _managed_hooks(document)
-            hooks_written = False
-            try:
-                _edit_hooks(codex_home, current_hooks, desired["hooks"])
-                hooks_written = True
-                if not _context_matches(codex_home, desired):
-                    raise NativeIntegrationError("context-mode repair 后核验失败")
-                _write_receipt(
-                    "context-mode", desired, previous=before_receipt,
-                    hooks_file_created=receipt["hooks_file_created"],
-                )
-            except BaseException as error:
-                try:
-                    if hooks_written:
-                        _edit_hooks(codex_home, desired["hooks"], current_hooks)
-                except BaseException as rollback:
-                    raise NativeIntegrationError("context-mode repair 失败且恢复未完成；保留现场") from rollback
-                raise NativeIntegrationError("context-mode repair 失败；已恢复原条目") from error
-            return "repaired"
-        # The package's allowed install script may refresh its own Hook manifest.
-        # Adopt only an exact current-package result; arbitrary drift stays blocked.
-        if not _context_matches(codex_home, desired):
-            raise NativeIntegrationError("context-mode 已有归属条目漂移，拒绝覆盖")
-        _write_receipt(
-            "context-mode", desired, previous=before_receipt,
-            hooks_file_created=receipt["hooks_file_created"],
-        )
-        return "adopted"
-    _, hooks_before = _hooks(codex_home)
-    old_hooks = receipt["hooks"] if receipt else {}
-    hooks_created = receipt["hooks_file_created"] if receipt else hooks_before is None
-    mcp_added = False
-    hooks_written = False
-    try:
-        if receipt is None:
-            _mcp_add(codex_home, desired["mcp"])
-            mcp_added = True
-        _edit_hooks(codex_home, old_hooks, desired["hooks"])
-        hooks_written = True
-        if not _context_matches(codex_home, desired):
-            raise NativeIntegrationError("context-mode 写入后核验失败")
-        _write_receipt("context-mode", desired, previous=before_receipt, hooks_file_created=hooks_created)
-    except BaseException as error:
-        try:
-            if hooks_written:
-                _edit_hooks(codex_home, desired["hooks"], old_hooks, remove_empty=hooks_created)
-            if mcp_added or (receipt is None and _server("context-mode", codex_home) == desired["mcp"]):
-                _mcp_remove(codex_home, desired["mcp"])
-        except BaseException as rollback:
-            raise NativeIntegrationError("context-mode 接入失败且按归属撤回未完成；保留现场") from rollback
-        raise NativeIntegrationError("context-mode 接入失败；已撤回本次条目") from error
-    return "changed"
+    return context_mode.apply(sys.modules[__name__], codex_home, desired, receipt, repair=repair)
 
 
 def _mcp_fields(key: str, home: Path) -> dict | None:
@@ -392,22 +329,7 @@ def unconfigure(key: str, codex_home: Path) -> str:
     path = _receipt_path(key)
     before = owned_files.read(path, private=True)
     if key == "context-mode":
-        hooks_removed = False
-        try:
-            _edit_hooks(codex_home, receipt["hooks"], {}, remove_empty=receipt["hooks_file_created"])
-            hooks_removed = True
-            _mcp_remove(codex_home, receipt["mcp"])
-            owned_files.replace(path, None, before)
-        except BaseException as error:
-            try:
-                if _server(key, codex_home) is None:
-                    _mcp_add(codex_home, receipt["mcp"])
-                if hooks_removed:
-                    _edit_hooks(codex_home, {}, receipt["hooks"])
-            except BaseException as rollback:
-                raise NativeIntegrationError("context-mode 撤回失败且恢复未完成；保留现场") from rollback
-            raise NativeIntegrationError("context-mode 撤回失败；已恢复本组件条目") from error
-        return "changed; preserved context-mode index/session data"
+        return context_mode.unconfigure(sys.modules[__name__], codex_home, receipt)
     _mcp_edit(key, codex_home, receipt["baseline"], receipt["mcp"])
     try:
         owned_files.replace(path, None, before)

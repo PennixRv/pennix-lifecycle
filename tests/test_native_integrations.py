@@ -1,6 +1,9 @@
 from pathlib import Path
 import json
 import os
+import copy
+import shutil
+import tomllib
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -8,6 +11,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import native_integrations
+import context_mode_integration
 import config_model
 import pennix
 from types import SimpleNamespace
@@ -24,23 +28,50 @@ config = home / "config.toml"
 home.mkdir(parents=True, exist_ok=True)
 args = sys.argv[1:]
 if Path(sys.argv[0]).name == "codex":
-    content = config.read_text() if config.exists() else ""
-    marker = "\n[mcp_servers.context-mode]\n"
+    import tomlkit
+    document = tomlkit.parse(config.read_text() if config.exists() else "")
     if args[:3] == ["mcp", "add", "context-mode"]:
         environment = [args[i + 1].split("=", 1) for i, arg in enumerate(args) if arg == "--env"]
-        content += marker + "command = " + json.dumps(args[-1]) + "\n[mcp_servers.context-mode.env]\n"
-        content += "".join(key + " = " + json.dumps(value) + "\n" for key, value in environment)
+        command = args[args.index("--") + 1:]
+        server = {"command": command[0]}
+        if command[1:]:
+            server["args"] = command[1:]
+        if environment:
+            server["env"] = dict(environment)
+        document.setdefault("mcp_servers", tomlkit.table())["context-mode"] = server
     elif args == ["mcp", "remove", "context-mode"]:
-        content = content.split(marker)[0]
+        document["mcp_servers"].pop("context-mode", None)
     else:
         sys.exit(2)
-    config.write_text(content)
+    config.write_text(tomlkit.dumps(document))
 else:
     if args[0] == "install":
         config.write_text('[mcp_servers.codegraph]\ncommand = "codegraph"\nargs = ["serve", "--mcp"]\n')
     else:
         config.write_text('[mcp_servers.other]\ncommand = "other"\n')
 '''
+
+
+def context_plan(root, home):
+    node = str(Path(shutil.which("node")).resolve())
+    mcp = {"command": node, "args": [str(root / "server.mjs"), "--agent", "codex"],
+           "omit_tools_from": ["deferred"], "default_tools_approval_mode": "approve"}
+    block = "[mcp_servers.context-mode]\n" + "".join(f"{k} = {json.dumps(v)}\n" for k, v in mcp.items())
+    hooks = {}
+    for event, native in context_mode_integration.EVENTS.items():
+        entry = {"hooks": [{"type": "command", "command": f'{json.dumps(node)} {json.dumps(str(root / "hook.mjs"), ensure_ascii=False)} --agent codex', "timeout": 5}]}
+        if event in {"PreToolUse", "PostToolUse"}:
+            entry["matcher"] = "^(Bash|apply_patch|mcp__context_mode__ctx_.*)$"
+        hooks[event] = [entry]
+        key = f"{home / 'hooks.json'}:{native}:0:0"
+        block += f'\n[hooks.state.{json.dumps(key)}]\ntrusted_hash = "sha256:{"a" * 64}"\n'
+    steps = [{"kind": "config", "file": str(home / "config.toml"), "format": "toml",
+              "key": ["mcp_servers", "context-mode"], "block": block},
+             {"kind": "hook", "file": str(home / "hooks.json"), "block": json.dumps({"hooks": hooks})}]
+    for name in sorted(context_mode_integration.SKILLS):
+        steps.append({"kind": "skill", "file": str(home / "skills" / name / "SKILL.md"),
+                      "block": f"---\nname: {name}\ndescription: fixture\ndisable-model-invocation: true\n---\nRead-only fixture.\n"})
+    return {"command": "setup", "print": {"agent": "codex", "steps": steps, "verify": "context-mode doctor --agents codex"}}
 
 
 class NativeIntegrationTests(unittest.TestCase):
@@ -64,14 +95,16 @@ class NativeIntegrationTests(unittest.TestCase):
         (self.codex / "config.toml").write_text('[features]\nhooks = true\n[mcp_servers.other]\ncommand = "other"\n')
         self.package = self.home / ".local/lib/node_modules/@pennixrv/context-mode"
         (self.package / "configs/codex").mkdir(parents=True)
-        (self.package / "package.json").write_text(json.dumps({"name": "@pennixrv/context-mode", "version": "1.0.0"}))
-        (self.package / "cli.bundle.mjs").write_text("// fixture\n")
+        (self.package / "package.json").write_text(json.dumps({"name": "@pennixrv/context-mode", "version": "2.1.5-pennix.1"}))
+        self.plan = context_plan(self.package, self.codex)
+        (self.package / "plan.json").write_text(json.dumps(self.plan))
+        (self.package / "cli.mjs").write_text('import {readFileSync} from "node:fs"; console.log(readFileSync(new URL("plan.json", import.meta.url), "utf8"));\n')
         hook_config = {"hooks": {event: [{"hooks": [{"type": "command", "command": f"context-mode hook codex {event.lower()}"}]}]
                                  for event in native_integrations.EVENTS}}
         (self.package / "configs/codex/hooks.json").write_text(json.dumps(hook_config))
         entry = self.home / ".local/bin/context-mode"
         entry.parent.mkdir(parents=True)
-        entry.symlink_to(self.package / "cli.bundle.mjs")
+        entry.symlink_to(self.package / "cli.mjs")
 
     def tearDown(self):
         self.environment.stop()
@@ -83,7 +116,7 @@ class NativeIntegrationTests(unittest.TestCase):
         self.assertEqual(native_integrations.inspect("context-mode", self.codex, enabled=True)["state"], "absent")
         self.assertEqual(native_integrations.apply("context-mode", self.codex), "changed")
         self.assertEqual(native_integrations.apply("context-mode", self.codex), "no-op")
-        (self.package / "package.json").write_text(json.dumps({"name": "@pennixrv/context-mode", "version": "1.1.0"}))
+        (self.package / "package.json").write_text(json.dumps({"name": "@pennixrv/context-mode", "version": "2.1.5-pennix.2"}))
         self.assertEqual(native_integrations.inspect("context-mode", self.codex, enabled=True)["state"], "current")
         self.assertIn("preserved", native_integrations.unconfigure("context-mode", self.codex))
         self.assertEqual(json.loads((self.codex / "hooks.json").read_text()), other)
@@ -128,32 +161,29 @@ class NativeIntegrationTests(unittest.TestCase):
     def test_drifted_hooks_are_not_overwritten_or_removed(self):
         native_integrations.apply("context-mode", self.codex)
         path = self.codex / "hooks.json"
-        path.write_text(path.read_text().replace("hook codex stop", "hook codex different"))
+        path.write_text(path.read_text().replace("--agent codex", "--agent different"))
         for operation in (native_integrations.apply, native_integrations.unconfigure):
             with self.assertRaises(native_integrations.NativeIntegrationError):
                 operation("context-mode", self.codex)
         self.assertTrue(native_integrations._receipt_path("context-mode").exists())
-        self.assertEqual(native_integrations.apply("context-mode", self.codex, repair=True), "repaired")
-        self.assertEqual(native_integrations.inspect("context-mode", self.codex, enabled=True)["state"], "current")
+        with self.assertRaises(native_integrations.NativeIntegrationError):
+            native_integrations.apply("context-mode", self.codex, repair=True)
 
-    def test_package_hook_refresh_is_adopted_only_when_exactly_desired(self):
+    def test_package_hook_refresh_cannot_adopt_unreceipted_writes(self):
         native_integrations.apply("context-mode", self.codex)
-        package_hooks = json.loads((self.package / "configs/codex/hooks.json").read_text())
-        package_hooks["hooks"]["PreToolUse"][0]["matcher"] = "mcp__.*"
-        (self.package / "configs/codex/hooks.json").write_text(json.dumps(package_hooks))
-        desired = native_integrations._desired("context-mode", self.codex, enabled=True)
-        (self.codex / "hooks.json").write_text(json.dumps({"hooks": desired["hooks"]}))
-
+        hooks = json.loads((self.codex / "hooks.json").read_text())
+        hooks["hooks"]["PreToolUse"][0]["matcher"] = "mcp__.*"
+        (self.codex / "hooks.json").write_text(json.dumps(hooks))
         self.assertEqual(native_integrations.inspect("context-mode", self.codex, enabled=True)["state"], "drifted")
-        self.assertEqual(native_integrations.apply("context-mode", self.codex), "adopted")
-        self.assertEqual(native_integrations.inspect("context-mode", self.codex, enabled=True)["state"], "current")
+        with self.assertRaises(native_integrations.NativeIntegrationError):
+            native_integrations.apply("context-mode", self.codex)
 
     def test_receipt_failure_retracts_only_this_installation(self):
         before = (self.codex / "config.toml").read_text()
         with patch.object(native_integrations, "_write_receipt", side_effect=OSError("disk full")):
             with self.assertRaises(native_integrations.NativeIntegrationError):
                 native_integrations.apply("context-mode", self.codex)
-        self.assertEqual((self.codex / "config.toml").read_text(), before)
+        self.assertEqual(native_integrations._toml(self.codex / "config.toml"), tomllib.loads(before))
         self.assertFalse((self.codex / "hooks.json").exists())
 
     def test_unconfigure_uses_receipt_even_if_package_is_missing(self):
@@ -161,6 +191,120 @@ class NativeIntegrationTests(unittest.TestCase):
         (self.package / "package.json").unlink()
         native_integrations.unconfigure("context-mode", self.codex)
         self.assertIsNone(native_integrations._server("context-mode", self.codex))
+
+    def test_plan_rejects_unknown_steps_commands_paths_and_fields_before_writes(self):
+        invalid = []
+        value = copy.deepcopy(self.plan)
+        value["print"]["steps"].append({"kind": "run", "argv": ["touch", "marker"]})
+        invalid.append(value)
+        value = copy.deepcopy(self.plan)
+        value["print"]["steps"][1]["file"] = str(self.root / "outside.json")
+        invalid.append(value)
+        value = copy.deepcopy(self.plan)
+        value["print"]["steps"][2]["file"] = str(self.codex / "skills/foreign/SKILL.md")
+        invalid.append(value)
+        value = copy.deepcopy(self.plan)
+        value["print"]["steps"][0]["block"] += '\n[unknown]\ncommand = "touch marker"\n'
+        invalid.append(value)
+        value = copy.deepcopy(self.plan)
+        hooks = json.loads(value["print"]["steps"][1]["block"])
+        hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] += "; touch marker"
+        value["print"]["steps"][1]["block"] = json.dumps(hooks)
+        invalid.append(value)
+        before = (self.codex / "config.toml").read_bytes()
+        for value in invalid:
+            with self.subTest(plan=invalid.index(value)):
+                (self.package / "plan.json").write_text(json.dumps(value))
+                with self.assertRaises(native_integrations.NativeIntegrationError):
+                    native_integrations.apply("context-mode", self.codex)
+                self.assertEqual(before, (self.codex / "config.toml").read_bytes())
+                self.assertFalse((self.codex / "hooks.json").exists())
+
+    def test_trust_uses_actual_merged_positions_and_preserves_foreign_fields(self):
+        other = {"hooks": {event: [{"hooks": [{"type": "command", "command": "foreign"}]}]
+                           for event in context_mode_integration.EVENTS}}
+        (self.codex / "hooks.json").write_text(json.dumps(other))
+        with (self.codex / "config.toml").open("a") as stream:
+            stream.write('\n[hooks.state.foreign]\ntrusted_hash = "preserve"\n')
+        native_integrations.apply("context-mode", self.codex)
+        receipt = native_integrations._read_receipt("context-mode")
+        self.assertEqual(2, receipt["schema"])
+        self.assertTrue(all(key.endswith(":1:0") for key in receipt["trust"]))
+        self.assertEqual({"trusted_hash": "preserve"}, native_integrations._toml(self.codex / "config.toml")["hooks"]["state"]["foreign"])
+        native_integrations.unconfigure("context-mode", self.codex)
+        self.assertEqual(other, json.loads((self.codex / "hooks.json").read_text()))
+        self.assertEqual({"foreign": {"trusted_hash": "preserve"}}, native_integrations._toml(self.codex / "config.toml")["hooks"]["state"])
+
+    def legacy_receipt(self):
+        mcp = {"command": str(self.home / ".local/bin/context-mode"),
+               "env": {"CONTEXT_MODE_PLATFORM": "codex", "CODEX_HOME": str(self.codex)}}
+        hooks = json.loads((self.package / "configs/codex/hooks.json").read_text())["hooks"]
+        native_integrations._mcp_add(self.codex, mcp)
+        native_integrations._edit_hooks(self.codex, {}, hooks)
+        value = {"schema": 1, "key": "context-mode", "codex_home": str(self.codex),
+                 "desired_digest": "a" * 64, "mcp": mcp, "hooks": hooks, "hooks_file_created": True}
+        path = native_integrations._receipt_path("context-mode")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value))
+        path.chmod(0o600)
+        return value
+
+    def test_legacy_receipt_migrates_mcp_env_six_hooks_and_command_ownership(self):
+        legacy = self.legacy_receipt()
+        self.assertEqual("update-required", native_integrations.inspect("context-mode", self.codex, enabled=True)["state"])
+        native_integrations.apply("context-mode", self.codex)
+        receipt = native_integrations._read_receipt("context-mode")
+        self.assertEqual({"CODEX_HOME": str(self.codex)}, receipt["mcp"]["env"])
+        self.assertNotIn("CONTEXT_MODE_PLATFORM", receipt["mcp"]["env"])
+        self.assertEqual(set(context_mode_integration.EVENTS), set(receipt["hooks"]))
+        self.assertEqual(context_mode_integration.SKILLS, set(receipt["skills"]))
+        self.assertEqual("current", native_integrations.inspect("context-mode", self.codex, enabled=True)["state"])
+
+    def test_failed_migration_restores_legacy_receipt_mcp_and_hooks(self):
+        legacy = self.legacy_receipt()
+        with patch.object(native_integrations, "_write_receipt", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(native_integrations.NativeIntegrationError, "已撤回"):
+                native_integrations.apply("context-mode", self.codex)
+        self.assertEqual(legacy, native_integrations._read_receipt("context-mode"))
+        self.assertTrue(native_integrations._context_matches(self.codex, legacy))
+        self.assertFalse(native_integrations._toml(self.codex / "config.toml").get("hooks", {}).get("state"))
+
+    def test_unknown_command_skill_blocks_without_partial_configuration(self):
+        skill = self.codex / "skills/ctx-stats/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("external")
+        before = (self.codex / "config.toml").read_bytes()
+        with self.assertRaises(native_integrations.NativeIntegrationError):
+            native_integrations.apply("context-mode", self.codex)
+        self.assertEqual(before, (self.codex / "config.toml").read_bytes())
+        self.assertEqual("external", skill.read_text())
+
+    def test_receipt_removal_failure_restores_entire_v2_configuration(self):
+        native_integrations.apply("context-mode", self.codex)
+        receipt = native_integrations._read_receipt("context-mode")
+        replace = native_integrations.owned_files.replace
+        def fail_receipt(path, after, before):
+            if path == native_integrations._receipt_path("context-mode") and after is None:
+                raise OSError("disk full")
+            return replace(path, after, before)
+        with patch.object(native_integrations.owned_files, "replace", side_effect=fail_receipt):
+            with self.assertRaisesRegex(native_integrations.NativeIntegrationError, "已恢复"):
+                native_integrations.unconfigure("context-mode", self.codex)
+        self.assertEqual(receipt, native_integrations._read_receipt("context-mode"))
+        self.assertTrue(native_integrations._context_matches(self.codex, receipt))
+
+    def test_trust_or_command_drift_is_never_overwritten(self):
+        native_integrations.apply("context-mode", self.codex)
+        skill = self.codex / "skills/ctx-stats/SKILL.md"
+        original = skill.read_text()
+        skill.write_text("external drift")
+        with self.assertRaises(native_integrations.NativeIntegrationError):
+            native_integrations.unconfigure("context-mode", self.codex)
+        skill.write_text(original)
+        path = self.codex / "config.toml"
+        path.write_text(path.read_text().replace("sha256:" + "a" * 64, "sha256:" + "b" * 64))
+        with self.assertRaises(native_integrations.NativeIntegrationError):
+            native_integrations.apply("context-mode", self.codex)
 
     def test_invalid_hooks_or_wrong_bin_are_rejected(self):
         (self.codex / "hooks.json").write_text("{broken")
