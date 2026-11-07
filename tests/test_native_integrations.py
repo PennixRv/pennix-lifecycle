@@ -269,6 +269,53 @@ class NativeIntegrationTests(unittest.TestCase):
         self.assertTrue(native_integrations._context_matches(self.codex, legacy))
         self.assertFalse(native_integrations._toml(self.codex / "config.toml").get("hooks", {}).get("state"))
 
+    def trusted_legacy(self):
+        legacy = self.legacy_receipt()
+        events = {**context_mode_integration.EVENTS, "PreCompact": "pre_compact", "Stop": "stop"}
+        rows, state = [], {}
+        for event, entries in legacy["hooks"].items():
+            key = f"{self.codex / 'hooks.json'}:{events[event]}:0:0"
+            digest = "sha256:" + "b" * 64
+            state[key] = {"trusted_hash": digest}
+            rows.append({"key": key, "command": entries[0]["hooks"][0]["command"],
+                         "matcher": entries[0].get("matcher"), "sourcePath": str(self.codex / "hooks.json"),
+                         "currentHash": digest, "trustStatus": "trusted"})
+        import tomlkit
+        path = self.codex / "config.toml"
+        document = tomlkit.parse(path.read_text())
+        document["hooks"] = {"state": state}
+        path.write_text(tomlkit.dumps(document))
+        return legacy, rows, state
+
+    def test_native_verified_legacy_trust_migrates_and_removes_retired_keys(self):
+        _, rows, old_state = self.trusted_legacy()
+        with patch.object(context_mode_integration, "list_hooks", return_value=[{"hooks": rows}]):
+            native_integrations.apply("context-mode", self.codex)
+        receipt = native_integrations._read_receipt("context-mode")
+        state = native_integrations._toml(self.codex / "config.toml")["hooks"]["state"]
+        self.assertEqual(receipt["trust"], state)
+        self.assertEqual(4, len(state))
+        self.assertNotIn(f"{self.codex / 'hooks.json'}:pre_compact:0:0", state)
+        self.assertNotIn(f"{self.codex / 'hooks.json'}:stop:0:0", state)
+
+    def test_legacy_trust_mismatch_preserves_all_files(self):
+        _, rows, _ = self.trusted_legacy()
+        rows[0]["currentHash"] = "sha256:" + "c" * 64
+        before = [(self.codex / name).read_bytes() for name in ["config.toml", "hooks.json"]]
+        with patch.object(context_mode_integration, "list_hooks", return_value=[{"hooks": rows}]):
+            with self.assertRaises(native_integrations.NativeIntegrationError):
+                native_integrations.apply("context-mode", self.codex)
+        self.assertEqual(before, [(self.codex / name).read_bytes() for name in ["config.toml", "hooks.json"]])
+
+    def test_failed_trusted_legacy_migration_restores_original_trust(self):
+        legacy, rows, state = self.trusted_legacy()
+        with patch.object(context_mode_integration, "list_hooks", return_value=[{"hooks": rows}]), \
+             patch.object(native_integrations, "_write_receipt", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(native_integrations.NativeIntegrationError, "已撤回"):
+                native_integrations.apply("context-mode", self.codex)
+        self.assertEqual(state, native_integrations._toml(self.codex / "config.toml")["hooks"]["state"])
+        self.assertEqual(legacy, native_integrations._read_receipt("context-mode"))
+
     def test_unknown_command_skill_blocks_without_partial_configuration(self):
         skill = self.codex / "skills/ctx-stats/SKILL.md"
         skill.parent.mkdir(parents=True)

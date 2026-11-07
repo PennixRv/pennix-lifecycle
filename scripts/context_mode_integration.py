@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import queue
 from pathlib import Path
 import re
 import shlex
@@ -14,6 +15,7 @@ import tomllib
 
 import tomlkit
 import owned_files as files
+from codex_hook_state import list_hooks
 
 
 class ContextModeError(RuntimeError):
@@ -200,6 +202,42 @@ def auxiliary(owner, home, previous, desired):
     return pending
 
 
+def legacy_trust(owner, home, receipt, document):
+    """Adopt only native-verified trust for the exact handlers already owned by v1."""
+    if not receipt or receipt.get("schema") != 1:
+        return receipt or {}
+    state = owner._toml(home / "config.toml").get("hooks", {}).get("state", {})
+    expected = {}
+    events = {**EVENTS, "PreCompact": "pre_compact", "Stop": "stop"}
+    for event, entries in receipt["hooks"].items():
+        _require(event in events and len(entries) == 1 and len(entries[0].get("hooks", [])) == 1)
+        positions = [i for i, entry in enumerate(document["hooks"].get(event, [])) if entry == entries[0]]
+        _require(len(positions) == 1, "旧 Context Mode Hook 无法唯一定位")
+        key = f"{home / 'hooks.json'}:{events[event]}:{positions[0]}:0"
+        if key in state:
+            expected[key] = entries[0]
+    if not expected:
+        return receipt
+    try:
+        rows = [h for group in list_hooks(owner._command("context-mode"), home, home) for h in group["hooks"]]
+        trust = {}
+        for key, entry in expected.items():
+            found = [h for h in rows if h.get("key") == key]
+            _require(len(found) == 1, "原生 Hook 状态缺少旧归属条目")
+            row, handler = found[0], entry["hooks"][0]
+            value = state[key]
+            _require(row.get("sourcePath") == str(home / "hooks.json")
+                     and row.get("command") == handler["command"]
+                     and row.get("matcher") == entry.get("matcher")
+                     and isinstance(value, dict) and set(value) == {"trusted_hash"}
+                     and row.get("currentHash") == value["trusted_hash"]
+                     and row.get("trustStatus") == "trusted", "旧 Context Mode trust 与原生状态不符")
+            trust[key] = dict(value)
+        return {**receipt, "trust": trust}
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, queue.Empty) as error:
+        raise ContextModeError("无法核验旧 Context Mode trust；保留原配置") from error
+
+
 def apply(owner, home, desired, receipt, *, repair=False):
     _require(owner._toml(home / "config.toml").get("features", {}).get("hooks") is True,
              "context-mode 要求已启用 Codex features.hooks")
@@ -207,6 +245,7 @@ def apply(owner, home, desired, receipt, *, repair=False):
         _require(repair and receipt.get("schema") == 1 and owner._server("context-mode", home) == receipt["mcp"],
                  "context-mode 已有归属条目漂移，拒绝覆盖")
     hooks_document, hooks_before = owner._hooks(home)
+    previous = legacy_trust(owner, home, receipt, hooks_document)
     old_hooks = owner._managed_hooks(hooks_document) if repair else (receipt["hooks"] if receipt else {})
     projected = copy.deepcopy(hooks_document.get("hooks", {}))
     for event in old_hooks:
@@ -214,7 +253,7 @@ def apply(owner, home, desired, receipt, *, repair=False):
     for event, entries in desired["hooks"].items():
         projected.setdefault(event, []).extend(entries)
     trust = trust_for_hooks(home, projected, desired["trust"])
-    auxiliary(owner, home, receipt or {}, {"trust": trust, "skills": desired["skills"]})  # no writes
+    auxiliary(owner, home, previous, {"trust": trust, "skills": desired["skills"]})  # no writes
     previous_raw = files.read(owner._receipt_path("context-mode"), private=True)
     old_mcp = receipt["mcp"] if receipt else None
     created = receipt["hooks_file_created"] if receipt else hooks_before is None
@@ -227,7 +266,7 @@ def apply(owner, home, desired, receipt, *, repair=False):
             owner._mcp_add(home, desired["mcp"])
         owner._edit_hooks(home, old_hooks, desired["hooks"])
         changed_hooks = True
-        for path, before, after in auxiliary(owner, home, receipt or {}, {"trust": trust, "skills": desired["skills"]}):
+        for path, before, after in auxiliary(owner, home, previous, {"trust": trust, "skills": desired["skills"]}):
             files.replace(path, after, before)
             writes.append((path, before, after))
         record = {**desired, "trust": trust}

@@ -6,57 +6,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import queue
 import subprocess
 import tempfile
-import threading
 from types import SimpleNamespace
 
 import _engine as engine
 import native_integrations as native
-
-
-def hooks_list(home, cwd):
-    process = subprocess.Popen([native._command("context-mode"), "app-server"],
-                               env={**os.environ, "CODEX_HOME": str(home)},
-                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               text=True)
-    responses = queue.Queue()
-    def read():
-        try:
-            for line in process.stdout:
-                responses.put(json.loads(line))
-        finally:
-            responses.put(None)
-    reader = threading.Thread(target=read, daemon=True)
-    reader.start()
-    try:
-        for number, method, params in [(1, "initialize", {"clientInfo": {"name": "pennix-cm-live", "version": "1"},
-                                                         "capabilities": {"experimentalApi": True}}),
-                                       (2, "hooks/list", {"cwds": [str(cwd)]})]:
-            process.stdin.write(json.dumps({"id": number, "method": method, "params": params}) + "\n")
-            process.stdin.flush()
-            while True:
-                response = responses.get(timeout=30)
-                if response is None:
-                    raise RuntimeError("Codex app-server exited before its response")
-                if response.get("id") == number:
-                    if "error" in response:
-                        raise RuntimeError("Codex app-server rejected the verification request")
-                    break
-            if number == 1:
-                process.stdin.write('{"method":"initialized"}\n')
-                process.stdin.flush()
-        return response["result"]["data"]
-    finally:
-        process.stdin.close()
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
-        reader.join(timeout=5)
+from codex_hook_state import list_hooks
 
 
 def main():
@@ -86,7 +42,7 @@ def main():
             assert engine.component_operation(operation, catalog, "context-mode", component, "install") == "changed"
             assert native.apply("context-mode", codex) == "changed"
             assert native.inspect("context-mode", codex, enabled=True)["state"] == "current"
-            hooks = [h for group in hooks_list(codex, home) for h in group["hooks"] if "context-mode" in h.get("command", "")]
+            hooks = [h for group in list_hooks(native._command("context-mode"), codex, home) for h in group["hooks"] if "context-mode" in h.get("command", "")]
             assert len(hooks) == 4, "real Codex must expose the four installed hooks"
             assert all(h["trustStatus"] == "trusted" for h in hooks), "plan hashes must match real Codex hashes"
             receipt = native._read_receipt("context-mode")
