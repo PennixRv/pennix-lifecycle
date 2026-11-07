@@ -152,6 +152,24 @@ def trust_for_hooks(home, hooks, trust):
     return mapped
 
 
+def merge_hooks(hooks, previous, desired):
+    """Replace owned groups in place so other owners keep their positional trust keys."""
+    merged = copy.deepcopy(hooks)
+    for event in set(previous) | set(desired):
+        entries = merged.get(event, [])
+        positions = [i for i, entry in enumerate(entries) if entry in previous.get(event, [])]
+        if positions:
+            _require(len(positions) == 1 and len(previous[event]) == 1)
+            entries[positions[0]:positions[0] + 1] = copy.deepcopy(desired.get(event, []))
+        else:
+            entries.extend(copy.deepcopy(desired.get(event, [])))
+        if entries:
+            merged[event] = entries
+        else:
+            merged.pop(event, None)
+    return merged
+
+
 def matches(owner, home, record):
     document, _ = owner._hooks(home)
     if owner._server("context-mode", home) != record["mcp"] or owner._managed_hooks(document) != record["hooks"]:
@@ -247,13 +265,10 @@ def apply(owner, home, desired, receipt, *, repair=False):
     hooks_document, hooks_before = owner._hooks(home)
     previous = legacy_trust(owner, home, receipt, hooks_document)
     old_hooks = owner._managed_hooks(hooks_document) if repair else (receipt["hooks"] if receipt else {})
-    projected = copy.deepcopy(hooks_document.get("hooks", {}))
-    for event in old_hooks:
-        projected[event] = [entry for entry in projected[event] if not owner._marked(entry)]
-    for event, entries in desired["hooks"].items():
-        projected.setdefault(event, []).extend(entries)
+    projected = merge_hooks(hooks_document.get("hooks", {}), old_hooks, desired["hooks"])
     trust = trust_for_hooks(home, projected, desired["trust"])
     auxiliary(owner, home, previous, {"trust": trust, "skills": desired["skills"]})  # no writes
+    owner._edit_hooks(home, old_hooks, desired["hooks"], dry_run=True)
     previous_raw = files.read(owner._receipt_path("context-mode"), private=True)
     old_mcp = receipt["mcp"] if receipt else None
     created = receipt["hooks_file_created"] if receipt else hooks_before is None
@@ -296,6 +311,7 @@ def apply(owner, home, desired, receipt, *, repair=False):
 def unconfigure(owner, home, receipt):
     previous = files.read(owner._receipt_path("context-mode"), private=True)
     auxiliary(owner, home, receipt, {})
+    owner._edit_hooks(home, receipt["hooks"], {}, dry_run=True)
     writes, removed_hooks, removed_mcp = [], False, False
     try:
         owner._mcp_remove(home, receipt["mcp"])

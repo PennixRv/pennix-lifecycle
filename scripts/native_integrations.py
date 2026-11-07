@@ -65,17 +65,27 @@ def _managed_hooks(document: dict) -> dict:
             if (selected := [entry for entry in entries if _marked(entry)])}
 
 
-def _edit_hooks(codex_home: Path, previous: dict, desired: dict, *, remove_empty: bool = False) -> None:
+def _edit_hooks(codex_home: Path, previous: dict, desired: dict, *, remove_empty: bool = False, dry_run: bool = False) -> None:
     document, before = _hooks(codex_home)
     if _managed_hooks(document) != previous:
         raise NativeIntegrationError("context-mode Hook 条目已漂移或由其他 owner 管理")
-    hooks = document.setdefault("hooks", {})
-    for event in previous:
-        hooks[event] = [entry for entry in hooks[event] if not _marked(entry)]
-        if not hooks[event]:
-            del hooks[event]
-    for event, entries in desired.items():
-        hooks.setdefault(event, []).extend(copy.deepcopy(entries))
+    hooks = context_mode.merge_hooks(document.get("hooks", {}), previous, desired)
+    # An unrelated trusted handler cannot silently move to a different native key.
+    trust = _toml(codex_home / "config.toml").get("hooks", {}).get("state", {})
+    events = {**context_mode.EVENTS, "PreCompact": "pre_compact", "Stop": "stop"}
+    for event, entries in document.get("hooks", {}).items():
+        for index, entry in enumerate(entries):
+            if _marked(entry) or event not in events:
+                continue
+            positions = [i for i, item in enumerate(hooks.get(event, [])) if item == entry]
+            if positions == [index]:
+                continue
+            prefix = f"{codex_home / 'hooks.json'}:{events[event]}:{index}:"
+            if any(key.startswith(prefix) for key in trust):
+                raise NativeIntegrationError("context-mode 操作会移动其他 owner 的 trusted Hook；保留现场")
+    if dry_run:
+        return
+    document["hooks"] = hooks
     if not hooks:
         document.pop("hooks", None)
     output = None if not document and remove_empty else owned_files.json_bytes(document)

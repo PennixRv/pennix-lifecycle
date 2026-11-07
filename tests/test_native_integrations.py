@@ -307,6 +307,28 @@ class NativeIntegrationTests(unittest.TestCase):
                 native_integrations.apply("context-mode", self.codex)
         self.assertEqual(before, [(self.codex / name).read_bytes() for name in ["config.toml", "hooks.json"]])
 
+    def test_legacy_replacement_preserves_following_trusted_foreign_hook(self):
+        _, rows, _ = self.trusted_legacy()
+        path = self.codex / "hooks.json"
+        document = json.loads(path.read_text())
+        foreign = {"hooks": [{"type": "command", "command": "foreign-owner"}]}
+        document["hooks"]["SessionStart"].append(foreign)
+        path.write_text(json.dumps(document))
+        import tomlkit
+        config = self.codex / "config.toml"
+        state = tomlkit.parse(config.read_text())
+        key = f"{path}:session_start:1:0"
+        state["hooks"]["state"][key] = {"trusted_hash": "sha256:" + "c" * 64}
+        config.write_text(tomlkit.dumps(state))
+        with patch.object(context_mode_integration, "list_hooks", return_value=[{"hooks": rows}]):
+            native_integrations.apply("context-mode", self.codex)
+        self.assertEqual(foreign, json.loads(path.read_text())["hooks"]["SessionStart"][1])
+        self.assertEqual({"trusted_hash": "sha256:" + "c" * 64}, native_integrations._toml(config)["hooks"]["state"][key])
+        before = (path.read_bytes(), config.read_bytes())
+        with self.assertRaises(native_integrations.NativeIntegrationError):
+            native_integrations.unconfigure("context-mode", self.codex)
+        self.assertEqual(before, (path.read_bytes(), config.read_bytes()))
+
     def test_failed_trusted_legacy_migration_restores_original_trust(self):
         legacy, rows, state = self.trusted_legacy()
         with patch.object(context_mode_integration, "list_hooks", return_value=[{"hooks": rows}]), \

@@ -13,3 +13,5 @@ MCP 通过 Codex 原生 CLI 配置。Lifecycle 显式把已选 `CODEX_HOME` 写�
 已有安装须先用 `pennix update context-mode` 更新包，再用 `pennix repair context-mode` 收敛 native integration；update 本身不配置 Hook。Skills 和 `codex-agents` 分别通过自己的原生 update/repair 入口更新。实际用户重装、旧进程退出、v1 数据精确清理、备份清理和跨仓验收由根任务记录；本文件的隔离验证不代表这些步骤已完成。普通卸载继续保留用户数据。
 
 实际旧安装在 schema 1 receipt 之外已有六个 Codex trust 条目，`0.2.34` 因未知归属安全拒绝迁移。`0.2.35` 仅对 receipt 精确拥有、当前 Hook 完全相符且原生 `hooks/list` 返回相同 command、matcher、key、currentHash 和 trusted 状态的条目收敛旧 trust；不复制 Codex hash 算法。旧六项 trust 与 Hook 一起撤回，新四项 trust 由 v2 计划与合并位置决定，失败恢复原值，其他 owner 保持不变。完整 151 项测试通过，新增成功迁移、原生 hash 失配拒绝及失败撤回；真实隔离 v1 安装的六个 trusted Hook 经包升级后迁移到四个 trusted Hook，并确认退役 trust 清除。新安装与卸载也再次验证通过。
+
+第二次实际预检发现旧 SessionStart 后还有 AOE 的 trusted Hook：删除旧组后追加新组会占用 AOE 的位置键，`0.2.35` 因此安全拒绝。最终发行改为 `0.2.36`，重叠事件在原位置替换本组件组，避免移动其他 owner。退役或卸载若仍会移动其他 trusted Hook，在任何 MCP 或文件写入前阻断；不擅自改写其 trust 或扩大接管范围。新增回归覆盖后置 foreign trusted Hook 的迁移保留，以及卸载阻断时原文件不变。最终完整 152 项测试、实际用户迁移只读预检和真实新安装/卸载验证通过；原有两个已发布版本与 tag 均保留。
