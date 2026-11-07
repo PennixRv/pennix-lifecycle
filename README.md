@@ -43,6 +43,14 @@ receipt 会先回填锁。已有安装缺少可信 receipt 时，`apply` 会阻�
 `pennix update <component>`，该命令先展示精确候选和影响，再在同一次交互确认后
 执行单组件替换。
 
+Arch/AUR 在外部升级后，使用 `pennix reconcile <component>` 显式接受当前精确身份。
+它核对既有 receipt、旧锁、包名和可执行文件 owner，只同步记录，不安装、升级或降级。
+Codex 插件亦可沿该入口保留当前已启用版本，以原生 Marketplace API 对齐相同源的精确
+提交；脏树、未知归属、其他插件受影响或确认后候选变化均阻断。receipt 与锁部分写入
+失败时保留 journal；相同入口只在实际身份仍吻合时恢复，不盲目重放未知原生副作用。
+`outdated` 保留兼容字段，表示实际身份与锁不相等，不代表实际版本更旧；输出另列实际
+身份、锁定身份及既有受管记录。
+
 npm 组件可用 `pennix update trellis-cli --version 0.7.1-beta.0` 选择精确版本，仍由
 登记的 registry 校验版本、包名和完整性，并沿同一次确认、事务、锁及 receipt 完成
 替换；不修改组件的默认通道。此参数不接受 tag 或版本范围，也不适用于非 npm 组件。
@@ -61,6 +69,17 @@ owner 与旧锁定目标仍完全匹配且 receipt 有效时，通过同一入�
 秘密位于 `secrets.toml`，由 `pennix secrets edit` 打开并以明文编辑，文件权限为
 0600；其中只保存凭据字段，普通 URL、ID 和路径属于 `workflow.config`。JSON 输出
 不会包含秘密值。
+
+Windsurf 可显式开启 `PENNIX_WINDSURF_OWNER_CREDENTIAL`，不再要求中央 `windsurf.api_key`。
+缺专属文件时由 Windsurf owner 原生 Devin resolver 导入；秘密不经过 Lifecycle 进程。
+既有中央模式保持兼容。外部文件、漂移、环境覆盖或不安全权限会阻断，不自动接管。
+
+Paseo 自启 unit 只在用户 manager 启动时执行一次原生 `daemon start`，不持续管理 daemon。
+登录自启无需开启 `PENNIX_PASEO_RUN`；该键只表示本次 apply 的明确启动请求。
+日常启停使用原生 `paseo daemon start/stop/restart`；关闭入口不停止 daemon，普通
+apply 不复活已停止实例。自启配置、daemon 健康和版本分别核验；停止时运行版本为
+`not_run`，依赖实际运行的操作仍需健康条件。旧前台 unit 仅凭精确 receipt 识别迁移，
+实际承载 daemon 时须活动保护；当前独立 daemon 不为匹配 unit 而重启。
 
 Context Mode 通过 `@pennixrv/context-mode` 包、Codex 原生 MCP 和六个 Hook 接入；不叠加 plugin，也不改写用户 AGENTS。旧 FastCtx 的撤回由旧安装的原生入口完成，新配置格式 5 不接受旧组件键或旧格式。
 

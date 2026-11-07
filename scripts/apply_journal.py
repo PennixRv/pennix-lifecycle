@@ -30,7 +30,7 @@ def _validate(value: object) -> dict:
     if not isinstance(value, dict) or set(value) != {
             "schema", "command", "component", "config_digest", "lock_digest", "steps"}:
         raise JournalError("生命周期 journal 格式无效")
-    if (value["schema"] != SCHEMA or value["command"] not in {"apply", "update"}
+    if (value["schema"] != SCHEMA or value["command"] not in {"apply", "update", "reconcile"}
             or (value["component"] is not None and not isinstance(value["component"], str))
             or not re.fullmatch(r"[0-9a-f]{64}", value["config_digest"])
             or (value["lock_digest"] is not None and not re.fullmatch(r"[0-9a-f]{64}", value["lock_digest"]))

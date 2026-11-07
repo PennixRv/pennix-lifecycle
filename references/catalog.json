@@ -94,7 +94,7 @@
         "upgrade": "managed",
         "uninstall": "managed",
         "verify": "managed",
-        "reconcile": "not-applicable"
+        "reconcile": "managed"
       },
       "project_init": "not-applicable",
       "conflicts": [],
@@ -295,7 +295,7 @@
         "upgrade": "native-owner",
         "uninstall": "managed",
         "verify": "managed",
-        "reconcile": "not-applicable"
+        "reconcile": "managed"
       },
       "project_init": "not-applicable",
       "probe": null,
@@ -350,7 +350,7 @@
         "upgrade": "managed",
         "uninstall": "managed",
         "verify": "managed",
-        "reconcile": "not-applicable"
+        "reconcile": "managed"
       },
       "project_init": "not-applicable",
       "probe": "tmux",
@@ -413,7 +413,7 @@
         "upgrade": "managed",
         "uninstall": "managed",
         "verify": "managed",
-        "reconcile": "not-applicable"
+        "reconcile": "managed"
       },
       "project_init": "project-only",
       "probe": "aoe",
@@ -484,7 +484,7 @@
       "delivery": "package", "lock_source": "arch:extra/uv",
       "source": "Arch official uv package", "owner": "uv", "scope": "global",
       "probe": "uv", "version_args": ["--version"],
-      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed"},
+      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
       "package": {"source": "official", "name": "uv"}
     },
     "tavily-cli": {

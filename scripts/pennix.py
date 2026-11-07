@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import re
@@ -85,6 +86,20 @@ def _load(args: argparse.Namespace) -> tuple[config_model.StrictKconfig, Path, d
     return kconf, path, catalog
 
 
+def _package_diagnostics(component_id: str, component: dict[str, Any], state: str) -> dict[str, Any]:
+    receipt = owner_engine._package_receipt(component_id, component)
+    result = {"managed_record": receipt is not None}
+    if receipt is not None:
+        result["receipt_version"] = receipt["version"]
+    if component.get("_lock_target"):
+        result["locked_identity"] = component["_lock_target"]
+    if state == "outdated":
+        result["mismatch_reason"] = "observed_identity_differs_from_lock"
+    if component["package"].get("source") in {"official", "aur"} and state != "missing":
+        result["observed_identity"] = owner_engine.package_identity(component)
+    return result
+
+
 def _component_status(args: argparse.Namespace, component_id: str, component: dict[str, Any]) -> dict[str, Any]:
     if component_id == "codex-config":
         values = config_model.values(args.kconf)
@@ -112,10 +127,15 @@ def _component_status(args: argparse.Namespace, component_id: str, component: di
     except Exception as error:
         return {"state": "blocked", "detail": str(error)}
     result = {"state": state, "detail": detail}
+    if component.get("_lock_target"):
+        result["locked_identity"] = component["_lock_target"]
+    if state == "outdated":
+        result["mismatch_reason"] = "observed_identity_differs_from_lock"
     if component.get("delivery") == "client" and state in {"external", "drifted"}:
         result["review_sha256"] = owner_engine.local_clients.fingerprint(component)
     if component.get("delivery") == "package" and isinstance(component.get("package"), dict):
         try:
+            result.update(_package_diagnostics(component_id, component, state))
             result["ownership"] = "lifecycle" if owner_engine.package_owned(
                 component_id, component, detail if state in {"match", "outdated"} else None, args.codex_home
             ) else "external"
@@ -213,6 +233,8 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             try:
                 package_state, package_observed = owner_engine.probe_component(component, args.codex_home)
                 package_owned = owner_engine.package_owned(component_id, component, package_observed, args.codex_home)
+                if component.get("delivery") == "package":
+                    status.update(_package_diagnostics(component_id, component, package_state))
             except owner_engine.BootstrapError as error:
                 package_state, package_owned = "blocked", False
                 status["detail"] = str(error)
@@ -345,7 +367,7 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
     service_selected = mode != "off" or run
     service_state = paseo_service.inspect(paseo, paseo_home)
     runtime = (paseo_service.runtime(paseo, paseo_home, mode, run)
-               if service_selected or service_state == "current"
+               if service_selected or service_state in {"current", "migration-required"}
                or config_model.config_value(kconf, "PENNIX_PASEO_RELAY") == "y"
                else {"state": "current", "running": False, "enabled": False,
                      "linger": False, "daemon_version": None})
@@ -356,9 +378,9 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             and (runtime.get("enabled") or runtime.get("active"))):
         service_action = "blocked"
         service_detail = "存在未由 Lifecycle 管理的同名 Paseo user unit"
-    elif mode != "off" and not run:
+    elif runtime["state"] == "unknown" and (service_selected or service_state in {"current", "migration-required"}):
         service_action = "blocked"
-        service_detail = "Paseo 自启动需要同时启用保持运行"
+        service_detail = "Paseo daemon 或 user manager 不可核验"
     elif service_state in {"blocked", "drifted", "external"}:
         service_action = "blocked"
         service_detail = f"Paseo unit 状态为 {service_state}，需要显式处理归属或漂移"
@@ -378,10 +400,11 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             "请先通过 Paseo 官方 Skills 管理入口完成首次安装，再运行 apply"
         )
     if service_action == "keep" and service_selected and runtime["state"] != "current":
-        service_action = "start"
-        service_detail = "daemon、unit enable/active 或 linger 尚未达到期望"
+        service_action = ("blocked" if runtime.get("unit_failed") or runtime.get("running") and not runtime.get("healthy")
+                          else "start" if run and not runtime.get("running") else "install")
+        service_detail = "Paseo 显式启动请求、自启 enablement 或实际运行健康尚未满足"
     if service_action == "keep" and service_selected and paseo_config["state"] != "current":
-        service_action = "start" if paseo_config["restart_required"] else "configure"
+        service_action = "configure"
         service_detail = "Paseo 目标配置、Skills 同步或 CLI/daemon 版本尚未一致"
     components["paseo-autostart"] = {
         "selected": service_selected,
@@ -414,7 +437,7 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
     return {"config": str(path), "codex_home": str(args.codex_home), "components": components, "connections": connections,
             "functional_checks_requested": config_model.config_value(kconf, "PENNIX_FUNCTIONAL_CHECKS") == "y",
             "side_effects": {
-                "path": {"path": str(Path.home() / ".zshrc"), "prefix": str(Path.home() / ".local"), "action": "apply"},
+                "path": {"path": str(Path.home() / ".zshrc"), "prefix": str(Path.home() / ".local"), "action": path_env.inspect(str(Path.home() / ".local"))},
                 "system_upgrade": config_model.config_value(kconf, "PENNIX_SYSTEM_UPGRADE") == "y",
                 "system_upgrade_command": "sudo pacman -Syu --noconfirm",
                 "system_upgrade_components": arch_components,
@@ -610,15 +633,14 @@ def _apply_steps(value: dict[str, Any], args: argparse.Namespace, catalog: dict[
     paseo_action = value["components"].get("paseo-cli", {}).get("action")
     restart_daemon = bool(service["runtime"].get("running") and (
         service.get("paseo_config", {}).get("restart_required")
-        or service["action"] in {"configure", "start", "install", "uninstall"}
         or paseo_action in {"install", "upgrade", "adopt-upgrade"}
         or relay and relay.get("action") in {"configure", "install"}
     ))
-    if (service.get("selected") or service.get("unit_state") == "current"
+    if (service.get("selected") or service.get("unit_state") in {"current", "migration-required"}
             or relay and relay.get("action") in {"install", "configure", "uninstall"}):
         steps.append({"id": f"paseo-autostart:{service['action']}",
                       "component": "paseo-autostart", "action": "service",
-                      "target": {"restart_daemon": restart_daemon}})
+                      "target": {"restart_daemon": restart_daemon, "service_contract": "autostart-v1"}})
     return steps
 
 
@@ -757,7 +779,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         )
         raise CliError(f"连接预检失败，未执行任何动作：{details}")
     service = value["components"]["paseo-autostart"]
-    paseo_needed = service["selected"] or service["unit_state"] == "current" or bool(relay and relay["selected"])
+    paseo_needed = service["selected"] or service["unit_state"] in {"current", "migration-required"} or bool(relay and relay["selected"])
     if service["action"] == "blocked" and paseo_needed:
         raise CliError(f"Paseo 服务预检失败，未执行任何动作：{service.get('detail', '配置不一致')}")
     blocked = [key for key, item in value["components"].items()
@@ -780,6 +802,9 @@ def cmd_apply(args: argparse.Namespace) -> int:
     if (active and service["selected"] and service["run"]
             and not any(item["id"] == "paseo-config:configure" for item in active["steps"])):
         raise CliError("未完成 apply journal 缺少 Paseo 配置步骤；保留现场，不能猜测续跑")
+    if active and any(item.get("component") == "paseo-autostart" and item["status"] != "verified"
+                      and item.get("target", {}).get("service_contract") != "autostart-v1" for item in active["steps"]):
+        raise CliError("旧 Paseo journal 不符合仅自启合同；保留现场，不重放旧服务操作")
     paseo_home = Path(config_model.config_value(args.kconf, "PENNIX_PASEO_HOME"))
     prefix = Path.home() / ".local"
     paseo = prefix / "bin" / "paseo"
@@ -789,13 +814,13 @@ def cmd_apply(args: argparse.Namespace) -> int:
         try:
             paseo_service.preflight(
                 paseo_home, service["listen"], service["mode"], service["run"],
-                needs_systemd=service["mode"] != "off" or service["unit_state"] == "current",
+                needs_systemd=service["mode"] != "off" or service["unit_state"] in {"current", "migration-required"},
             )
             if paseo.is_file() and service["runtime"]["state"] == "unknown":
                 raise paseo_service.PaseoServiceError("Paseo daemon 运行态不可核验")
             restart_needed = bool(service["runtime"].get("running") and (
                 service.get("paseo_config", {}).get("restart_required")
-                or service["action"] in {"configure", "start", "install", "uninstall"}
+                or service["unit_state"] == "migration-required" and service["runtime"].get("active")
                 or value["components"].get("paseo-cli", {}).get("action") in {"install", "upgrade", "adopt-upgrade"}
                 or relay and relay.get("action") in {"configure", "install"}
             ))
@@ -1062,6 +1087,122 @@ def cmd_repair(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reconcile(args: argparse.Namespace) -> int:
+    kconf, config_path, catalog = _load(args)
+    args.kconf = kconf
+    args.codex_home = Path(os.path.expanduser(config_model.config_value(kconf, "PENNIX_CODEX_HOME")))
+    component = catalog["components"].get(args.component)
+    if component is None or args.component not in config_model.selected_components(kconf):
+        raise CliError("reconcile 仅接受已选择的登记组件")
+    plugin = component.get("delivery") == "plugin"
+    if not plugin and (component.get("delivery") != "package" or component.get("package", {}).get("source") not in {"official", "aur"}):
+        raise CliError("reconcile 仅支持 Arch/AUR 包和 Codex plugin")
+    receipt_path = (owner_engine._plugin_receipt_path(args.component) if plugin
+                    else owner_engine._package_receipt_path(args.component))
+    active = apply_journal.read()
+    config_digest = apply_journal.digest(config_path)
+    lock_digest = apply_journal.digest(args.component_lock_path)
+    step_id = f"{args.component}:reconcile"
+    if active:
+        if (active["command"] != "reconcile" or active["component"] != args.component
+                or active["config_digest"] != config_digest or len(active["steps"]) != 1
+                or active["steps"][0]["id"] != step_id):
+            raise CliError("存在其他或输入已改变的 lifecycle journal；保留现场")
+        saved = active["steps"][0]["target"]
+    else:
+        old = args.component_lock["components"].get(args.component)
+        if old is None:
+            raise CliError("reconcile 需要既有可信 lock，不能接管未知安装")
+        try:
+            target, identity, receipt = owner_engine.reconcile_candidate(args.component, component, args.codex_home, old)
+        except owner_engine.BootstrapError as error:
+            raise CliError(str(error)) from error
+        after_receipt = ({"schema": 1, "component": args.component, "id": component["plugin"]["id"], **target}
+                         if plugin else {**receipt, "version": identity["probe_version"]})
+        next_lock = component_lock.set_entry(args.component_lock, args.component, target, args.component_lock_sources)
+        saved = {"entry": target, "identity": identity,
+                 "receipt_before": apply_journal.digest(receipt_path), "receipt_after": after_receipt,
+                 "lock_after": hashlib.sha256(owned_files.json_bytes(next_lock)).hexdigest()}
+        _emit({"operation": "reconcile", "component": args.component, "old_lock": old,
+               "old_receipt": receipt, "candidate": target, "identity": identity,
+               "action": "align-native-marketplace-and-record" if plugin else "accept-installed-identity-only"}, args.json)
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            raise CliError("pennix reconcile 需要交互式终端以确认精确候选")
+        if input("确认收敛此精确已安装身份？输入 yes 继续: ").strip() != "yes":
+            return 1
+        if (apply_journal.digest(config_path) != config_digest
+                or apply_journal.digest(args.component_lock_path) != lock_digest
+                or apply_journal.digest(receipt_path) != saved["receipt_before"]):
+            raise CliError("确认期间配置、锁或 receipt 已变化；未执行收敛")
+        try:
+            fresh, fresh_identity, _ = owner_engine.reconcile_candidate(args.component, component, args.codex_home, old)
+        except owner_engine.BootstrapError as error:
+            raise CliError(str(error)) from error
+        if fresh != target or fresh_identity != identity:
+            raise CliError("确认期间实际候选已变化；未执行收敛")
+        active = apply_journal.start("reconcile", args.component, config_digest, lock_digest,
+                                     [{"id": step_id, "component": args.component, "action": "reconcile", "target": saved}])
+    target = saved["entry"]
+    after_bytes = owned_files.json_bytes(saved["receipt_after"])
+    after_digest = hashlib.sha256(after_bytes).hexdigest()
+    if (apply_journal.digest(args.component_lock_path) not in {active["lock_digest"], saved["lock_after"]}
+            or apply_journal.digest(receipt_path) not in {saved["receipt_before"], after_digest}):
+        raise CliError("reconcile journal 的锁或 receipt 已漂移；保留现场")
+
+    def verify_identity():
+        try:
+            if plugin:
+                actual = owner_engine._plugin_snapshot(component, args.codex_home, installed_only=True)
+            else:
+                actual = owner_engine.package_identity(component)
+                actual["probe_version"] = owner_engine._version(component, actual["command"])
+        except owner_engine.BootstrapError as error:
+            raise CliError(str(error)) from error
+        if actual != saved["identity"]:
+            raise CliError("reconcile 实际身份与已确认候选不符；保留 journal")
+
+    verify_identity()
+    step = apply_journal.step(active, step_id)
+    if step["status"] in {"started", "unknown"}:
+        if plugin and owner_engine._plugin_snapshot(component, args.codex_home) != target:
+            raise CliError("原生 plugin 收敛副作用未知；先核验 Marketplace，再从相同入口恢复")
+        if step["status"] == "started":
+            active = apply_journal.unknown(active, step_id)
+        active = apply_journal.retry(active, step_id)
+    if step["status"] == "verified":
+        if apply_journal.digest(args.component_lock_path) != saved["lock_after"] or apply_journal.digest(receipt_path) != after_digest:
+            raise CliError("reconcile 已验证步骤的后置条件改变；保留 journal")
+    else:
+        def accept_identity():
+            verify_identity()
+            if apply_journal.digest(config_path) != config_digest:
+                raise CliError("reconcile 配置已变化；保留 journal")
+            if plugin:
+                owner_engine.align_plugin(component, args.codex_home, target)
+            verify_identity()
+            receipt_raw = owned_files.read(receipt_path, private=True)
+            lock_raw = owned_files.read(args.component_lock_path, private=True)
+            if (receipt_raw is None or lock_raw is None
+                    or hashlib.sha256(receipt_raw).hexdigest() not in {saved["receipt_before"], after_digest}
+                    or hashlib.sha256(lock_raw).hexdigest() not in {active["lock_digest"], saved["lock_after"]}
+                    or apply_journal.digest(config_path) != config_digest):
+                raise CliError("reconcile 提交前输入已变化；保留 journal")
+            owned_files.replace(receipt_path, after_bytes, receipt_raw)
+            updated = component_lock.set_entry(args.component_lock, args.component, target, args.component_lock_sources)
+            if hashlib.sha256(owned_files.json_bytes(updated)).hexdigest() != saved["lock_after"]:
+                raise CliError("reconcile lock 后置内容不符；保留 journal")
+            owned_files.replace(args.component_lock_path, owned_files.json_bytes(updated), lock_raw)
+            verify_identity()
+            return "reconciled"
+        try:
+            active, _ = _journal_mutate(active, step_id, accept_identity)
+        except owner_engine.BootstrapError as error:
+            raise CliError(str(error)) from error
+    apply_journal.clear()
+    _emit({"operation": "reconcile", "component": args.component, "status": "reconciled", "target": target}, args.json)
+    return 0
+
+
 def cmd_update(args: argparse.Namespace) -> int:
     kconf, config_path, catalog = _load(args)
     args.kconf = kconf
@@ -1227,17 +1368,11 @@ def cmd_update(args: argparse.Namespace) -> int:
                 if current["state"] == "unknown":
                     raise paseo_service.PaseoServiceError("Paseo daemon 运行态不可核验")
                 if not current["running"]:
-                    if step_target_running:
-                        state = paseo_service.restart(paseo, paseo_home, mode)
-                        if state.get("daemon_version") != args.component_lock["components"][args.component].get("version"):
-                            raise paseo_service.PaseoServiceError("Paseo CLI 与 daemon 版本不一致")
-                        return "restarted"
                     return "not-running"
                 state = paseo_service.restart(paseo, paseo_home, mode)
                 if state.get("daemon_version") != args.component_lock["components"][args.component].get("version"):
                     raise paseo_service.PaseoServiceError("Paseo CLI 与 daemon 版本不一致")
                 return "restarted"
-            step_target_running = bool(apply_journal.step(active, restart_step_id)["target"].get("was_running"))
             active, results = _journal_mutate(active, restart_step_id, restart_paseo)
     apply_journal.clear()
     _emit({"operation": "update", "component": args.component, "status": result, "target": target}, args.json)
@@ -1488,6 +1623,12 @@ def parser() -> argparse.ArgumentParser:
     update.add_argument("--json", action="store_true")
     update.set_defaults(function=cmd_update)
 
+    reconcile = sub.add_parser("reconcile", help="显式接受已核验的精确外部更新；不安装或降级")
+    reconcile.add_argument("component")
+    reconcile.add_argument("--config")
+    reconcile.add_argument("--json", action="store_true")
+    reconcile.set_defaults(function=cmd_reconcile)
+
     tool = sub.add_parser("tool", help="管理生命周期工具自身")
     tool_sub = tool.add_subparsers(dest="tool_command", required=True)
     install_tool = tool_sub.add_parser("install", help="安装当前已核验发行包")
@@ -1537,7 +1678,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
         mutating = (
-            args.command in {"apply", "repair", "update", "uninstall", "secrets", "tool"}
+            args.command in {"apply", "repair", "update", "reconcile", "uninstall", "secrets", "tool"}
             or (args.command == "config" and args.config_command in {"init", "edit"})
             or (args.command == "cache" and args.cache_command == "clean" and args.yes)
         )

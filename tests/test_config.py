@@ -75,7 +75,7 @@ class ConfigModelTests(unittest.TestCase):
         self.assertEqual(declared, {key for key, item in catalog["components"].items() if item["delivery"] != "state"})
         self.assertEqual(config_model.config_value(loaded, "PENNIX_CODEX_HOME"), str(self.home / ".codex"))
         self.assertEqual(config_model.config_value(loaded, "PENNIX_PASEO_HOME"), str(self.home / ".paseo"))
-        self.assertEqual(config_model.config_value(loaded, "PENNIX_PASEO_RUN"), "y")
+        self.assertEqual(config_model.config_value(loaded, "PENNIX_PASEO_RUN"), "n")
         self.assertEqual(config_model.choice_value(loaded, "PENNIX_PASEO_AUTOSTART_"), "login")
         self.assertEqual(config_model.config_value(loaded, "PENNIX_PASEO_RELAY"), "n")
 
@@ -298,7 +298,7 @@ class ConfigModelTests(unittest.TestCase):
 
     def test_paseo_unit_quotes_paths_with_spaces_and_specifiers(self) -> None:
         unit = paseo_service._unit(Path("/home/penn/.local/bin/paseo"), Path("/home/penn/Paseo %home"))
-        self.assertIn('ExecStart=/home/penn/.local/bin/paseo daemon run --home "/home/penn/Paseo %%home"', unit)
+        self.assertIn('ExecStart=/home/penn/.local/bin/paseo daemon start --home "/home/penn/Paseo %%home"', unit)
 
     def test_paseo_unit_requires_lifecycle_receipt(self) -> None:
         paseo = self.home / "bin/paseo"
@@ -389,7 +389,7 @@ class ConfigModelTests(unittest.TestCase):
                 (True, "127.0.0.1:6767"), (True, {"mode": "all"})]):
             result = paseo_service.observe(
                 paseo, home, "127.0.0.1:6767", "0.14.0",
-                {"state": "current", "daemon_version": "0.14.0"})
+                {"state": "current", "running": True, "daemon_version": "0.14.0"})
         self.assertEqual(result["state"], "current")
         self.assertEqual(result["skills_sync"]["state"], "current")
         self.assertEqual(result["skills_sync"]["managed_skills"], list(paseo_service.OFFICIAL_SKILLS))
@@ -413,7 +413,7 @@ class ConfigModelTests(unittest.TestCase):
                 (True, "127.0.0.1:6767"), (True, {"mode": "all"})]):
             result = paseo_service.observe(
                 paseo, home, "127.0.0.1:6767", "0.14.0",
-                {"state": "current", "daemon_version": "0.14.0"})
+                {"state": "current", "running": True, "daemon_version": "0.14.0"})
         self.assertEqual(result["skills_sync"]["state"], "incomplete")
         self.assertNotIn("paseo-advisor", result["skills_sync"]["managed_skills"])
         self.assertTrue(result["restart_required"])
@@ -501,7 +501,7 @@ class ConfigModelTests(unittest.TestCase):
                    "enabled": False, "active": False, "linger": False}
 
         def systemctl(*args: str) -> None:
-            if args == ("enable", "--now", unit.stem):
+            if args == ("enable", unit.stem):
                 raise paseo_service.PaseoServiceError("simulated partial enable failure")
 
         with mock.patch.object(paseo_service, "unit_path", return_value=unit), \
@@ -514,7 +514,7 @@ class ConfigModelTests(unittest.TestCase):
                 paseo_service.apply("login", paseo, home, "127.0.0.1:6767", True)
         self.assertFalse(unit.exists())
         self.assertIn(("disable", unit.stem), [call.args for call in run_systemctl.call_args_list])
-        self.assertIn(("stop", unit.stem), [call.args for call in run_systemctl.call_args_list])
+        self.assertNotIn(("stop", unit.stem), [call.args for call in run_systemctl.call_args_list])
 
     def test_paseo_service_failed_uninstall_preserves_disabled_inactive_state(self) -> None:
         paseo = self.home / "bin/paseo"
@@ -541,37 +541,28 @@ class ConfigModelTests(unittest.TestCase):
         self.assertEqual(unit.read_bytes(), original)
         self.assertNotIn(("enable", "--now", unit.stem), calls)
         self.assertIn(("disable", unit.stem), calls)
-        self.assertIn(("stop", unit.stem), calls)
+        self.assertNotIn(("stop", unit.stem), calls)
 
-    def test_paseo_service_restores_daemon_after_partial_stop_failure(self) -> None:
+    def test_paseo_install_preserves_healthy_independent_daemon(self) -> None:
         paseo = self.home / "bin/paseo"
         paseo.parent.mkdir()
         paseo.write_text("fixture", encoding="utf-8")
         home = self.home / "paseo"
         unit = self.home / "systemd/user/pennix-paseo.service"
-        unit.parent.mkdir(parents=True)
-        states = [
-            {"state": "start-required", "running": True, "healthy": True,
-             "enabled": False, "active": False, "linger": False},
-            {"state": "start-required", "running": False, "healthy": False,
-             "enabled": False, "active": False, "linger": False},
-        ]
-
-        def stop(paseo_arg: Path, home_arg: Path, action: str) -> None:
-            if action == "stop":
-                raise paseo_service.PaseoServiceError("simulated stop after shutdown")
-
+        runtime = {"state": "start-required", "running": True, "healthy": True,
+                   "enabled": False, "active": False, "linger": False}
         with mock.patch.object(paseo_service, "unit_path", return_value=unit), \
-             mock.patch.object(paseo_service, "runtime", side_effect=states), \
-             mock.patch.object(paseo_service, "assert_no_active_work"), \
-             mock.patch.object(paseo_service, "_config_get", side_effect=[
-                 (True, "127.0.0.1:6767"), (True, {"mode": "all"}),
-             ]), \
-             mock.patch.object(paseo_service, "_systemctl"), \
-             mock.patch.object(paseo_service, "_run_daemon", side_effect=stop) as run_daemon:
-            with self.assertRaisesRegex(paseo_service.PaseoServiceError, "after shutdown"):
-                paseo_service.apply("login", paseo, home, "127.0.0.1:6767", True)
-        self.assertEqual([call.args[2] for call in run_daemon.call_args_list], ["stop", "start"])
+             mock.patch.object(paseo_service, "runtime", return_value=runtime), \
+             mock.patch.object(paseo_service, "assert_no_active_work") as busy, \
+             mock.patch.object(paseo_service, "_systemctl") as systemctl, \
+             mock.patch.object(paseo_service, "_run_daemon") as daemon:
+            self.assertEqual(paseo_service.apply("login", paseo, home, "127.0.0.1:6767", False), "changed")
+        daemon.assert_not_called()
+        busy.assert_not_called()
+        self.assertEqual([call.args for call in systemctl.call_args_list],
+                         [("daemon-reload",), ("enable", unit.stem)])
+        with mock.patch.object(paseo_service, "unit_path", return_value=unit):
+            self.assertEqual(paseo_service.inspect(paseo, home), "current")
 
     def test_relay_daemon_config_restores_partial_write(self) -> None:
         paseo = self.home / "bin/paseo"

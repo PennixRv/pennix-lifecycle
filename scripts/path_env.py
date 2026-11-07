@@ -37,6 +37,12 @@ def _replace(contents: str, block: str) -> str:
     return contents[:start] + block + contents[finish:]
 
 
+def inspect(prefix: str) -> str:
+    raw = files.read(_target())
+    before = raw.decode("utf-8") if raw is not None else ""
+    return "keep" if _replace(before, _block(prefix)) == before else "apply"
+
+
 def apply(prefix: str) -> str:
     path = _target()
     raw = files.read(path)

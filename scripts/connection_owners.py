@@ -61,6 +61,13 @@ def _values(spec: dict[str, Any], kconf: Any) -> dict[str, str]:
     return result
 
 
+def _inputs(target: str, spec: dict[str, Any], kconf: Any, secrets_path: Path) -> tuple[dict, dict]:
+    values = _values(spec, kconf)
+    if target == "windsurf" and config_model.config_value(kconf, "PENNIX_WINDSURF_OWNER_CREDENTIAL") == "y":
+        return {**values, "credential_mode": "owner"}, {}
+    return values, _secret_payload(spec, secrets_path)
+
+
 def _run(command: list[str], action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     try:
         result = subprocess.run(
@@ -112,11 +119,14 @@ def inspect_target(
     spec: dict[str, Any],
     codex_home: Path,
     desired_digest: str | None = None,
+    credential_mode: str | None = None,
 ) -> dict[str, Any]:
     try:
         payload: dict[str, Any] = {"target": target}
         if desired_digest is not None:
             payload["desired_digest"] = desired_digest
+        if credential_mode is not None:
+            payload["credential_mode"] = credential_mode
         return {"target": target, **_run(_command(spec, codex_home), "inspect", payload)}
     except ConnectionError as error:
         return {"target": target, "state": "blocked", "owned": False, "detail": str(error)}
@@ -129,8 +139,7 @@ def plan(kconf: Any, catalog: dict[str, Any], codex_home: Path, secrets_path: Pa
         desired: tuple[dict[str, str], dict[str, str]] | None = None
         if selected:
             try:
-                values = _values(spec, kconf)
-                secrets = _secret_payload(spec, secrets_path)
+                values, secrets = _inputs(target, spec, kconf, secrets_path)
                 desired = (values, secrets)
             except (ConnectionError, secret_store.SecretError) as error:
                 status = inspect_target(target, spec, codex_home)
@@ -144,7 +153,7 @@ def plan(kconf: Any, catalog: dict[str, Any], codex_home: Path, secrets_path: Pa
                               if spec["component"] in (installing or set()) else
                               inspect_target(target, spec, codex_home))
                 else:
-                    status = inspect_target(target, spec, codex_home, _desired_digest(target, *desired))
+                    status = inspect_target(target, spec, codex_home, _desired_digest(target, *desired), values.get("credential_mode"))
                     if status["state"] == "blocked" and spec["component"] in (installing or set()):
                         status = {"target": target, "state": "pending-owner", "owned": False,
                                   "detail": "输入已预检；更新 owner 后重新核验其原生合同"}
@@ -166,7 +175,7 @@ def plan(kconf: Any, catalog: dict[str, Any], codex_home: Path, secrets_path: Pa
                 status.update(state="blocked", detail=str(error))
         if selected:
             action = "keep" if status["state"] == "current" else "configure"
-            if status["state"] in {"blocked", "invalid", "external", "environment-override"}:
+            if status["state"] in {"blocked", "invalid", "external", "environment-override"} or target == "windsurf" and status["state"] == "drifted":
                 action = "blocked"
             if status["state"] == "adoptable" and config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") != "y":
                 action = "blocked"
@@ -185,8 +194,7 @@ def apply_target(target: str, spec: dict[str, Any], kconf: Any, codex_home: Path
             native_integrations.unconfigure("siyuan", codex_home)
         payload = {"target": target}
     elif action == "configure":
-        values = _values(spec, kconf)
-        secrets = _secret_payload(spec, secrets_path)
+        values, secrets = _inputs(target, spec, kconf, secrets_path)
         payload = {
             "target": target,
             "values": values,
@@ -194,6 +202,8 @@ def apply_target(target: str, spec: dict[str, Any], kconf: Any, codex_home: Path
             "desired_digest": _desired_digest(target, values, secrets),
             "adopt_existing": config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y",
         }
+        if "credential_mode" in values:
+            payload["credential_mode"] = values["credential_mode"]
     else:
         raise ConnectionError(f"unsupported connection action: {action}")
     value = _run(command, action, payload)

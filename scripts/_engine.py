@@ -299,7 +299,7 @@ def _operate_collection(component: dict[str, Any], codex_home: Path, operation: 
         raise BootstrapError(str(error)) from error
 
 
-def _plugin_snapshot(component: dict[str, Any], codex_home: Path) -> dict[str, str] | None:
+def _plugin_snapshot(component: dict[str, Any], codex_home: Path, *, installed_only: bool = False) -> dict[str, str] | None:
     plugin = component.get("plugin")
     if not isinstance(plugin, dict):
         return None
@@ -330,6 +330,22 @@ def _plugin_snapshot(component: dict[str, Any], codex_home: Path) -> dict[str, s
                 or item.get("source", {}).get("url") != plugin["marketplace"]["source"]):
             return None
         root = Path(market.get("root", ""))
+        if installed_only:
+            # Marketplace replacement may affect every plugin registered from that source.
+            if (not _plugin_tree_clean(root) or any(
+                    other.get("pluginId") != plugin["id"]
+                    and other.get("pluginId", "").endswith("@" + plugin["marketplace"]["name"])
+                    for other in json.loads(result.stdout).get("installed", []))):
+                return None
+            name, marketplace = plugin["id"].split("@")
+            version = item.get("version")
+            if any(not isinstance(part, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", part)
+                   for part in (name, marketplace, version)):
+                return None
+            root = codex_home / "plugins/cache" / marketplace / name / version
+            owned_files.safe_path(root)
+            if root.is_symlink() or not root.is_dir():
+                return None
         head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
                               timeout=15, check=False)
         clean = _plugin_tree_clean(root)
@@ -346,7 +362,7 @@ def _plugin_snapshot(component: dict[str, Any], codex_home: Path) -> dict[str, s
             return None
         snapshot = {"source": component["lock_source"], "version": version, "ref": head.stdout.strip()}
         selected_plugin = {**plugin, "marketplace": {**plugin["marketplace"], "ref": snapshot["ref"]}}
-        if not _plugin_refs(codex, codex_home, selected_plugin, version):
+        if not installed_only and not _plugin_refs(codex, codex_home, selected_plugin, version):
             return None
         return snapshot
     except (json.JSONDecodeError, TypeError, KeyError, OSError, subprocess.TimeoutExpired):
@@ -673,6 +689,58 @@ def _write_package_receipt(component_id: str, component: dict[str, Any], observe
         "version": observed,
     })
     owned_files.replace(path, content, before)
+
+
+def reconcile_candidate(component_id: str, component: dict[str, Any], codex_home: Path, old: dict) -> tuple[dict, dict, dict]:
+    """Observe an exact installed identity without accepting drift or installing anything."""
+    if old.get("source") != component.get("lock_source"):
+        raise BootstrapError("reconcile requires an existing same-source lock")
+    if component.get("delivery") == "plugin":
+        receipt = _plugin_receipt(component_id, component)
+        snapshot = _plugin_snapshot(component, codex_home, installed_only=True)
+        if receipt != old or snapshot is None:
+            raise BootstrapError("plugin reconcile requires a trusted old receipt and a clean same-source installed plugin")
+        return snapshot, snapshot, receipt
+    package = component.get("package", {})
+    if component.get("delivery") != "package" or package.get("source") not in {"official", "aur"}:
+        raise BootstrapError("reconcile supports only Arch/AUR packages and Codex plugins")
+    receipt = _package_receipt(component_id, component)
+    if receipt is None:
+        raise BootstrapError("reconcile requires an existing managed package receipt")
+    old_version = old.get("version", "")
+    if receipt["version"] not in {old_version, old_version.split(":", 1)[-1].rsplit("-", 1)[0]}:
+        raise BootstrapError("package reconcile old receipt and lock disagree")
+    if (package["source"] == "aur" and old["source"] != f"aur:{package['name']}"
+            or package["source"] == "official" and old["source"].split("/")[-1] != package["name"]):
+        raise BootstrapError("package reconcile source contract differs")
+    identity = package_identity(component)
+    if identity["manager"] != "pacman" or identity["name"] != package["name"]:
+        raise BootstrapError("package reconcile executable owner differs")
+    observed = _version(component, identity["command"])
+    if not observed:
+        raise BootstrapError("package reconcile version probe failed")
+    target = {"source": old["source"], "version": identity["version"]}
+    return target, {**identity, "probe_version": observed}, receipt
+
+
+def align_plugin(component: dict[str, Any], codex_home: Path, target: dict) -> None:
+    """Align only the previously confirmed installed plugin using Codex's native API."""
+    if _plugin_snapshot(component, codex_home) == target:
+        return
+    if _plugin_snapshot(component, codex_home, installed_only=True) != target:
+        raise BootstrapError("plugin reconcile candidate changed")
+    codex = shutil.which("codex")
+    plugin = component["plugin"]
+    marketplace = {**plugin["marketplace"], "ref": target["ref"]}
+    _prepare_plugin_marketplace(codex, codex_home, marketplace)
+    for command in ([codex, "plugin", "marketplace", "add", marketplace["source"], "--ref", target["ref"], "--json"],
+                    [codex, "plugin", "add", plugin["id"], "--json"]):
+        result = subprocess.run(command, check=False, capture_output=True, text=True,
+                                env={**os.environ, "CODEX_HOME": str(codex_home)}, timeout=120)
+        if result.returncode:
+            raise BootstrapError("native Codex plugin reconcile failed; journal retained")
+    if _plugin_snapshot(component, codex_home) != target:
+        raise BootstrapError("plugin reconcile exact postcondition failed")
 
 
 def _remove_package_receipt(component_id: str) -> None:
