@@ -19,3 +19,11 @@
 Windsurf v0.1.17 已在原始 tag 和 tarball 上直接发布；流水线 attempt 3 的 publish 成功，立即下载因传播期 404 导致 run 整体失败。公开可见后，独立下载摘要、精确 npm 安装、registry signature 与 attestation 均通过。集合沿原生 npm-pack 物化 evidence E 50147de6a46bad1c02f2868915fbd77da8d3b061，19 文件字节与权限一致，verify、12 项集合测试、9 项评估通过并提交推送。catalog 不额外发明集合 pin；既有原生 resolver 在消费时固定集合完整提交与摘要到 lock。
 
 远端未占用的 Lifecycle 版本为 0.2.33，准备沿原生 tag workflow 验证、构建和发行。主机安装、reconcile、Windsurf owner 导入、真实自启迁移及根全集验收仍待执行，不能把源码检查等同于交付完成。未改动的 Grok 固定依赖有 npm audit high 基线，根验收记录独立风险，不在本仓越权修改生成依赖。
+
+## 发布与主机后置条件
+
+v0.2.33 固定源码 cb5f260c723a01b9636c555701dddda6e9e749d7，原生发行 job 42359008396 通过，公开包 SHA-256 为 08f099eedd19355f6c16949ec956819eb8ae28eacbe9fa6290ba5f09ca9622c4。bootstrap 原生下载校验并安装 0.2.33，只保留当前完整发行；公开包与源码和安装中的全部 29 个运行文件逐字节相符。本机构建压缩包摘要不同，不能宣称跨平台压缩字节可复现；公开 checksum、固定源码和运行文件身份已分别核验。
+
+集合消费 c607488ec6ef7f0855bd79d15c303beda159f43e。原生 reconcile 已分别确认并接受 codex-cli 0.167.0-1、uv 0.13.7-1、aoe 1.22.1-1；没有安装、升级或降级这些包。Ponytail 原生 Marketplace 对齐现有 5.3.3/ref 96608e078b2d5ea607c5c3b8b5a54d1c1fba6846，后置核验通过。一次误用非登记简称 ponytail 被 CLI 拒绝，无副作用，随后使用完整 ID ponytail-plugin。
+
+通过原生配置模型启用 Windsurf owner 模式、RUN=n，保持功能批量探针和系统升级关闭。apply 仅改变 Windsurf 连接和 Paseo 自启 unit，Paseo 配置与 PATH no-op。22 登记组件（21 已选，1 未选运行态记录）及 6 已选连接的 check/status 均 exit 0。Windsurf 来源 owner-config，0700/0600、Devin 原样，单次公开合成项目真实搜索 complete/exit 0。Paseo unit 为 enabled oneshot、daemon start、RemainAfterExit=yes、Restart=no、KillMode=process；真实受控 start 后健康 daemon PID 532274 与 worker 均不变。真实跨登录未执行，沿已批准的隔离 target 触发及真实受控触发替代。根侧组合验收、清理及原生收尾详见关联根任务。
