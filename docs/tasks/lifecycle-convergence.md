@@ -16,4 +16,6 @@
 
 隔离真实 Paseo 0.15.2 与 systemd user target 已验证启动器退出后存活、重复触发 PID 不变、原生 stop 不复活、原生 restart 保留 supervisor 并替换 worker、关闭/移除入口不杀 daemon，测试进程与入口已清理；真实用户 daemon PID 532274 保持健康。实际跨登录未测，也未操作真实服务入口。
 
-Windsurf v0.1.17 代码与证明已推送，发布流水线 42355980168 的 validate job 全部通过，但 publish job 在 npm whoami 返回 E401、未执行 publish；registry 仍明确 E404。按既定依赖顺序，集合 pin、Lifecycle 新版本分配/发行及本机变更保持待执行。本提交仅固定已验证的实现进度，不表示交付完成；无需因外部认证修复重新索取同范围批准。
+Windsurf v0.1.17 已在原始 tag 和 tarball 上直接发布；流水线 attempt 3 的 publish 成功，立即下载因传播期 404 导致 run 整体失败。公开可见后，独立下载摘要、精确 npm 安装、registry signature 与 attestation 均通过。集合沿原生 npm-pack 物化 evidence E 50147de6a46bad1c02f2868915fbd77da8d3b061，19 文件字节与权限一致，verify、12 项集合测试、9 项评估通过并提交推送。catalog 不额外发明集合 pin；既有原生 resolver 在消费时固定集合完整提交与摘要到 lock。
+
+远端未占用的 Lifecycle 版本为 0.2.33，准备沿原生 tag workflow 验证、构建和发行。主机安装、reconcile、Windsurf owner 导入、真实自启迁移及根全集验收仍待执行，不能把源码检查等同于交付完成。未改动的 Grok 固定依赖有 npm audit high 基线，根验收记录独立风险，不在本仓越权修改生成依赖。
