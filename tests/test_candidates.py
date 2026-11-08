@@ -15,6 +15,25 @@ import candidates
 
 
 class CandidateTests(unittest.TestCase):
+    def test_collection_catalog_pin_is_used_without_resolving_mutable_head(self):
+        commit = "b" * 40
+        component = {"lock_source": "git:example/skills:collection.json", "collection_contract": {
+            "directory": "pennix-skills", "source": {
+                "repo": "example/skills", "ref": commit, "manifest": "collection.json"}}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "source.tar.gz"
+            archive.write_bytes(b"fixed archive")
+            checkout = root / "checkout"
+            checkout.mkdir()
+            (checkout / "collection.json").write_text(json.dumps({"schema": 1, "name": "pennix-skills"}))
+            with patch.object(candidates, "_git_head", side_effect=AssertionError("mutable head queried")), \
+                 patch.object(candidates, "_download_archive", return_value=(archive, "c" * 64)) as download, \
+                 patch.object(candidates.owned_files, "extract", return_value=checkout):
+                result = candidates.resolve_collection(component, root)
+            self.assertEqual(commit, result["ref"])
+            self.assertEqual(commit, download.call_args.args[1])
+
     @staticmethod
     def _archive_bytes(entries):
         output = io.BytesIO()

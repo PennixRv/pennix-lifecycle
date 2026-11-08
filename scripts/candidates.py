@@ -348,7 +348,7 @@ def resolve_client(component: dict, workspace: Path, target: dict | None = None)
 
 def resolve_collection(component: dict, workspace: Path, target: dict | None = None) -> dict:
     source = component["collection_contract"]["source"]
-    ref = target.get("ref") if target else _git_head(source["repo"])
+    ref = target.get("ref") if target else source.get("ref") or _git_head(source["repo"])
     archive, sha256 = _download_archive(source["repo"], ref, workspace, "collection.tar.gz")
     checkout = owned_files.extract(archive, workspace / "collection-source")
     manifest = json.loads((checkout / source["manifest"]).read_bytes())

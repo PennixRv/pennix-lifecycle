@@ -87,7 +87,7 @@ class NativeIntegrationTests(unittest.TestCase):
             path.write_text(FAKE_NATIVE, encoding="utf-8")
             path.chmod(0o700)
         self.environment = patch.dict(os.environ, {
-            "HOME": str(self.home), "PATH": f"{self.bin}:{os.environ['PATH']}",
+            "HOME": str(self.home), "PATH": f"{self.bin}:{self.home / '.local/bin'}:{os.environ['PATH']}",
             "XDG_STATE_HOME": str(self.root / "state"), "CODEX_HOME": str(self.codex),
         })
         self.environment.start()
@@ -136,6 +136,66 @@ class NativeIntegrationTests(unittest.TestCase):
             self.assertEqual(pennix.cmd_repair(args), 0)
         package.assert_called_once()
         self.assertEqual(native_integrations.inspect("context-mode", self.codex, enabled=True)["state"], "current")
+
+    def seed_without_path(self):
+        desired = native_integrations._desired("context-mode", self.codex, enabled=True)
+        native_integrations._context_apply(self.codex, desired, None)
+        return native_integrations._read_receipt("context-mode")
+
+    def test_path_migration_is_stable_and_wrapper_finds_its_dependency(self):
+        self.seed_without_path()
+        local_bin = self.home / ".local/bin"
+        wrapper, dependency = local_bin / "wrapper", local_bin / "dependency"
+        wrapper.write_text('#!/bin/sh\nexec dependency\n')
+        dependency.write_text('#!/bin/sh\nprintf "dependency-found"\n')
+        wrapper.chmod(0o700)
+        dependency.chmod(0o700)
+        with patch.dict(os.environ, {"PATH": "/usr/bin"}):
+            self.assertEqual("update-required", native_integrations.inspect("context-mode", self.codex, enabled=True)["state"])
+            with self.assertRaisesRegex(context_mode_integration.ContextModeError, "原生环境"):
+                native_integrations.apply("context-mode", self.codex, repair=True)
+        native_integrations.apply("context-mode", self.codex, repair=True)
+        receipt = native_integrations._read_receipt("context-mode")
+        saved_path = receipt["mcp"]["env"]["PATH"]
+        with patch.dict(os.environ, {"PATH": "/usr/bin"}):
+            self.assertEqual("current", native_integrations.inspect("context-mode", self.codex, enabled=True)["state"])
+            self.assertEqual("no-op", native_integrations.apply("context-mode", self.codex))
+        with patch.dict(os.environ, {"PATH": str(self.root)}):
+            self.assertEqual("current", native_integrations.inspect("context-mode", self.codex, enabled=True)["state"])
+        import subprocess
+        result = subprocess.run([str(wrapper)], env={"PATH": saved_path}, capture_output=True, text=True)
+        self.assertEqual((0, "dependency-found"), (result.returncode, result.stdout))
+        self.assertEqual(receipt, native_integrations._read_receipt("context-mode"))
+
+    def test_path_filters_relative_empty_and_session_directories_in_order(self):
+        temporary = self.codex / "tmp/codex-arg0-fixture"
+        temporary.mkdir(parents=True)
+        local_bin = self.home / ".local/bin"
+        raw = f"relative::{temporary}:{local_bin}:/usr/bin:{local_bin}"
+        with patch.dict(os.environ, {"PATH": raw}):
+            self.assertEqual(f"{local_bin}:/usr/bin", context_mode_integration.configured_path(self.codex))
+
+    def test_failed_path_migration_restores_original_receipt_and_mcp(self):
+        previous = self.seed_without_path()
+        config = native_integrations._toml(self.codex / "config.toml")
+        hooks = (self.codex / "hooks.json").read_bytes()
+        with patch.object(native_integrations, "_write_receipt", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(context_mode_integration.ContextModeError, "已撤回"):
+                native_integrations.apply("context-mode", self.codex, repair=True)
+        self.assertEqual(previous, native_integrations._read_receipt("context-mode"))
+        self.assertEqual(config, native_integrations._toml(self.codex / "config.toml"))
+        self.assertEqual(hooks, (self.codex / "hooks.json").read_bytes())
+
+    def test_invalid_receipted_path_is_rejected(self):
+        native_integrations.apply("context-mode", self.codex)
+        path = native_integrations._receipt_path("context-mode")
+        record = json.loads(path.read_bytes())
+        record["mcp"]["env"]["PATH"] = "/usr/bin:relative"
+        path.write_text(json.dumps(record))
+        before = (self.codex / "config.toml").read_bytes()
+        with self.assertRaises(context_mode_integration.ContextModeError):
+            native_integrations.apply("context-mode", self.codex, repair=True)
+        self.assertEqual(before, (self.codex / "config.toml").read_bytes())
 
     def test_new_hooks_file_is_removed_on_uninstall(self):
         native_integrations.apply("context-mode", self.codex)
@@ -254,7 +314,8 @@ class NativeIntegrationTests(unittest.TestCase):
         self.assertEqual("update-required", native_integrations.inspect("context-mode", self.codex, enabled=True)["state"])
         native_integrations.apply("context-mode", self.codex)
         receipt = native_integrations._read_receipt("context-mode")
-        self.assertEqual({"CODEX_HOME": str(self.codex)}, receipt["mcp"]["env"])
+        self.assertEqual(str(self.codex), receipt["mcp"]["env"]["CODEX_HOME"])
+        self.assertIn(str(self.home / ".local/bin"), receipt["mcp"]["env"]["PATH"].split(os.pathsep))
         self.assertNotIn("CONTEXT_MODE_PLATFORM", receipt["mcp"]["env"])
         self.assertEqual(set(context_mode_integration.EVENTS), set(receipt["hooks"]))
         self.assertEqual(context_mode_integration.SKILLS, set(receipt["skills"]))

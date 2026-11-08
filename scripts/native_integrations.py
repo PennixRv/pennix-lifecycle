@@ -92,16 +92,19 @@ def _edit_hooks(codex_home: Path, previous: dict, desired: dict, *, remove_empty
     owned_files.replace(codex_home / "hooks.json", output, before)
 
 
-def _context_target(codex_home: Path) -> dict:
-    return context_mode.target(codex_home)
+def _context_target(codex_home: Path, receipt: dict | None = None, *, configure: bool = False) -> dict:
+    path = receipt["mcp"].get("env", {}).get("PATH") if receipt else None
+    if path is None and configure:
+        path = context_mode.configured_path(codex_home)
+    return context_mode.target(codex_home, path)
 
 
-def _desired(key: str, codex_home: Path, *, enabled: bool) -> dict:
+def _desired(key: str, codex_home: Path, *, enabled: bool, receipt: dict | None = None, configure: bool = False) -> dict:
     if key not in {"codegraph", "context-mode", "siyuan"}:
         raise NativeIntegrationError(f"未知 native integration: {key}")
     value = {"key": key, "enabled": enabled, "codex_home": str(codex_home)}
     if key == "context-mode":
-        value.update(_context_target(codex_home))
+        value.update(_context_target(codex_home, receipt, configure=configure))
     elif key == "codegraph":
         value["mcp"] = {"command": _command(key), "args": ["serve", "--mcp"]}
     else:
@@ -206,7 +209,9 @@ def inspect(key: str, codex_home: Path, *, enabled: bool) -> dict[str, object]:
         return {"state": "drifted", "owned": True, "detail": "native owner configuration changed"}
     if not enabled:
         return {"state": "owned", "owned": True, "detail": "native integration receipt"}
-    desired = _desired(key, codex_home, enabled=True)
+    if key == "context-mode" and "PATH" not in receipt["mcp"].get("env", {}):
+        return {"state": "update-required", "owned": True, "detail": "native MCP PATH requires explicit configuration"}
+    desired = _desired(key, codex_home, enabled=True, receipt=receipt)
     return {"state": "current" if receipt["desired_digest"] == _digest(desired) else "update-required",
             "owned": True, "detail": "native owner configuration"}
 
@@ -303,7 +308,7 @@ def apply(key: str, codex_home: Path, *, adopt: bool = False, repair: bool = Fal
         raise NativeIntegrationError(f"{key} native 配置无法安全接管: {status['state']}")
     if status["state"] == "current":
         return "no-op"
-    desired = _desired(key, codex_home, enabled=True)
+    desired = _desired(key, codex_home, enabled=True, receipt=_read_receipt(key), configure=True)
     if key == "context-mode":
         return _context_apply(codex_home, desired, _read_receipt(key), repair=repair)
     previous = owned_files.read(_receipt_path(key), private=True)

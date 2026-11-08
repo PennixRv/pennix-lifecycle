@@ -91,7 +91,30 @@ def parse_plan(value, root: Path, home: Path, node: str):
     return {"mcp": mcp, "hooks": hooks, "trust": trust, "skills": skills}
 
 
-def target(home: Path):
+def validate_path(value):
+    _require(isinstance(value, str) and value and "\x00" not in value
+             and all(Path(item).is_absolute() for item in value.split(os.pathsep)),
+             "context-mode PATH 必须是非空的绝对目录列表")
+    return value
+
+
+def configured_path(home: Path):
+    directories = []
+    temporary = home / "tmp"
+    for item in os.environ.get("PATH", "").split(os.pathsep):
+        path = Path(item)
+        if (not path.is_absolute() or not path.is_dir() or path.is_relative_to(temporary)
+                or any(part.startswith("codex-arg0") for part in path.parts)):
+            continue
+        if item not in directories:
+            directories.append(item)
+    value = validate_path(os.pathsep.join(directories))
+    _require(str(Path.home() / ".local/bin") in directories and shutil.which("node", path=value),
+             "context-mode PATH 缺少用户 CLI 目录或 Node；请从已核验的原生环境配置")
+    return value
+
+
+def target(home: Path, path=None):
     root = Path.home() / ".local/lib/node_modules/@pennixrv/context-mode"
     entry = Path.home() / ".local/bin/context-mode"
     try:
@@ -99,13 +122,16 @@ def target(home: Path):
         _require(package.get("name") == "@pennixrv/context-mode"
                  and re.fullmatch(r"2\.[0-9]+\.[0-9]+-pennix\.[0-9]+", package.get("version", ""))
                  and entry.resolve(strict=True) == root / "cli.mjs")
-        node = shutil.which("node")
+        node = shutil.which("node", path=path)
         _require(node is not None, "context-mode v2 需要受支持的 Node")
         node = str(Path(node).resolve(strict=True))
         # The only subprocess is the fixed, read-only plan request. No plan argv is executed.
         with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as error:
+            environment = {**os.environ, "CODEX_HOME": str(home)}
+            if path is not None:
+                environment["PATH"] = path
             result = subprocess.run([node, str(root / "cli.mjs"), "setup", "--print", "codex", "--json"],
-                                    env={**os.environ, "CODEX_HOME": str(home)}, stdout=output, stderr=error,
+                                    env=environment, stdout=output, stderr=error,
                                     timeout=30, check=False)
             _require(result.returncode == 0 and output.tell() <= 131072 and error.tell() <= 16384)
             output.seek(0)
@@ -113,6 +139,8 @@ def target(home: Path):
             # Codex filters its MCP child environment. Preserve the selected native
             # home explicitly; otherwise a custom CODEX_HOME falls back to HOME/.codex.
             desired["mcp"]["env"] = {"CODEX_HOME": str(home)}
+            if path is not None:
+                desired["mcp"]["env"]["PATH"] = validate_path(path)
             return desired
     except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
         raise ContextModeError("无法核验 context-mode v2 包及只读计划") from error
@@ -127,6 +155,10 @@ def validate_receipt(value):
              and re.fullmatch(r"[0-9a-f]{64}", value.get("desired_digest", ""))
              and isinstance(value["mcp"], dict) and isinstance(value["hooks"], dict)
              and type(value["hooks_file_created"]) is bool, "context-mode native receipt 无效")
+    environment = value["mcp"].get("env", {})
+    _require(isinstance(environment, dict), "context-mode native receipt env 无效")
+    if "PATH" in environment:
+        validate_path(environment["PATH"])
     if value["schema"] == 2:
         _require(isinstance(value["trust"], dict) and isinstance(value["skills"], dict)
                  and set(value["skills"]) == SKILLS and len(value["trust"]) == 4)
