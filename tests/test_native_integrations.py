@@ -171,6 +171,7 @@ class NativeIntegrationTests(unittest.TestCase):
         temporary = self.codex / "tmp/codex-arg0-fixture"
         temporary.mkdir(parents=True)
         local_bin = self.home / ".local/bin"
+        (local_bin / "node").symlink_to(shutil.which("node"))
         raw = f"relative::{temporary}:{local_bin}:/usr/bin:{local_bin}"
         with patch.dict(os.environ, {"PATH": raw}):
             self.assertEqual(f"{local_bin}:/usr/bin", context_mode_integration.configured_path(self.codex))

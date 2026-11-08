@@ -10,8 +10,10 @@
 
 ## 发布候选
 
-版本 0.2.37；catalog 固定公开 Skills `75952b97fa3472ba447def69391d3cdc8a08b379`，resolver 尊重声明的 ref，既有锁定目标仍优先。真实模型使用同一 collection 内容 digest `05f0ac7429628249d957d745fbf1d160a9f589da2a8e631a3eb88f1465d3577b`，后续提交只修正评估器的宿主标志计量和本仓任务证据，不改变 Skills 内容。
+版本 0.2.38；catalog 固定公开 Skills `75952b97fa3472ba447def69391d3cdc8a08b379`，resolver 尊重声明的 ref，既有锁定目标仍优先。真实模型使用同一 collection 内容 digest `05f0ac7429628249d957d745fbf1d160a9f589da2a8e631a3eb88f1465d3577b`，后续提交只修正评估器的宿主标志计量和本仓任务证据，不改变 Skills 内容。
 
 完整 unittest 157 项通过；迁移、较窄父 PATH 下稳定检查、包装器依赖链、拒绝坏 receipt 与事务恢复均有回归。AGENTS 源模板逐字等于已批准候选，4988 字节、SHA-256 `305cebc9697bc55c93b116bcf7bae9712230b7313d642d1d72099fe1d8d4dca7`；26 条原有规则的语义覆盖表保存在根任务 review.md。
 
 根任务已完成 8 个真实模型回合和 4 个真实 app-server/本地模型协议检查。前后样本均未调用异步工具，基线不复现历史误报；Default 中同步 request_user_input 的 isBlocking=false 不代表异步。最终发行、原生安装、新 MCP 查询和现场收尾由根任务继续核验。
+
+v0.2.37 标签已公开，但 CI 42444945567 在生成 Release 前失败：PATH 过滤测试假设 Node 位于 /usr/bin，GitHub runner 不满足。修正为在夹具用户 CLI 目录建立指向真实 Node 的符号链接；产品实现未变。保留失败标签，不重打、不覆盖，使用新补丁 v0.2.38。
