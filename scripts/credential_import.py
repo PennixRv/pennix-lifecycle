@@ -82,12 +82,14 @@ def import_from_ssh(
     *,
     fetch: Callable[[str, str], bytes] = _fetch_remote,
 ) -> set[str]:
+    if not ALIAS.fullmatch(alias):
+        raise CredentialImportError("SSH alias 只能包含主机别名字符")
     selected = list(dict.fromkeys(services))
     if not selected or any(service not in SOURCES for service in selected):
         raise CredentialImportError("必须选择已登记的凭据来源")
     updates: dict[str, dict[str, str]] = {}
     for service in selected:
         remote_path = SOURCES[service][0]
-        extracted = _extract(service, fetch(service, remote_path))
+        extracted = _extract(service, fetch(alias, remote_path))
         updates.setdefault(service, {}).update(extracted[service])
     return secret_store.update(path, updates)

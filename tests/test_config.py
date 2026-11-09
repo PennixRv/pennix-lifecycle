@@ -288,7 +288,7 @@ class ConfigModelTests(unittest.TestCase):
         self.assertEqual(updated, {"codex.api_key", "grok.api_key", "grok.tavily_api_key"})
         self.assertEqual(secret_store.get(secrets, "codex", "api_key"), "codex-test-key")
         self.assertEqual(secret_store.get(secrets, "grok", "api_key"), "grok-test-key")
-        self.assertEqual(calls, [("codex", ".codex/auth.json"), ("grok", ".config/grok-search/config.json")])
+        self.assertEqual(calls, [("fixture", ".codex/auth.json"), ("fixture", ".config/grok-search/config.json")])
         self.assertNotIn("baseUrl", secret_store.load(secrets).get("grok", {}))
         with self.assertRaises(secret_store.SecretError):
             credential_import.import_from_ssh(

@@ -62,7 +62,8 @@ class SecretStoreTests(unittest.TestCase):
             ".config/windsurf-code-search/config.json": json.dumps({"apiKey": "windsurf-key"}),
         }
 
-        def fetch(_service: str, remote: str) -> bytes:
+        def fetch(alias: str, remote: str) -> bytes:
+            self.assertEqual(alias, "office")
             return fixtures[remote].encode()
 
         with tempfile.TemporaryDirectory() as directory:
