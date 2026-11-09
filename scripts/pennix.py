@@ -1139,16 +1139,16 @@ def cmd_apply(args: argparse.Namespace) -> int:
             continue
         if component_id == "paseo-relay":
             def apply_relay():
+                prefix = Path.home() / ".local"
+                paseo = prefix / "bin" / "paseo"
+                if not paseo.is_file():
+                    paseo = Path(shutil.which("paseo") or paseo)
                 if action == "uninstall":
                     if relay_owner.local_owned():
                         relay_owner.remove(relay_home,
                             nas_ssh=config_model.config_value(args.kconf, "PENNIX_RELAY_NAS_SSH"),
                             router_ssh=config_model.config_value(args.kconf, "PENNIX_RELAY_ROUTER_SSH"))
                     return relay_owner.unconfigure_daemon(paseo, relay_home)
-                prefix = Path.home() / ".local"
-                paseo = prefix / "bin" / "paseo"
-                if not paseo.is_file():
-                    paseo = Path(shutil.which("paseo") or paseo)
                 relay_spec = value["components"]["paseo-relay"]
                 if relay_spec.get("register"):
                     relay_owner.ensure(relay_home,

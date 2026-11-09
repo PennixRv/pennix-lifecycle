@@ -292,3 +292,25 @@ class AuditRegressions(unittest.TestCase):
             identity.assert_called_once_with(official)
             receipt.assert_called_once_with("official", official, "2-1")
             lock.assert_called_once_with(args)
+
+    def test_apply_deselect_relay_retracts_local_owner_without_remote_receipt(self):
+        step = {"id": "paseo-relay:uninstall", "component": "paseo-relay", "action": "uninstall", "target": {}}
+        active = apply_journal.start("apply", None, "a" * 64, None, [step])
+        args = SimpleNamespace(json=True, kconf=SimpleNamespace(syms={}), codex_home=self.root / "codex")
+        value = {"components": {"paseo-relay": {"selected": False, "action": "uninstall"},
+                 "paseo-autostart": {"selected": False, "action": "keep", "unit_state": "absent", "run": False}},
+                 "connections": {}}
+        catalog = {"components": {}, "configuration_targets": {}}
+        with patch.object(pennix, "_plan", return_value=value), \
+             patch.object(pennix, "_load", return_value=(args.kconf, self.root / "config", catalog)), \
+             patch.object(pennix, "_apply_steps", return_value=[step]), \
+             patch.object(pennix, "_journal_for_apply", return_value=(active, True)), \
+             patch.object(config_model, "config_value", return_value=str(self.root / "paseo")), \
+             patch.object(pennix, "_verify_inputs"), patch.object(pennix, "_emit"), \
+             patch.object(relay_owner, "local_owned", return_value=False), \
+             patch.object(relay_owner, "remove") as remote, \
+             patch.object(relay_owner, "unconfigure_daemon", return_value="changed") as local:
+            self.assertEqual(pennix.cmd_apply(args), 0)
+            local.assert_called_once()
+            remote.assert_not_called()
+            self.assertIsNone(apply_journal.read())
