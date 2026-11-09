@@ -643,6 +643,33 @@ def _delegation_preflight(args: argparse.Namespace, component_id: str, operation
         agents = json.loads(result.stdout)
         if result.returncode or not isinstance(agents, list) or any(not isinstance(item, dict) or not isinstance(item.get("status"), str) for item in agents):
             raise ValueError("unknown agents")
+        if agents and any(not isinstance(item.get("labels"), dict) for item in agents):
+            # Paseo's list renderer omits labels; absence is not an unlabelled agent.
+            adapter = shutil.which("trellis-paseo-adapter")
+            if not adapter:
+                current = os.environ.get("PASEO_AGENT_ID")
+                if current and all(item.get("id") == current for item in agents):
+                    return
+                raise ValueError("native labels unavailable without adapter")
+            request = {"version": 1, "operation": "inspect", "daemon_selector": {"home": str(home)}, "payload": {}}
+            inspected = subprocess.run([adapter], input=json.dumps(request), capture_output=True, text=True, timeout=30, check=False)
+            if inspected.returncode or len(inspected.stdout) > 256 * 1024:
+                raise ValueError("unknown adapter inspection")
+            receipt = json.loads(inspected.stdout)
+            if not isinstance(receipt, dict) or receipt.get("version") != 1 or receipt.get("operation") != "inspect" or receipt.get("ok") is not True:
+                raise ValueError("unverified adapter receipt")
+            observed = receipt.get("observations", {})
+            if not isinstance(observed, dict):
+                raise ValueError("invalid adapter observations")
+            identity = observed.get("identity", {})
+            if not isinstance(identity, dict) or identity.get("pid") != value["pid"] or identity.get("home") != str(home.resolve()) or (value.get("serverId") and identity.get("server_id") != value["serverId"]):
+                raise ValueError("daemon identity mismatch")
+            full_agents = observed.get("agents")
+            if not isinstance(full_agents, list) or any(not isinstance(item, dict) or not isinstance(item.get("id"), str) or not isinstance(item.get("status"), str) or not isinstance(item.get("labels"), dict) for item in full_agents):
+                raise ValueError("unverified native agent labels")
+            if not {item.get("id") for item in agents}.issubset({item["id"] for item in full_agents}):
+                raise ValueError("native inspection omitted listed agents")
+            agents = full_agents
         if any((item.get("labels", {}).get("trellis.attempt") or item.get("labels", {}).get("trellis.task_id")) and (item["status"] != "closed" or item.get("activeTurn")) for item in agents):
             raise CliError("存在未关闭的 Trellis 工作树委派；先由 controller 保全、接受或取消并核销，再关闭原生 agent，未替换共享组件")
     except (OSError, ValueError, TypeError, subprocess.TimeoutExpired) as error:
