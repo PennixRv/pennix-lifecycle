@@ -25,3 +25,11 @@ L1 修复身份/目标互斥、配置快照与确认、来源/锁/平台和事�
 v0.2.39 的 CI 在真实载荷门禁失败，未发布；Ubuntu 的 sudo 系统别名指向隔离 `/etc` 外的目标，测试未复制其别名链。夹具现仅重建 curl/sudo 的必要 `/etc` 别名，替身绑定到最终命令目标，继续隔离用户目录、网络与服务。旧 tag 保留，不覆盖发行物；以 v0.2.40 重新完整验证和发布。
 
 v0.2.40 完整 183 项、CI 和公开载荷 smoke 通过，原生 tool install 与集合 update 成功；随后原生 apply/check 六连接全部 current/keep/owned、事务 idle、功能检查 not_requested。实际公开包 `6d0c42150e8fc6842b17913c97c21e8ec676a518f8654d46c7cfd592cf01a578` 与本机构建压缩字节不同，但全部运行文件字节/权限一致，原生 runtime digest 与 receipt 一致。逐分支最后复核发现取消 relay 的闭包在赋值前读取局部 paseo 变量，已调整解析顺序并通过真实 cmd_apply 入口隔离反例；v0.2.41 再经完整测试、实际载荷门禁、正式发布及本机升级，不以 v0.2.40 的本机通过代替最终版本验收。
+
+## 最终交付
+
+v0.2.41 最终 source/tag 提交 `09e0f21f5f7578810eb8f16e769bf0e4bdcf52e3`；包括 SSH 导入 alias 接线修正，以及首次秘密写入的私有目录和非 UTF-8 脱敏反例。隔离完整 186 项全部通过，显式包含实际 Paseo 公开 SDK 和实际构建载荷，bootstrap 参数/目标隔离检查通过。原生 CI 42568168434 完成源码、上传前载荷门禁及正式发布。
+
+正式 GitHub tar.gz SHA-256 为 `9e3f45380a60a11b7540a73655c5646fe02764da3e4e520e4ca9fe15196eda54`，与公开校验和一致；全部运行文件内容/权限与本机构建一致，下载的公开包独立 smoke 通过。经公开包原生 tool install 本机升级 0.2.41，公开解包/实装/receipt 的 runtime digest 均为 `b05e6fca9f164850e1617d74c1b8e5dc66e785497062efe58dc24ccb6a3726fe`。原生 check 退出 0、六连接 current、functional_checks=not_requested；recover idle。没有重启现有 daemon、触达未选择的付费检索或执行真实系统包升级。
+
+F01–F22、M01–M42 的全部处置及验证逐项回写根任务 verification.md；A01/A16 原失败未改写。D08 允许的真实双平台新机、跨登录、PAM/runuser、全部外部服务及 Codex 插件磁盘旅程保持未验证，不由隔离替身推定通过。此后仅归档文档与根组合收尾，不改变本次发布运行资产。
