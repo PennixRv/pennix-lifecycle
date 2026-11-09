@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import tomllib
 import urllib.request
@@ -754,6 +755,41 @@ def _write_package_receipt(component_id: str, component: dict[str, Any], observe
         "target": owned_files.target_identity(),
     })
     owned_files.replace(path, content, before)
+
+
+def recover_npm_receipt(component_id: str, component: dict[str, Any], old: dict, archive: Path) -> None:
+    """Recover a recorded npm upgrade only after verifying the fixed archive on disk."""
+    receipt = _package_receipt(component_id, component)
+    if (component.get("package", {}).get("source") != "npm" or receipt is None
+            or old.get("source") != component.get("lock_source")
+            or receipt["version"] != old.get("version")):
+        raise BootstrapError("npm recovery requires the trusted previous lock and receipt")
+    identity = package_identity(component)
+    expected = _target_version(component)
+    if identity["version"] != expected or probe_component(component)[0] != "match":
+        raise BootstrapError("npm recovery installed identity differs from the recorded target")
+    root = _prefix(component) / "lib/node_modules" / component["package"]["name"]
+    seen = set()
+    with tarfile.open(archive, "r:gz") as bundle:
+        for member in bundle:
+            if member.isdir():
+                continue
+            parts = Path(member.name).parts
+            if (not member.isfile() or len(parts) < 2 or parts[0] != "package"
+                    or ".." in parts or member.name in seen):
+                raise BootstrapError("npm recovery archive has an unsafe or duplicate entry")
+            seen.add(member.name)
+            installed = root.joinpath(*parts[1:])
+            if (not installed.is_file() or installed.is_symlink()
+                    or installed.resolve() != installed.absolute()):
+                raise BootstrapError("npm recovery installed file is missing or redirected")
+            source = bundle.extractfile(member)
+            with installed.open("rb") as actual:
+                if source is None or hashlib.file_digest(source, "sha256").digest() != hashlib.file_digest(actual, "sha256").digest():
+                    raise BootstrapError("npm recovery installed files differ from the fixed archive")
+    if "package/package.json" not in seen:
+        raise BootstrapError("npm recovery archive has no package identity")
+    _write_package_receipt(component_id, component, expected)
 
 
 def reconcile_candidate(component_id: str, component: dict[str, Any], codex_home: Path, old: dict) -> tuple[dict, dict, dict]:

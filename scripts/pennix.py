@@ -1925,6 +1925,13 @@ def cmd_recover(args: argparse.Namespace) -> int:
                     owned = skill_collections.owned(component, home)
                 elif component["delivery"] == "client":
                     owned = owner_engine.local_clients.receipt(step["component"], component) is not None
+            if (state == "match" and not owned and step["action"] == "upgrade"
+                    and component.get("package", {}).get("source") == "npm"):
+                with tempfile.TemporaryDirectory(prefix="pennix-recover-npm-") as directory:
+                    candidate = candidates.resolve(component, Path(directory), step["target"])
+                    old = args.component_lock["components"].get(step["component"], {})
+                    owner_engine.recover_npm_receipt(step["component"], component, old, Path(candidate["path"]))
+                owned = owner_engine.package_owned(step["component"], component, codex_home=home)
             if state not in {"match", "current"} or not owned:
                 raise CliError("组件身份、归属或精确目标未证明；保留 unknown")
             args.component_lock = component_lock.set_entry(args.component_lock, step["component"], step["target"], args.component_lock_sources)
