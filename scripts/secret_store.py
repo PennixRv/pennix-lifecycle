@@ -58,6 +58,9 @@ def update(path: Path, updates: dict[str, dict[str, str]]) -> set[str]:
     """Merge credential values without exposing them in the return value."""
     _validate(updates)
     try:
+        owned_files.ensure_parent(path)
+        if path.parent.stat().st_mode & 0o077:
+            raise SecretError("秘密目录必须为当前用户所有且为 0700；未写入秘密")
         before = owned_files.read(path, private=True)
     except owned_files.OwnershipError as error:
         raise SecretError("秘密文件的类型、归属或权限不安全") from error

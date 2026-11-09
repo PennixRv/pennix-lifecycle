@@ -125,10 +125,12 @@ def read_receipt(path: Path) -> dict | None:
     value = files.read_json(receipt_path(path))
     if value is None:
         return None
-    if (not isinstance(value, dict) or set(value) != {"schema", "destination", "digest", "source", "manifest"}
+    if (not isinstance(value, dict) or set(value) - {"target"} != {"schema", "destination", "digest", "source", "manifest"}
             or type(value["schema"]) is not int or value["schema"] != 1 or value["destination"] != path.name
             or not re.fullmatch(r"[0-9a-f]{64}", value.get("digest", ""))):
         raise CollectionError("集合 receipt 格式不受支持")
+    if "target" in value and value["target"] != str(path):
+        raise CollectionError("集合 receipt 属于其他目标路径")
     source_identity({"collection_contract": {"source": value["source"]}})
     validate_manifest(value["manifest"], path.name)
     return value
@@ -200,7 +202,13 @@ def receipt_owned(component: dict, codex_home: Path) -> str:
     if not receipt_path(path).exists():
         return "missing"
     try:
-        _verified(path)
+        record = read_receipt(path)
+        if not path.exists() and record.get("target") == str(path):
+            for link, target in links(record["manifest"], path).items():
+                if _link_value(link) not in {None, target}:
+                    raise CollectionError("孤立集合命令已被其他 owner 替换")
+        else:
+            _verified(path)
     except (CollectionError, OSError, ValueError, KeyError, TypeError) as error:
         return f"blocked: {error}"
     return "owned"
@@ -219,7 +227,7 @@ def lock_migration(component: dict, codex_home: Path) -> dict | None:
     return {"source": component["lock_source"], "ref": source["ref"]}
 
 
-def _stage(component: dict, workspace: Path, candidate: dict | None = None) -> tuple[Path, dict]:
+def _stage(component: dict, workspace: Path, candidate: dict | None = None, *, environment: dict | None = None) -> tuple[Path, dict]:
     source = source_identity(component)
     if candidate:
         archive = Path(candidate["path"])
@@ -243,7 +251,7 @@ def _stage(component: dict, workspace: Path, candidate: dict | None = None) -> t
     for name, material in manifest["materialized"].items():
         if material.get("post_install") == ["grok-search-runtime"]:
             result = subprocess.run(["npm", "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
-                                    cwd=staging / name, capture_output=True, timeout=240)
+                                    cwd=staging / name, capture_output=True, timeout=240, env=environment)
             if result.returncode:
                 raise CollectionError(f"集合生产依赖安装失败: {name}")
     validate_members(staging, manifest)
@@ -257,6 +265,14 @@ def operate(component: dict, codex_home: Path, operation: str, *, candidate: dic
     if operation == "uninstall":
         if files.read(receipt) is None:
             return "preserved" if path.exists() else "no-op"
+        if not path.exists() and receipt_owned(component, codex_home) == "owned":
+            record = read_receipt(path)
+            before = files.read(receipt, private=True)
+            for link, target in links(record["manifest"], path).items():
+                if _link_value(link) == target:
+                    _set_link(link, None, target)
+            files.replace(receipt, None, before)
+            return "changed; removed proven orphan receipt and links"
         try:
             old = _verified(path)
         except (CollectionError, OSError, ValueError, KeyError, TypeError) as error:
@@ -282,7 +298,7 @@ def operate(component: dict, codex_home: Path, operation: str, *, candidate: dic
                 raise CollectionError(f"拒绝接管已有命令: {link.name}")
         if old and _verified(path) != old or not old and path.exists() or files.read(receipt) != old_raw:
             raise CollectionError("集合在暂存期间改变")
-        after_raw = files.json_bytes({"schema": 1, "destination": path.name, "digest": digest(staging),
+        after_raw = files.json_bytes({"schema": 1, "destination": path.name, "target": str(path), "digest": digest(staging),
                                       "source": source_identity(component), "manifest": manifest}) if staging else None
         backup = workspace / "previous"
         changed_links = []

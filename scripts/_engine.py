@@ -70,7 +70,7 @@ def load_catalog(path: Path) -> dict[str, Any]:
         if not isinstance(key, str) or not isinstance(component, dict):
             raise BootstrapError("catalog component is invalid")
         component["id"] = key
-        if component.get("delivery") not in {"package", "plugin", "native", "client", "static", "collection", "state"}:
+        if component.get("delivery") not in {"package", "plugin", "client", "static", "collection", "state"}:
             raise BootstrapError(f"catalog delivery is invalid: {key}")
         if component.get("delivery") != "state" and not isinstance(component.get("actions"), dict):
             raise BootstrapError(f"catalog actions are missing: {key}")
@@ -131,6 +131,8 @@ def _version(component: dict[str, Any], command: str) -> str | None:
             capture_output=True, text=True, timeout=10, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode:
         return None
     return normalize_version((result.stdout or result.stderr).strip())
 
@@ -204,7 +206,8 @@ def _agents_record(path: Path, content: bytes) -> dict:
 
 def _static_state(component_id: str, codex_home: Path, component: dict[str, Any]) -> str:
     path = _static_target(component_id, codex_home)
-    current = _read(path)
+    before = owned_files.read(path)
+    current = before.decode("utf-8") if before is not None else ""
     if component_id == "codex-agents":
         if not current:
             return "missing"
@@ -241,6 +244,11 @@ def _operate_static(component_id: str, codex_home: Path, component: dict[str, An
             state = "outdated"
         if operation == "uninstall":
             if state == "missing":
+                record = owned_files.read_json(receipt_path)
+                if record is not None:
+                    if record.get("schema") != 1 or record.get("path") != str(path) or not re.fullmatch(r"[0-9a-f]{64}", record.get("digest", "")):
+                        raise BootstrapError("孤立 AGENTS receipt 无法证明目标")
+                    owned_files.replace(receipt_path, None, before_receipt)
                 return "no-op"
             if state not in {"current", "outdated"}:
                 raise BootstrapError(f"refusing {state} AGENTS.md")
@@ -261,7 +269,8 @@ def _operate_static(component_id: str, codex_home: Path, component: dict[str, An
             raise
         return "changed"
 
-    current = _read(path)
+    before = owned_files.read(path)
+    current = before.decode("utf-8") if before is not None else ""
     block = f"{BEGIN_TMUX}\n{_template(component).rstrip()}\n{END_TMUX}"
     if operation == "uninstall":
         if state == "missing":
@@ -270,13 +279,13 @@ def _operate_static(component_id: str, codex_home: Path, component: dict[str, An
             raise BootstrapError(f"refusing {state} tmux config")
         start = current.index(BEGIN_TMUX)
         finish = current.index(END_TMUX, start) + len(END_TMUX)
-        _write(path, current[:start].rstrip("\n") + current[finish:])
+        owned_files.replace(path, (current[:start] + current[finish:]).encode(), before)
         return "changed"
     if state == "current":
         return "no-op"
     if state != "missing":
         raise BootstrapError(f"refusing {state} tmux config")
-    _write(path, current.rstrip("\n") + ("\n\n" if current else "") + block + "\n")
+    owned_files.replace(path, (current + ("\n" if current and not current.endswith("\n") else "") + block + "\n").encode(), before)
     return "changed"
 
 
@@ -380,11 +389,13 @@ def _plugin_receipt(component_id: str, component: dict[str, Any]) -> dict[str, s
     if value is None:
         return None
     plugin = component["plugin"]
-    if (not isinstance(value, dict) or set(value) != {"schema", "component", "id", "source", "version", "ref"}
+    if (not isinstance(value, dict) or set(value) - {"target"} != {"schema", "component", "id", "source", "version", "ref"}
             or type(value["schema"]) is not int or value["schema"] != 1 or value["component"] != component_id
             or value["id"] != plugin["id"] or value["source"] != component["lock_source"]
             or not isinstance(value["version"], str) or not re.fullmatch(r"[0-9a-f]{40}", value["ref"])):
         raise BootstrapError(f"plugin ownership receipt is invalid: {component_id}")
+    if "target" in value and value["target"] != owned_files.target_identity():
+        raise BootstrapError("plugin receipt belongs to another Lifecycle target")
     return {key: value[key] for key in ("source", "version", "ref")}
 
 
@@ -403,10 +414,28 @@ def _plugin_owned(component_id: str, component: dict[str, Any], codex_home: Path
     return receipt is not None and receipt == _plugin_snapshot(component, codex_home)
 
 
+def plugin_absent(component_id: str, component: dict, codex_home: Path) -> bool:
+    record = owned_files.read_json(_plugin_receipt_path(component_id))
+    if not record or record.get("target") != owned_files.target_identity():
+        return False
+    codex = shutil.which("codex")
+    if not codex:
+        return False
+    result = subprocess.run([codex, "plugin", "list", "--json"], capture_output=True, text=True,
+                            timeout=30, check=False, env={**os.environ, "CODEX_HOME": str(codex_home)})
+    try:
+        entries = json.loads(result.stdout)["installed"]
+        return result.returncode == 0 and isinstance(entries, list) and all(
+            isinstance(item, dict) and isinstance(item.get("pluginId"), str)
+            and item["pluginId"] != component["plugin"]["id"] for item in entries)
+    except (ValueError, KeyError, TypeError):
+        return False
+
+
 def _write_plugin_receipt(component_id: str, component: dict[str, Any], snapshot: dict[str, str]) -> None:
     path = _plugin_receipt_path(component_id)
     before = owned_files.read(path, private=True)
-    record = {"schema": 1, "component": component_id, "id": component["plugin"]["id"],
+    record = {"schema": 1, "component": component_id, "id": component["plugin"]["id"], "target": owned_files.target_identity(),
               **snapshot}
     owned_files.replace(path, owned_files.json_bytes(record), before)
 
@@ -488,6 +517,22 @@ def _prepare_plugin_marketplace(codex: str, home: Path, marketplace: dict[str, A
         source = configured.get("marketplaceSource", {}).get("source")
         if source != marketplace["source"]:
             raise BootstrapError(f"Codex marketplace {marketplace['name']} has a different source")
+        root = Path(configured.get("root", ""))
+        if not root.is_absolute() or not _plugin_tree_clean(root):
+            raise BootstrapError("refusing dirty or unknown Marketplace checkout")
+        listing = subprocess.run([codex, "plugin", "list", "--json"], capture_output=True,
+                                 text=True, check=False, env=env)
+        try:
+            plugins = json.loads(listing.stdout)["installed"]
+            if listing.returncode or not isinstance(plugins, list):
+                raise ValueError()
+            expected_id = marketplace.get("managed_plugin")
+            if any(not isinstance(item, dict) or not isinstance(item.get("pluginId"), str)
+                   or item["pluginId"].endswith("@" + marketplace["name"]) and item["pluginId"] != expected_id
+                   for item in plugins):
+                raise ValueError()
+        except (ValueError, KeyError, TypeError) as error:
+            raise BootstrapError("Marketplace 包含其他插件或无法核验；禁止移除共享登记") from error
         result = subprocess.run([codex, "plugin", "marketplace", "remove", marketplace["name"], "--json"],
                                 check=False, env=env)
         if result.returncode:
@@ -511,6 +556,10 @@ def probe_component(component: dict[str, Any], codex_home: Path | None = None, d
         return "unknown", None
     command = _command(component)
     if command is None:
+        if isinstance(component.get("package"), dict) and component["package"].get("source") == "npm":
+            root = _prefix(component) / "lib/node_modules" / component["package"]["name"]
+            if root.exists() or root.is_symlink():
+                return "blocked", "npm package exists but its executable is unavailable"
         return "missing", None
     observed = _version(component, command)
     if observed is None:
@@ -614,11 +663,13 @@ def _package_receipt(component_id: str, component: dict[str, Any]) -> dict[str, 
     if raw is None:
         return None
     package = component.get("package")
-    if (not isinstance(raw, dict) or set(raw) != {"schema", "component", "source", "name", "version"}
+    if (not isinstance(raw, dict) or set(raw) - {"target"} != {"schema", "component", "source", "name", "version"}
             or raw.get("schema") != 1 or raw.get("component") != component_id
             or not isinstance(package, dict) or raw.get("source") != package.get("source")
             or raw.get("name") != package.get("name") or not isinstance(raw.get("version"), str)):
         raise BootstrapError(f"package ownership receipt is invalid: {component_id}")
+    if "target" in raw and raw["target"] != owned_files.target_identity():
+        raise BootstrapError("package receipt belongs to another Lifecycle target")
     return raw
 
 
@@ -632,6 +683,8 @@ def package_owned(
         return local_clients.receipt(component_id, component) is not None and local_clients.inspect(component_id, component)[0] in {"match", "outdated"}
     receipt = _package_receipt(component_id, component)
     if receipt is None:
+        return False
+    if _command(component) is None:
         return False
     identity = package_identity(component)
     if observed is None:
@@ -687,6 +740,7 @@ def _write_package_receipt(component_id: str, component: dict[str, Any], observe
         "source": package["source"],
         "name": package["name"],
         "version": observed,
+        "target": owned_files.target_identity(),
     })
     owned_files.replace(path, content, before)
 
@@ -732,7 +786,7 @@ def align_plugin(component: dict[str, Any], codex_home: Path, target: dict) -> N
     codex = shutil.which("codex")
     plugin = component["plugin"]
     marketplace = {**plugin["marketplace"], "ref": target["ref"]}
-    _prepare_plugin_marketplace(codex, codex_home, marketplace)
+    _prepare_plugin_marketplace(codex, codex_home, {**marketplace, "managed_plugin": plugin["id"]})
     for command in ([codex, "plugin", "marketplace", "add", marketplace["source"], "--ref", target["ref"], "--json"],
                     [codex, "plugin", "add", plugin["id"], "--json"]):
         result = subprocess.run(command, check=False, capture_output=True, text=True,
@@ -778,6 +832,10 @@ def _plugin_operation(component_id: str, component: dict[str, Any], codex_home: 
     state, _ = _plugin_status(component, codex_home)
     if operation == "uninstall":
         if state == "missing":
+            if _plugin_receipt(component_id, component) is not None:
+                if not plugin_absent(component_id, component, codex_home):
+                    raise BootstrapError("孤立 plugin receipt 无法证明目标已缺失")
+                _remove_plugin_receipt(component_id)
             return "no-op"
         if not _plugin_owned(component_id, component, codex_home):
             raise BootstrapError("refusing external or drifted Codex plugin uninstall")
@@ -799,7 +857,7 @@ def _plugin_operation(component_id: str, component: dict[str, Any], codex_home: 
                    if isinstance(target, dict) else plugin["marketplace"])
     if not isinstance(marketplace.get("ref"), str):
         raise BootstrapError("Codex plugin requires a locked marketplace commit")
-    _prepare_plugin_marketplace(codex, codex_home, marketplace)
+    _prepare_plugin_marketplace(codex, codex_home, {**marketplace, "managed_plugin": plugin["id"]})
     result = subprocess.run([codex, "plugin", "marketplace", "add", marketplace["source"], "--ref", marketplace["ref"], "--json"], check=False, env=env)
     if result.returncode:
         raise BootstrapError("Codex marketplace registration failed")
@@ -826,10 +884,6 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
         return _plugin_operation(key, component, codex_home, operation)
     if component.get("delivery") == "collection":
         return _operate_collection(component, codex_home, operation, candidate=candidate)
-    if component.get("delivery") == "native":
-        if operation != "uninstall":
-            raise BootstrapError(f"{key} is owned by its native installer")
-        raise BootstrapError(f"{key} cannot be uninstalled by lifecycle")
     metadata = component.get("package")
     if not isinstance(metadata, dict):
         raise BootstrapError(f"{key} has no package owner")
@@ -840,6 +894,11 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
     owned = package_owned(key, component, observed, codex_home)
     if operation == "uninstall":
         if state == "missing":
+            receipt = _package_receipt(key, component)
+            if receipt is not None:
+                if not package_absent(component):
+                    raise BootstrapError("包命令缺失但无法证明包不存在；保留 receipt")
+                _remove_package_receipt(key)
             return "no-op"
         if state not in {"match", "outdated"} or not owned:
             raise BootstrapError(f"refusing external or drifted package uninstall: {key}")
@@ -936,6 +995,21 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
         raise BootstrapError(f"package version cannot be recorded: {key}")
     _write_package_receipt(key, component, new_observed)
     return "changed"
+
+
+def package_absent(component: dict) -> bool:
+    package = component["package"]
+    if package["source"] == "npm":
+        root = _prefix(component) / "lib/node_modules" / package["name"]
+        return not root.exists() and not root.is_symlink() and _command(component) is None
+    if package["source"] in {"official", "aur"}:
+        result = subprocess.run(["pacman", "-Qq"], capture_output=True, text=True, timeout=30, check=False)
+        return result.returncode == 0 and package["name"] not in result.stdout.splitlines()
+    if package["source"] == "uv":
+        result = subprocess.run(["uv", "tool", "dir"], capture_output=True, text=True, timeout=15, check=False)
+        root = Path(result.stdout.strip())
+        return result.returncode == 0 and root.is_absolute() and not (root / package["name"]).exists()
+    return False
 
 
 def static_operation(args: Any, key: str, component: dict[str, Any], operation: str, catalog: dict[str, Any] | None = None) -> str:

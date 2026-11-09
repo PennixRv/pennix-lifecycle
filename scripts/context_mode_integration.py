@@ -305,6 +305,7 @@ def apply(owner, home, desired, receipt, *, repair=False):
     old_mcp = receipt["mcp"] if receipt else None
     created = receipt["hooks_file_created"] if receipt else hooks_before is None
     changed_mcp, changed_hooks, writes = False, False, []
+    hooks_after = hooks_before
     try:
         if old_mcp != desired["mcp"]:
             changed_mcp = True
@@ -313,6 +314,7 @@ def apply(owner, home, desired, receipt, *, repair=False):
             owner._mcp_add(home, desired["mcp"])
         owner._edit_hooks(home, old_hooks, desired["hooks"])
         changed_hooks = True
+        hooks_after = files.read(home / "hooks.json")
         for path, before, after in auxiliary(owner, home, previous, {"trust": trust, "skills": desired["skills"]}):
             files.replace(path, after, before)
             writes.append((path, before, after))
@@ -324,7 +326,7 @@ def apply(owner, home, desired, receipt, *, repair=False):
             for path, before, after in reversed(writes):
                 files.replace(path, before, after)
             if changed_hooks:
-                owner._edit_hooks(home, desired["hooks"], old_hooks, remove_empty=created)
+                files.replace(home / "hooks.json", hooks_before, hooks_after)
             if changed_mcp:
                 current = owner._server("context-mode", home)
                 core = {k: v for k, v in desired["mcp"].items() if k in {"command", "args", "env"}}
@@ -341,6 +343,11 @@ def apply(owner, home, desired, receipt, *, repair=False):
 
 
 def unconfigure(owner, home, receipt):
+    _, hooks_before = owner._hooks(home)
+    hooks_after = hooks_before
+    if receipt.get("schema") == 1:
+        document, _ = owner._hooks(home)
+        receipt = legacy_trust(owner, home, receipt, document)
     previous = files.read(owner._receipt_path("context-mode"), private=True)
     auxiliary(owner, home, receipt, {})
     owner._edit_hooks(home, receipt["hooks"], {}, dry_run=True)
@@ -353,11 +360,12 @@ def unconfigure(owner, home, receipt):
             writes.append((path, before, after))
         owner._edit_hooks(home, receipt["hooks"], {}, remove_empty=receipt["hooks_file_created"])
         removed_hooks = True
+        hooks_after = files.read(home / "hooks.json")
         files.replace(owner._receipt_path("context-mode"), None, previous)
     except BaseException as error:
         try:
             if removed_hooks:
-                owner._edit_hooks(home, {}, receipt["hooks"])
+                files.replace(home / "hooks.json", hooks_before, hooks_after)
             for path, before, after in reversed(writes):
                 files.replace(path, before, after)
             current = owner._server("context-mode", home)

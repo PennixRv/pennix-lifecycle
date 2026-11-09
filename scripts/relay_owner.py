@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import owned_files
+
 
 class RelayError(RuntimeError):
     """A relay registration cannot be changed safely."""
@@ -56,6 +58,55 @@ def _record() -> dict[str, str] | None:
 
 def local_owned() -> bool:
     return _record() is not None
+
+
+def _daemon_receipt(paseo_home: Path) -> tuple[Path, dict | None]:
+    path = owned_files.state_root() / "paseo-relay-daemon.json"
+    record = owned_files.read_json(path)
+    keys = {"daemon.relay.enabled", "daemon.relay.endpoint", "daemon.relay.publicEndpoint",
+            "daemon.relay.useTls", "daemon.relay.publicUseTls"}
+    if record is not None and (not isinstance(record, dict) or set(record) != {"schema", "home", "before", "desired"}
+            or record["schema"] != 1 or record["home"] != str(paseo_home)
+            or not isinstance(record["before"], dict) or not isinstance(record["desired"], dict)):
+        raise RelayError("本地 relay 配置归属记录不匹配")
+    if record is not None and (set(record["before"]) != keys or set(record["desired"]) != keys
+            or any(not isinstance(previous, dict) or set(previous) != {"present", "value"}
+                   or type(previous["present"]) is not bool
+                   or previous["value"] is not None and not isinstance(previous["value"], (str, bool))
+                   for previous in record["before"].values())):
+        raise RelayError("本地 relay 配置归属字段不匹配")
+    return path, record
+
+
+def daemon_owned(paseo_home: Path) -> bool:
+    return _daemon_receipt(paseo_home)[1] is not None
+
+
+def unconfigure_daemon(paseo: Path, paseo_home: Path) -> str:
+    path, record = _daemon_receipt(paseo_home)
+    if record is None:
+        return "preserved external local relay configuration"
+    raw = owned_files.read(path, private=True)
+    if _daemon_values(paseo, paseo_home) != record["desired"]:
+        raise RelayError("本地 relay 配置已漂移，未撤回")
+    for key, previous in reversed(list(record["before"].items())):
+        args = [str(paseo), "daemon", "config"]
+        if not previous["present"]:
+            args += ["unset", key, "--json"]
+        else:
+            value = previous["value"]
+            args += ["set", key, value if isinstance(value, str) else json.dumps(value)]
+            if isinstance(value, str):
+                args.append("--string")
+        result = subprocess.run([*args, "--home", str(paseo_home)], capture_output=True, timeout=60, check=False)
+        if result.returncode:
+            raise RelayError("本地 relay 撤回未完成，保留事务和归属记录")
+    observed = _daemon_values(paseo, paseo_home)
+    if any((observed[key] is not _MISSING if not previous["present"] else observed[key] != previous["value"])
+           for key, previous in record["before"].items()):
+        raise RelayError("本地 relay 撤回后置条件不符")
+    owned_files.replace(path, None, raw)
+    return "changed local relay configuration"
 
 
 def _write_record(server_id: str) -> None:
@@ -242,12 +293,18 @@ def inspect_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoint
     }
     if values == expected:
         return "current"
+    _, receipt = _daemon_receipt(paseo_home)
+    if receipt and values == receipt["desired"]:
+        return "configuration-required"
+    if any(value is not _MISSING for value in values.values()):
+        raise RelayError("本地 relay 配置缺少当前归属证据；未修改外部配置")
     return "missing" if all(value is _MISSING for value in values.values()) else "drifted"
 
 
 def configure_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoint: str, tls: bool, public_tls: bool) -> str:
     validate_config(endpoint, public_endpoint)
-    _daemon_values(paseo, paseo_home)
+    if inspect_daemon(paseo, paseo_home, endpoint, public_endpoint, tls, public_tls) == "current":
+        return "no-op"
 
     def set_value(path: str, value: str, literal: bool) -> None:
         command = [str(paseo), "daemon", "config", "set", path, value, "--home", str(paseo_home)]
@@ -273,6 +330,10 @@ def configure_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoi
     paths = ["daemon.relay.enabled", "daemon.relay.endpoint", "daemon.relay.publicEndpoint",
              "daemon.relay.useTls", "daemon.relay.publicUseTls"]
     baseline = _daemon_values(paseo, paseo_home)
+    receipt_path, receipt = _daemon_receipt(paseo_home)
+    before_receipt = owned_files.read(receipt_path, private=True)
+    if receipt and baseline != receipt["desired"]:
+        raise RelayError("本地 relay 配置与受管记录不符")
     try:
         set_value("daemon.relay.enabled", "false", False)
         set_value("daemon.relay.endpoint", endpoint, True)
@@ -293,6 +354,12 @@ def configure_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoi
         set_value("daemon.relay.enabled", "true", False)
         if _daemon_values(paseo, paseo_home)["daemon.relay.enabled"] is not True:
             raise RelayError("Paseo relay enabled 配置回读不一致")
+        desired = {**expected, "daemon.relay.enabled": True}
+        record = {"schema": 1, "home": str(paseo_home), "desired": desired,
+                  "before": receipt["before"] if receipt else {
+                      key: {"present": value is not _MISSING, "value": None if value is _MISSING else value}
+                      for key, value in baseline.items()}}
+        owned_files.replace(receipt_path, owned_files.json_bytes(record), before_receipt)
     except BaseException as error:
         try:
             for path in reversed(paths):

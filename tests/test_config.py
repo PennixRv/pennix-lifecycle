@@ -344,7 +344,12 @@ class ConfigModelTests(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout="{}", stderr="")
 
         self.fail_selection = False
-        with mock.patch.object(paseo_service.subprocess, "run", side_effect=run):
+        def install_skills(*_args):
+            if self.fail_selection:
+                raise paseo_service.PaseoServiceError("synthetic native failure")
+            state["agents.skills.selection"] = {"mode": "all"}
+        with mock.patch.object(paseo_service.subprocess, "run", side_effect=run), \
+             mock.patch.object(paseo_service, "skills", side_effect=install_skills):
             self.assertEqual(paseo_service.configure(paseo, home, "127.0.0.1:6767"), "changed")
         self.assertEqual(state, {
             "daemon.listen": "127.0.0.1:6767", "unrelated.setting": {"keep": True},
@@ -353,10 +358,11 @@ class ConfigModelTests(unittest.TestCase):
         state.pop("agents.skills.selection")
         state["daemon.listen"] = "0.0.0.0:6767"
         self.fail_selection = True
-        with mock.patch.object(paseo_service.subprocess, "run", side_effect=run):
+        with mock.patch.object(paseo_service.subprocess, "run", side_effect=run), \
+             mock.patch.object(paseo_service, "skills", side_effect=install_skills):
             with self.assertRaises(paseo_service.PaseoServiceError):
                 paseo_service.configure(paseo, home, "127.0.0.1:6767")
-        self.assertEqual(state, {"daemon.listen": "0.0.0.0:6767", "unrelated.setting": {"keep": True}})
+        self.assertEqual(state, {"daemon.listen": "127.0.0.1:6767", "unrelated.setting": {"keep": True}})
 
     def test_paseo_preflight_accepts_localhost_and_rejects_non_loopback_or_invalid_port(self) -> None:
         paseo_service.preflight(self.home / ".paseo", "localhost:6767", "off", True)
@@ -636,7 +642,8 @@ class CliTests(unittest.TestCase):
 
     def test_plan_does_not_print_nested_codex_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            env = {**os.environ, "XDG_CONFIG_HOME": str(Path(directory) / "config"), "XDG_STATE_HOME": str(Path(directory) / "state")}
+            env = {**os.environ, "HOME": directory, "CODEX_HOME": str(Path(directory) / ".codex"),
+                   "XDG_CONFIG_HOME": str(Path(directory) / "config"), "XDG_STATE_HOME": str(Path(directory) / "state")}
             root = Path(__file__).resolve().parents[1]
             subprocess.run([str(root / "pennix"), "config", "init"], cwd=root, env=env, check=True, capture_output=True, text=True)
             result = subprocess.run([str(root / "pennix"), "plan", "--json"], cwd=root, env=env, check=True, capture_output=True, text=True)

@@ -15,6 +15,10 @@ pennix apply
 
 可用 `--release vMAJOR.MINOR.PATCH` 固定版本；root 调用必须显式传入 `--user USER`，工具自身卸载使用 `bootstrap.sh uninstall`。bootstrap 只准备工具运行依赖，不安装 AUR helper 或工作流组件。
 
+支持范围为 Arch Linux / WSL2 Arch、x86_64、zsh 自动 PATH 管理。bootstrap 会先执行完整 `pacman -Syu`，安装系统 Python 及 Kconfiglib、TOML、YAML、base-devel 等运行依赖；不以局部依赖升级替代完整系统准备。普通用户的 HOME 必须与目标账户一致；root→用户调用清空宿主环境。自定义 XDG 目录可在普通用户入口保留。
+
+同设备同用户仅维护一个目标，允许非默认 CODEX_HOME。共享锁和目标登记不随 XDG_STATE_HOME 改变；切换状态目录或目标会阻断，不能绕过已有事务。跨设备只传递 `workflow.config` 的配置意图；目标机重新解析包身份并建立本机锁、receipt、秘密和 journal，不复制这些运行记录。
+
 新机可直接使用仓库内的公开 WSL 默认配置生成主机配置；主机专属 URL、ID 和路径
 在生成后编辑，秘密仍单独填写：
 
@@ -60,8 +64,10 @@ npm 组件可用 `pennix update trellis-cli --version 0.7.1-beta.0` 选择精确
 `sudo pacman -Syu --noconfirm`；缺少或更新 Arch/AUR 组件时，必须沿这条同次确认的
 路径执行。Lifecycle 变更会在私有状态目录写入 journal，步骤只有完成后置核验才标记
 为 verified；副作用状态未知时保留 journal 并阻断自动重试。`update` 只能在当前
-owner 与旧锁定目标仍完全匹配且 receipt 有效时，通过同一入口重试原先确认的目标；
-否则保留 journal 并要求人工核验。
+owner 的完整恢复事实成立时恢复原先确认的目标；版本相同不足以释放 unknown。
+repair 和 uninstall 同样写持久事务。系统升级后只刷新原生 official 包记录，重新计划剩余步骤；不为外部改变的 AUR 包补造受管记录。
+
+`pennix recover --json` 只读展示事务。带 `--transaction <id> --step <id> --resolve <not-started|completed|restored>` 时，在同一目标锁内重新核验：未执行须由 pending 状态或原生 none 回执证明；restored 须有同一步骤的恢复事实；completed 须证明原生后置条件并补齐必要锁记录。处置归档保留结果；取消或恢复前值的步骤不代表目标已应用。没有 force 清除未知副作用的入口；证据不足保留现场。
 若旧 `apply` 仅剩 Paseo 服务步骤为 `started` 或 `unknown`，且配置、锁未改变，
 配置步骤已核验，当前 unit、daemon、配置及 Skills 同步均达到期望，重新执行 `apply`
 只核验并结束该旧事务，不重启服务，也不执行新计划；其他未知步骤仍保持阻断。
@@ -74,12 +80,16 @@ Windsurf 可显式开启 `PENNIX_WINDSURF_OWNER_CREDENTIAL`，不再要求中央
 缺专属文件时由 Windsurf owner 原生 Devin resolver 导入；秘密不经过 Lifecycle 进程。
 既有中央模式保持兼容。外部文件、漂移、环境覆盖或不安全权限会阻断，不自动接管。
 
+连接 owner 通过原生 validate 复用自己的输入与安全校验，声明协议能力，执行回执绑定事务步骤身份。validate 不创建目录、不写 receipt、不请求网络；超时、旧协议、错误身份或响应不完整均保留 unknown。孤立 receipt 只有在目标缺失和归属可证时才受控撤回，不把外部文件当成自有文件。取消 Windsurf 连接只移除自有凭据副本和 receipt，保留中央输入与 Devin 登录。
+
 Paseo 自启 unit 只在用户 manager 启动时执行一次原生 `daemon start`，不持续管理 daemon。
 登录自启无需开启 `PENNIX_PASEO_RUN`；该键只表示本次 apply 的明确启动请求。
 日常启停使用原生 `paseo daemon start/stop/restart`；关闭入口不停止 daemon，普通
 apply 不复活已停止实例。自启配置、daemon 健康和版本分别核验；停止时运行版本为
 `not_run`，依赖实际运行的操作仍需健康条件。旧前台 unit 仅凭精确 receipt 识别迁移，
 实际承载 daemon 时须活动保护；当前独立 daemon 不为匹配 unit 而重启。
+
+Paseo 官方 Skills 使用已验证的 CLI/client/server 0.15.3 公开 SDK。首装自动调用原生安装接口，覆盖 `.agents/skills`、`.claude/skills` 及原生自有的旧 `.codex/skills`；原本停止的 daemon 仅为该动作临时启动，并按同一实例停止。新 CLI 候选先在隔离前缀暂存、检查公开接口，再改变用户安装。安装或启停结果未知时保留已提交字段与事务，不恢复旧前台启动造成潜在双实例。远端 relay 登记和本地 daemon relay 配置分别记归属；register=n 仅表示不访问远端，不表示本地配置已撤回。
 
 Context Mode 通过 `@pennixrv/context-mode` 包、Codex 原生 MCP 和六个 Hook 接入；不叠加 plugin，也不改写用户 AGENTS。旧 FastCtx 的撤回由旧安装的原生入口完成，新配置格式 5 不接受旧组件键或旧格式。
 
@@ -90,3 +100,5 @@ Context Mode 通过 `@pennixrv/context-mode` 包、Codex 原生 MCP 和六个 Ho
 `check` 将本地安装/配置结果与功能请求分开输出。`PENNIX_FUNCTIONAL_CHECKS` 默认关闭；明确开启后才运行已选连接的原生功能入口，Windsurf 仅使用临时合成项目。失败、超时或没有入口均不能通过，不回显响应正文。SiYuan 的实际 MCP 会话连接仍由宿主原生工具核验，不能用本地 receipt 代替。
 
 工具升级成功后只保留当前发行。完整、归属和权限安全的旧安装目录可清除；未知文件、符号链接和漂移会阻断。AGENTS 的正常升级要求归属凭据中的摘要仍匹配；人工审阅的迁移可用 `pennix repair codex-agents --expected-sha256 <完整文件摘要>` 精确确认当前字节，摘要不符不会写入。
+
+发行 tag 和资产不可覆盖。同版本失败重试只复用摘要完全匹配的已暂存发行；工具卸载保留其他 CLI 仍需的 PATH、共享 linger、用户数据、组件归属及未结事务元数据。`tests/test_release_payload.py` 以实际构建载荷验证隔离 bootstrap、入口恢复和重装；Arch 包、下载使用明确替身，不代表真实新机、跨登录、PAM 或所有外部服务已经实测。

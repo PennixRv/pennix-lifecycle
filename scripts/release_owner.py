@@ -15,7 +15,7 @@ import owned_files
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ("pennix", "scripts", "references", "config", "templates", "VERSION")
 OLD_RELEASE_CONTENTS = {".gitignore", "README.md", "bootstrap.sh", "config", "pennix", "references", "scripts", "templates", "tests"}
-VERSION_NAME = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
+VERSION_NAME = re.compile(r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$")
 
 
 class ReleaseError(RuntimeError):
@@ -49,7 +49,7 @@ def _version(source: Path) -> str:
         version = (source / "VERSION").read_text(encoding="ascii").strip()
     except OSError as error:
         raise ReleaseError("发行包缺少 VERSION") from error
-    if not version or any(char not in "0123456789." for char in version):
+    if not VERSION_NAME.fullmatch(version):
         raise ReleaseError("发行版本号无效")
     return version
 
@@ -144,13 +144,14 @@ def _install(source: Path) -> str:
         if _installed_digest(current) != current_digest or (stored is not None and current_digest != stored["digest"]):
             raise ReleaseError("旧发行内容发生变化；拒绝切换发行")
     if target.exists():
-        if current != target or _runtime_digest(target) != source_digest:
+        if _runtime_digest(target) != source_digest:
             raise ReleaseError(f"目标发行目录已存在且不能安全复用: {target}")
-        for item, expected in inactive.items():
-            if _installed_digest(item) != expected:
-                raise ReleaseError("非活动发行在清理前发生变化")
-            shutil.rmtree(item)
-        return f"current {version}"
+        if current == target:
+            for item, expected in inactive.items():
+                if _installed_digest(item) != expected:
+                    raise ReleaseError("非活动发行在清理前发生变化")
+                shutil.rmtree(item)
+            return f"current {version}"
     else:
         staging = Path(tempfile.mkdtemp(prefix=f".{version}.", dir=releases))
         try:
@@ -193,8 +194,8 @@ def _install(source: Path) -> str:
         if owned_files.read(receipt_path, private=True) != previous_receipt:
             try:
                 owned_files.replace(receipt_path, previous_receipt, owned_files.read(receipt_path, private=True))
-            except (OSError, owned_files.OwnershipError):
-                pass
+            except (OSError, owned_files.OwnershipError) as error:
+                raise ReleaseError("入口已恢复，但归属记录恢复失败；保留现场核验") from error
         if current and current != target:
             raise ReleaseError("入口切换失败；原发行版已恢复")
         raise

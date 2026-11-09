@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,10 @@ import native_integrations
 
 class ConnectionError(RuntimeError):
     """A connection owner is unavailable or rejected a lifecycle operation."""
+
+    def __init__(self, message: str, *, effect: str = "unknown"):
+        super().__init__(message)
+        self.effect = effect
 
 
 def _command(spec: dict[str, Any], codex_home: Path) -> list[str]:
@@ -68,7 +73,7 @@ def _inputs(target: str, spec: dict[str, Any], kconf: Any, secrets_path: Path) -
     return values, _secret_payload(spec, secrets_path)
 
 
-def _run(command: list[str], action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def _run(command: list[str], action: str, payload: dict[str, Any] | None = None, *, codex_home: Path | None = None) -> dict[str, Any]:
     try:
         result = subprocess.run(
             [*command, "lifecycle", action, "--json"],
@@ -77,18 +82,31 @@ def _run(command: list[str], action: str, payload: dict[str, Any] | None = None)
             text=True,
             timeout=30,
             check=False,
+            env={**os.environ, **({"CODEX_HOME": str(codex_home)} if codex_home is not None else {})},
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ConnectionError(f"连接 owner {action} 未完成") from error
-    if result.returncode:
-        raise ConnectionError(f"连接 owner {action} 拒绝操作（退出码 {result.returncode}）")
     try:
         value = json.loads(result.stdout)
     except (TypeError, ValueError) as error:
         raise ConnectionError(f"连接 owner {action} 回执不是有效 JSON") from error
     if not isinstance(value, dict) or not isinstance(value.get("state"), str) or not isinstance(value.get("owned"), bool):
         raise ConnectionError(f"连接 owner {action} 回执格式无效")
-    return value
+    if action != "inspect":
+        if (type(value.get("protocol_version")) is not int or value["protocol_version"] != 1
+                or not isinstance(value.get("capabilities"), list)
+                or any(not isinstance(item, str) for item in value["capabilities"])
+                or not {"validate", "execution-effect"} <= set(value["capabilities"])
+                or value.get("operation_id") != (payload or {}).get("operation_id")
+                or not isinstance(value.get("effect"), str)
+                or value["effect"] not in {"none", "changed", "restored", "unknown"}
+                or action == "validate" and value["effect"] != "none"):
+            raise ConnectionError(f"连接 owner {action} 协议或操作身份不匹配")
+    if result.returncode:
+        raise ConnectionError(f"连接 owner {action} 拒绝操作（退出码 {result.returncode}）",
+                              effect=value.get("effect", "unknown"))
+    allowed = {"state", "owned", "detail", "effect", "protocol_version", "capabilities", "operation_id"}
+    return {key: item for key, item in value.items() if key in allowed}
 
 
 def _desired_digest(target: str, values: dict[str, str], secrets: dict[str, str]) -> str:
@@ -127,7 +145,7 @@ def inspect_target(
             payload["desired_digest"] = desired_digest
         if credential_mode is not None:
             payload["credential_mode"] = credential_mode
-        return {"target": target, **_run(_command(spec, codex_home), "inspect", payload)}
+        return {"target": target, **_run(_command(spec, codex_home), "inspect", payload, codex_home=codex_home)}
     except ConnectionError as error:
         return {"target": target, "state": "blocked", "owned": False, "detail": str(error)}
 
@@ -181,17 +199,18 @@ def plan(kconf: Any, catalog: dict[str, Any], codex_home: Path, secrets_path: Pa
                 action = "blocked"
         else:
             action = "unconfigure" if status.get("owned") else "keep"
-        result[target] = {"selected": selected, "action": action, **status}
+        if action in {"configure", "unconfigure"} and status["state"] != "pending-owner":
+            try:
+                validate_target(target, spec, kconf, codex_home, secrets_path, action)
+            except (ConnectionError, secret_store.SecretError) as error:
+                action = "blocked"
+                status.update(state="blocked", detail=str(error))
+        result[target] = {**status, "target": target, "selected": selected, "action": action}
     return result
 
 
-def apply_target(target: str, spec: dict[str, Any], kconf: Any, codex_home: Path, secrets_path: Path, action: str) -> str:
-    if action == "keep":
-        return "no-op"
-    command = _command(spec, codex_home)
+def _payload(target: str, spec: dict, kconf: Any, secrets_path: Path, action: str) -> dict:
     if action == "unconfigure":
-        if target == "siyuan":
-            native_integrations.unconfigure("siyuan", codex_home)
         payload = {"target": target}
     elif action == "configure":
         values, secrets = _inputs(target, spec, kconf, secrets_path)
@@ -206,7 +225,32 @@ def apply_target(target: str, spec: dict[str, Any], kconf: Any, codex_home: Path
             payload["credential_mode"] = values["credential_mode"]
     else:
         raise ConnectionError(f"unsupported connection action: {action}")
-    value = _run(command, action, payload)
+    return {**payload, "operation": action, "operation_id": uuid.uuid4().hex}
+
+
+def validate_target(target: str, spec: dict, kconf: Any, codex_home: Path, secrets_path: Path, action: str) -> dict:
+    payload = _payload(target, spec, kconf, secrets_path, action)
+    return _run(_command(spec, codex_home), "validate", payload, codex_home=codex_home)
+
+
+def apply_target(target: str, spec: dict[str, Any], kconf: Any, codex_home: Path, secrets_path: Path, action: str,
+                 *, operation_id: str | None = None) -> str:
+    if action == "keep":
+        return "no-op"
+    command = _command(spec, codex_home)
+    payload = _payload(target, spec, kconf, secrets_path, action)
+    if operation_id is not None:
+        payload["operation_id"] = operation_id
+    _run(command, "validate", payload, codex_home=codex_home)
+    if target == "siyuan" and action == "unconfigure":
+        native_integrations.unconfigure("siyuan", codex_home)
+    try:
+        value = _run(command, action, payload, codex_home=codex_home)
+    except ConnectionError as error:
+        # MCP removal is a separate completed owner effect.
+        if target == "siyuan" and action == "unconfigure":
+            error.effect = "unknown"
+        raise
     expected_state = "current" if action == "configure" else "absent"
     if value["state"] != expected_state or (action == "configure" and not value["owned"]):
         raise ConnectionError(
@@ -215,7 +259,7 @@ def apply_target(target: str, spec: dict[str, Any], kconf: Any, codex_home: Path
     if target == "siyuan" and action == "configure":
         native_integrations.apply("siyuan", codex_home,
             adopt=config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y")
-    return "changed"
+    return "no-op" if value["effect"] == "none" else "changed"
 
 
 def functional_checks(catalog: dict[str, Any], connections: dict, codex_home: Path) -> dict:
@@ -234,7 +278,8 @@ def functional_checks(catalog: dict[str, Any], connections: dict, codex_home: Pa
             try:
                 command = _command({"command": command}, codex_home)
                 command = [value.replace("$VERIFY_PROJECT", directory) for value in command]
-                completed = subprocess.run(command, cwd=project, capture_output=True, timeout=300, check=False)
+                completed = subprocess.run(command, cwd=project, capture_output=True, timeout=300, check=False,
+                                           env={**os.environ, "CODEX_HOME": str(codex_home)})
                 result[target] = {"state": "passed" if completed.returncode == 0 else "failed",
                                   "exit_code": completed.returncode}
             except (ConnectionError, OSError, subprocess.TimeoutExpired):

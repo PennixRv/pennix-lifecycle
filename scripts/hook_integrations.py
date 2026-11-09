@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 import shlex
 
@@ -10,6 +11,18 @@ import owned_files as files
 
 class HookError(RuntimeError):
     pass
+
+
+def read_document(home: Path) -> tuple[dict, bytes | None]:
+    raw = files.read(home / "hooks.json")
+    try:
+        value = json.loads(raw, object_pairs_hook=files.unique_pairs) if raw is not None else {}
+    except (ValueError, UnicodeError) as error:
+        raise HookError("hooks.json 不是有效 JSON") from error
+    if (not isinstance(value, dict) or not isinstance(value.get("hooks", {}), dict)
+            or any(not isinstance(entries, list) for entries in value.get("hooks", {}).values())):
+        raise HookError("hooks.json 结构无效")
+    return value, raw
 
 
 def _path(key: str) -> Path:
@@ -36,8 +49,7 @@ def _marked(key: str, entry: dict) -> bool:
 
 
 def _read(key: str, home: Path) -> tuple[dict, dict, bytes | None]:
-    import native_integrations
-    document, raw = native_integrations._hooks(home)
+    document, raw = read_document(home)
     selected = {event: marked for event, entries in document.get("hooks", {}).items()
                 if (marked := [entry for entry in entries if _marked(key, entry)])}
     return document, selected, raw
@@ -71,12 +83,21 @@ def apply(key: str, home: Path, *, adopt: bool = False, remove: bool = False) ->
     if record is None and current and (not adopt or current != want):
         raise HookError("本地 Hook 需显式接管且必须匹配已核验的原生条目")
     hooks = document.setdefault("hooks", {})
-    for event in current:
-        hooks[event] = [entry for entry in hooks[event] if not _marked(key, entry)]
-        if not hooks[event]:
-            del hooks[event]
-    for event, entries in want.items():
-        hooks.setdefault(event, []).extend(copy.deepcopy(entries))
+    for event in set(current) | set(want):
+        remaining = iter(copy.deepcopy(want.get(event, [])))
+        entries = []
+        for entry in hooks.get(event, []):
+            if _marked(key, entry):
+                replacement = next(remaining, None)
+                if replacement is not None:
+                    entries.append(replacement)
+            else:
+                entries.append(entry)
+        entries.extend(remaining)
+        if entries:
+            hooks[event] = entries
+        else:
+            hooks.pop(event, None)
     if not hooks:
         document.pop("hooks", None)
     after = files.json_bytes(document) if document else None

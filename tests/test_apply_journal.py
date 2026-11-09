@@ -25,6 +25,9 @@ class ApplyJournalTests(unittest.TestCase):
             self.assertEqual(apply_journal.read()["steps"][0]["status"], "unknown")
             value = apply_journal.retry(value, "context-mode:install")
             self.assertEqual(apply_journal.read()["steps"][0]["status"], "pending")
+            with self.assertRaises(apply_journal.JournalError):
+                apply_journal.clear()
+            apply_journal.verified(value, "context-mode:install")
             apply_journal.clear()
             self.assertIsNone(apply_journal.read())
 
@@ -35,6 +38,7 @@ class ApplyJournalTests(unittest.TestCase):
             ])
             with self.assertRaises(apply_journal.JournalError):
                 apply_journal.retry(value, "pennix-skills:upgrade")
+            apply_journal.verified(value, "pennix-skills:upgrade")
             apply_journal.clear()
 
     def test_paseo_config_receipt_survives_later_service_failure(self):
@@ -51,7 +55,9 @@ class ApplyJournalTests(unittest.TestCase):
             value = apply_journal.unknown(value, "paseo-autostart:start")
             self.assertEqual([step["status"] for step in value["steps"]], ["verified", "unknown"])
             self.assertFalse(apply_journal.complete(value))
-            apply_journal.clear()
+            with self.assertRaises(apply_journal.JournalError):
+                apply_journal.clear()
+            self.assertIsNotNone(apply_journal.read())
 
 
 if __name__ == "__main__":

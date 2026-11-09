@@ -28,7 +28,14 @@ class ConfigError(ValueError):
 class StrictKconfig(kconfiglib.Kconfig):
     def __init__(self) -> None:
         self.diagnostics = []
-        super().__init__(str(KCONFIG_FILE), warn=True, warn_to_stderr=False)
+        # Kconfig's environment must not change the public CONFIG_ syntax.
+        previous = os.environ.pop("CONFIG_", None)
+        try:
+            super().__init__(str(KCONFIG_FILE), warn=True, warn_to_stderr=False)
+        finally:
+            if previous is not None:
+                os.environ["CONFIG_"] = previous
+        self.snapshot: bytes | None = None
 
     def _warn(self, msg, *args, **kwargs):
         try:
@@ -69,6 +76,8 @@ def _parse_assignments(text: str, kconf: StrictKconfig) -> dict[str, str]:
     for line in text.splitlines():
         match = ASSIGN.match(line) or UNSET.match(line)
         if not match:
+            if line.strip() and not line.lstrip().startswith("#"):
+                raise ConfigError("配置包含无效行")
             continue
         name = match[1]
         if name in values:
@@ -87,8 +96,19 @@ def _validate(kconf: StrictKconfig, raw: str) -> None:
     if kconf.diagnostics:
         raise ConfigError("配置语法无效: " + kconf.diagnostics[0])
     assignments = _parse_assignments(raw, kconf)
+    for symbol in kconf.unique_defined_syms:
+        if symbol.name.startswith("PENNIX_COMPONENT_") and symbol.visibility and symbol.name not in assignments:
+            raise ConfigError(f"组件选择缺失，需核对新配置项: {symbol.name}")
     for name, value in assignments.items():
         symbol = kconf.syms[name]
+        if symbol.type in {kconfiglib.BOOL, kconfiglib.TRISTATE}:
+            if value not in {"y", "m", "n"} or value != symbol.str_value:
+                raise ConfigError(f"配置请求未生效: {name}")
+        elif symbol.type == kconfiglib.STRING:
+            if not re.fullmatch(r'"(?:[^"\\]|\\.)*"', value):
+                raise ConfigError(f"字符串配置必须使用双引号: {name}")
+            if kconfiglib.unescape(value[1:-1]) != symbol.str_value:
+                raise ConfigError(f"配置请求未生效: {name}")
         if name != "PENNIX_CONFIG_FORMAT" and symbol.visibility == 0 and value not in {"n", '""'}:
             raise ConfigError(f"配置选项依赖未满足或不可见: {name}")
     for key in PATH_KEYS:
@@ -98,6 +118,12 @@ def _validate(kconf: StrictKconfig, raw: str) -> None:
             _path_value(value)
     if kconf.syms["PENNIX_CONFIG_FORMAT"].str_value != FORMAT_VERSION:
         raise ConfigError("workflow.config 格式主版本不兼容")
+    if assignments.get("PENNIX_CONFIG_FORMAT") != f'"{FORMAT_VERSION}"':
+        raise ConfigError("workflow.config 必须显式声明格式版本")
+    for choice in kconf.unique_choices:
+        if choice.visibility and not choice.is_optional and not any(
+                assignments.get(symbol.name) == "y" for symbol in choice.syms):
+            raise ConfigError("配置中的必选互斥组选项缺失或全为 n")
 
 
 def _read(path: Path) -> bytes:
@@ -113,10 +139,15 @@ def _load_file(path: Path) -> StrictKconfig:
     raw = _read(path)
     kconf = _new()
     try:
-        kconf.load_config(str(path))
-    except (OSError, kconfiglib.KconfigError) as error:
+        # Parse the same bytes that pass validation, not a second read of the source.
+        with tempfile.TemporaryDirectory(prefix="pennix-config-snapshot-") as directory:
+            snapshot = Path(directory) / ".config"
+            snapshot.write_bytes(raw)
+            kconf.load_config(str(snapshot))
+        _validate(kconf, raw.decode("utf-8"))
+    except (OSError, UnicodeError, kconfiglib.KconfigError) as error:
         raise ConfigError("配置文件无法解析") from error
-    _validate(kconf, raw.decode("utf-8"))
+    kconf.snapshot = raw
     return kconf
 
 
@@ -136,11 +167,14 @@ def _render(kconf) -> bytes:
         return HEADER.encode() + path.read_bytes()
 
 
-def write(kconf, path: Path, before: bytes | None = None) -> None:
+_UNSPECIFIED = object()
+
+
+def write(kconf, path: Path, before=_UNSPECIFIED) -> None:
     _validate(kconf, _render(kconf).decode())
     output = _render(kconf)
     previous = files.read(path)
-    if before is not None and previous != before:
+    if before is not _UNSPECIFIED and previous != before:
         raise ConfigError("workflow.config 在编辑期间发生变化")
     mode = 0o600
     if previous is not None:
@@ -158,6 +192,8 @@ def init(explicit: str | None = None, *, force: bool = False, defconfig: str | N
         profile = Path(defconfig).expanduser()
         if not profile.is_absolute():
             profile = Path.cwd() / profile
+        if profile.is_symlink():
+            raise ConfigError("defconfig 必须是普通文件")
         try:
             profile = profile.resolve(strict=True)
         except OSError as error:
@@ -178,7 +214,7 @@ def edit(explicit: str | None = None) -> Path:
     if files.read(path) is None:
         init(str(path))
     kconf, _ = load(str(path))
-    before = _read(path)
+    before = kconf.snapshot
     original = Path.cwd()
     with tempfile.TemporaryDirectory(prefix="pennix-menuconfig-") as directory:
         config = Path(directory) / ".config"

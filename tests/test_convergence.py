@@ -69,6 +69,7 @@ class ConvergenceTests(unittest.TestCase):
             component_lock.write(lock, {"schema": 1, "components": {"example": self.old}}, {"example": self.old["source"]})
         args = SimpleNamespace(component="example", json=True)
         def load(_args):
+            args.config_path = config
             args.component_lock_path = lock
             args.component_lock_sources = {"example": self.old["source"]}
             args.component_lock = component_lock.read(lock, args.component_lock_sources)
@@ -262,9 +263,9 @@ class ConvergenceTests(unittest.TestCase):
              patch.object(paseo_service.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=group)), \
              patch.object(paseo_service, "assert_no_active_work"), \
              patch.object(paseo_service, "_systemctl", side_effect=control) as systemctl:
-            with self.assertRaisesRegex(paseo_service.PaseoServiceError, "partial stop"):
+            with self.assertRaisesRegex(paseo_service.PaseoServiceError, "恢复失败"):
                 paseo_service.apply("login", paseo, home, "127.0.0.1:6767", False)
-        self.assertIn(("start", unit.stem), [call.args for call in systemctl.call_args_list])
+        self.assertNotIn(("start", unit.stem), [call.args for call in systemctl.call_args_list])
         self.assertEqual(unit.read_bytes(), legacy)
 
 

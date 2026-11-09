@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -148,7 +149,10 @@ def ensure_aur_helper(spec: dict[str, str]) -> str:
     if (spec.get("repo") != "https://aur.archlinux.org/yay-bin.git"
             or not re.fullmatch(r"[0-9a-f]{40}", spec.get("ref", ""))):
         raise RuntimeError("AUR helper 固定来源无效")
-    commands = [["sudo", "pacman", "-S", "--needed", "--noconfirm", "base-devel", "git"]]
+    dependencies = subprocess.run(["pacman", "-T", "base-devel", "git"], capture_output=True, check=False)
+    if dependencies.returncode:
+        raise RuntimeError("AUR helper 需要完整系统升级后准备 base-devel/git；请先运行 bootstrap，不进行局部依赖升级")
+    commands = []
     with tempfile.TemporaryDirectory(prefix="pennix-aur-helper-") as directory:
         commands += [["git", "init", directory],
                      ["git", "-C", directory, "fetch", "--depth=1", spec["repo"], spec["ref"]],
@@ -172,10 +176,12 @@ def detect_host(
     release = read_os_release(os_release_path)
     environment, wsl_version = detect_environment(read_kernel_markers(osrelease_path, version_path))
     available = package_managers(which)
-    supported = release.get("ID") == "arch" and (
+    supported = platform.machine() == "x86_64" and release.get("ID") == "arch" and (
         environment == "native" or wsl_version == "2"
     )
-    if release.get("ID") != "arch":
+    if platform.machine() != "x86_64":
+        reason = "lifecycle currently supports x86_64 only"
+    elif release.get("ID") != "arch":
         reason = "lifecycle currently supports Arch Linux only"
     elif environment == "wsl" and wsl_version != "2":
         reason = "Arch Linux on WSL requires WSL2"

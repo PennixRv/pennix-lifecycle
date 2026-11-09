@@ -9,7 +9,7 @@ fi
 version="$1"
 ref="$2"
 output="$3"
-[[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || {
+[[ "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
   echo "release version is invalid" >&2
   exit 2
 }
@@ -65,6 +65,7 @@ with tarfile.open(source_path, "r:") as source, open(destination_path, "wb") as 
                 content = source.extractfile(member) if member.isfile() else None
                 destination.addfile(member, content)
 PY
+rm -f -- "${raw_archive}"
 raw_archive=""
 python3 - "${temporary}" "${version}" <<'PY'
 import sys

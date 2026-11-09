@@ -121,7 +121,7 @@ class LifecycleStateTests(unittest.TestCase):
         self.assertLess(ids.index("paseo-config:configure"), ids.index("paseo-autostart:start"))
         self.assertEqual(steps[-1]["target"]["restart_daemon"], True)
 
-    def test_plan_blocks_paseo_apply_until_the_official_skills_first_install(self):
+    def test_plan_routes_paseo_first_skills_install_to_native_configuration(self):
         kconf = SimpleNamespace()
         values = {
             "PENNIX_CODEX_HOME": "/tmp/codex", "PENNIX_PASEO_RUN": "y",
@@ -143,7 +143,7 @@ class LifecycleStateTests(unittest.TestCase):
              patch.object(pennix, "_relay_plan", return_value=None), \
              patch.object(pennix.connection_owners, "plan", return_value={}):
             result = pennix._plan(args)
-        self.assertEqual(result["components"]["paseo-autostart"]["action"], "blocked")
+        self.assertEqual(result["components"]["paseo-autostart"]["action"], "configure")
         self.assertIn("首次安装", result["components"]["paseo-autostart"]["detail"])
         self.assertEqual(
             result["components"]["paseo-autostart"]["paseo_config"]["skills_sync"]["state"],
@@ -244,6 +244,7 @@ class LifecycleStateTests(unittest.TestCase):
              patch.object(pennix, "_ensure_dependencies"), \
              patch.object(pennix, "_ensure_connection_dependencies"), \
              patch.object(pennix, "_journal_for_apply", side_effect=journal), \
+             patch.object(pennix.paseo_service, "preflight_candidate"), \
              patch.object(pennix.paseo_service, "preflight") as preflight, \
              patch.object(pennix.config_model, "config_value", return_value="/tmp/paseo"), \
              patch.object(pennix.candidates, "resolve", return_value=candidate), \
@@ -303,15 +304,16 @@ class LifecycleStateTests(unittest.TestCase):
             self.assertEqual(engine.static_operation(args, "pennix-skills", component, "upgrade"), "changed")
         operate.assert_called_once_with(component, args.codex_home, "upgrade", candidate=candidate)
 
-    def test_unknown_update_retries_only_when_old_locked_owner_state_matches(self):
+    def test_unknown_update_cannot_retry_on_version_match_alone(self):
         active = {"steps": [{"id": "pennix-skills:upgrade", "status": "unknown"}]}
         with patch.object(pennix.apply_journal, "step", return_value=active["steps"][0]), \
              patch.object(pennix.apply_journal, "retry", return_value={"retried": True}) as retry:
-            self.assertEqual({"retried": True}, pennix._retry_unknown_update(active, "pennix-skills:upgrade", "match"))
-            retry.assert_called_once_with(active, "pennix-skills:upgrade")
+            with self.assertRaisesRegex(pennix.CliError, "recover"):
+                pennix._retry_unknown_update(active, "pennix-skills:upgrade", "match")
+            retry.assert_not_called()
         with patch.object(pennix.apply_journal, "step", return_value=active["steps"][0]), \
              patch.object(pennix.apply_journal, "retry") as retry:
-            with self.assertRaisesRegex(pennix.CliError, "需人工核验"):
+            with self.assertRaisesRegex(pennix.CliError, "recover"):
                 pennix._retry_unknown_update(active, "pennix-skills:upgrade", "drifted")
             retry.assert_not_called()
 
@@ -391,6 +393,7 @@ class LifecycleStateTests(unittest.TestCase):
              patch.object(pennix.shutil, "which", return_value="/tmp/paseo-cli"), \
              patch.object(pennix.paseo_service, "runtime", return_value={
                  "state": "current", "running": True, "daemon_version": "0.13.0"}), \
+             patch.object(pennix.paseo_service, "preflight_candidate"), \
              patch.object(pennix.paseo_service, "preflight"), \
              patch.object(pennix.paseo_service, "assert_no_active_work"):
             with self.assertRaisesRegex(pennix.CliError, "restart 回执与当前版本不一致"):
@@ -432,6 +435,7 @@ class LifecycleStateTests(unittest.TestCase):
              patch.object(config_model, "choice_value", return_value="login"), \
              patch.object(pennix.shutil, "which", return_value="/tmp/paseo-cli"), \
              patch.object(pennix.paseo_service, "runtime", side_effect=[old_runtime, old_runtime]), \
+             patch.object(pennix.paseo_service, "preflight_candidate"), \
              patch.object(pennix.paseo_service, "preflight") as preflight, \
              patch.object(pennix.paseo_service, "assert_no_active_work") as busy_check, \
              patch.object(pennix.paseo_service, "restart", return_value={
@@ -482,22 +486,24 @@ class LifecycleStateTests(unittest.TestCase):
                      "plugin": {"id": "ponytail@ponytail",
                      "marketplace": {"name": "ponytail", "source": "https://example.test/plugin.git",
                                       "ref": "b" * 40}}}
-        marketplace = {"name": "ponytail", "marketplaceSource": {
+        marketplace = {"name": "ponytail", "root": "/tmp/marketplace", "marketplaceSource": {
             "sourceType": "git", "source": "https://example.test/plugin.git"}}
         with patch.object(engine.shutil, "which", return_value="codex"), \
              patch.object(engine, "_plugin_status", side_effect=[("match", "5.3.2"), ("match", "5.3.2")]), \
              patch.object(engine, "_plugin_owned", return_value=True), \
              patch.object(engine, "_plugin_snapshot", return_value={"source": "codex-marketplace:example", "version": "5.3.2", "ref": "b" * 40}), \
              patch.object(engine, "_write_plugin_receipt") as receipt, \
+             patch.object(engine, "_plugin_tree_clean", return_value=True), \
              patch.object(engine.subprocess, "run") as run:
             run.side_effect = [
                 SimpleNamespace(returncode=0, stdout=json.dumps({"marketplaces": [marketplace]})),
+                SimpleNamespace(returncode=0, stdout=json.dumps({"installed": [{"pluginId": "ponytail@ponytail"}]})),
                 SimpleNamespace(returncode=0),
                 SimpleNamespace(returncode=0),
                 SimpleNamespace(returncode=0),
             ]
             self.assertEqual(engine._plugin_operation("ponytail-plugin", component, Path("/tmp/codex"), "upgrade"), "changed")
-            self.assertEqual(run.call_args_list[1].args[0][:5],
+            self.assertEqual(run.call_args_list[2].args[0][:5],
                              ["codex", "plugin", "marketplace", "remove", "ponytail"])
             receipt.assert_called_once()
 

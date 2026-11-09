@@ -52,7 +52,10 @@ def _fetch_remote(alias: str, remote_path: str) -> bytes:
 def _extract(service: str, raw: bytes) -> dict[str, dict[str, str]]:
     remote_path, kind, fields = SOURCES[service]
     if kind == "text":
-        value = raw.decode("utf-8").strip()
+        try:
+            value = raw.decode("utf-8").strip()
+        except UnicodeError as error:
+            raise CredentialImportError(f"{service} 凭据文件编码无效") from error
         values = {"": value}
     else:
         try:

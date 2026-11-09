@@ -108,10 +108,35 @@ def state_root() -> Path:
     return path
 
 
+def shared_root() -> Path:
+    # XDG_STATE_HOME cannot split the lock for shared commands and services.
+    path = Path.home() / ".local/state/pennix-lifecycle"
+    safe_path(path)
+    return path
+
+
+def bind_target(codex_home: Path, *, register: bool = False) -> None:
+    safe_path(codex_home)
+    path = shared_root() / "target.json"
+    before = read(path, private=True)
+    expected = {"schema": 1, "home": str(Path.home()), "codex_home": str(codex_home),
+                "state_root": str(state_root())}
+    if before is not None:
+        if read_json(path) != expected:
+            raise OwnershipError("本用户已绑定其他 Lifecycle 目标或状态目录；保留现有部署，不自动迁移")
+    elif register:
+        replace(path, json_bytes(expected), None)
+
+
+def target_identity() -> dict:
+    return {"home": str(Path.home()), "codex_home": os.environ.get("CODEX_HOME", str(Path.home() / ".codex")),
+            "state_root": str(state_root()), "prefix": str(Path.home() / ".local")}
+
+
 @contextmanager
 def locked():
     # One user owns shared commands, services and receipts across CODEX_HOME values.
-    path = state_root() / "lock"
+    path = shared_root() / "lock"
     ensure_parent(path)
     descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "r+") as stream:

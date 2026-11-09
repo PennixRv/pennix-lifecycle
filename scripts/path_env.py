@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+import os
 from pathlib import Path
 import owned_files as files
 
@@ -29,10 +30,12 @@ def _replace(contents: str, block: str) -> str:
     if count != (0, 0) and count != (1, 1):
         raise PathEnvError("zshrc 中的生命周期 PATH 标记不完整")
     if count == (0, 0):
-        if block.splitlines()[1] in contents:
+        if block.splitlines()[1] in contents.splitlines():
             return contents
         return contents.rstrip("\n") + "\n\n" + block + "\n"
     start = contents.index(BEGIN)
+    if contents.index(END) < start:
+        raise PathEnvError("zshrc 中的生命周期 PATH 标记顺序无效")
     finish = contents.index(END, start) + len(END)
     return contents[:start] + block + contents[finish:]
 
@@ -41,6 +44,12 @@ def inspect(prefix: str) -> str:
     raw = files.read(_target())
     before = raw.decode("utf-8") if raw is not None else ""
     return "keep" if _replace(before, _block(prefix)) == before else "apply"
+
+
+def activate(prefix: Path) -> None:
+    target = str(prefix / "bin")
+    os.environ["PATH"] = os.pathsep.join([target, *[value for value in os.environ.get("PATH", "").split(os.pathsep)
+                                                  if value and value != target]])
 
 
 def apply(prefix: str) -> str:

@@ -42,15 +42,10 @@ def _toml(path: Path) -> dict:
 
 
 def _hooks(codex_home: Path) -> tuple[dict, bytes | None]:
-    raw = owned_files.read(codex_home / "hooks.json")
     try:
-        value = json.loads(raw, object_pairs_hook=owned_files.unique_pairs) if raw is not None else {}
-    except (ValueError, UnicodeError) as error:
-        raise NativeIntegrationError("hooks.json 不是有效 JSON") from error
-    if (not isinstance(value, dict) or not isinstance(value.get("hooks", {}), dict)
-            or any(not isinstance(entries, list) for entries in value.get("hooks", {}).values())):
-        raise NativeIntegrationError("hooks.json 结构无效")
-    return value, raw
+        return hook_integrations.read_document(codex_home)
+    except hook_integrations.HookError as error:
+        raise NativeIntegrationError(str(error)) from error
 
 
 def _marked(entry: object) -> bool:

@@ -123,7 +123,7 @@ class NativeIntegrationTests(unittest.TestCase):
         self.assertIn('command = "other"', (self.codex / "config.toml").read_text())
         self.assertFalse(native_integrations._receipt_path("context-mode").exists())
 
-    def test_single_component_repair_registers_fresh_native_integration(self):
+    def test_single_component_repair_refuses_unreceipted_native_package(self):
         path = config_model.init(str(self.root / "workflow.config"))
         kconf, _ = config_model.load(str(path))
         kconf.syms["PENNIX_CODEX_HOME"].set_value(str(self.codex))
@@ -133,9 +133,10 @@ class NativeIntegrationTests(unittest.TestCase):
         config_model.write(kconf, path)
         args = SimpleNamespace(component="context-mode", config=str(path), json=True, expected_sha256=None)
         with patch.object(pennix.owner_engine, "component_operation", return_value="changed") as package:
-            self.assertEqual(pennix.cmd_repair(args), 0)
-        package.assert_called_once()
-        self.assertEqual(native_integrations.inspect("context-mode", self.codex, enabled=True)["state"], "current")
+            with self.assertRaisesRegex(pennix.CliError, "可信 receipt"):
+                pennix.cmd_repair(args)
+        package.assert_not_called()
+        self.assertEqual(native_integrations.inspect("context-mode", self.codex, enabled=True)["state"], "absent")
 
     def seed_without_path(self):
         desired = native_integrations._desired("context-mode", self.codex, enabled=True)

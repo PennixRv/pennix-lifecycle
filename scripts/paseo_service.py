@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import owned_files
@@ -105,6 +106,10 @@ def inspect(paseo: Path, home: Path) -> str:
         return "blocked"
     content = path.read_text(encoding="utf-8")
     receipt = _receipt()
+    if (receipt and receipt["paseo"] == str(paseo) and receipt["home"] == str(home)
+            and receipt["unit_digest"] == hashlib.sha256(content.encode()).hexdigest()
+            and content != _unit(paseo, home)):
+        return "migration-required"
     if content == _legacy_unit(paseo, home) and receipt == {
             "schema": 1, "paseo": str(paseo), "home": str(home),
             "unit_digest": hashlib.sha256(content.encode()).hexdigest()}:
@@ -154,7 +159,8 @@ def runtime(paseo: Path, home: Path, mode: str, run: bool) -> dict:
                 raise PaseoServiceError("Paseo user unit 运行态不可核验")
             result["enabled"] = fields["UnitFileState"] == "enabled"
             result["active"] = fields["ActiveState"] == "active"
-            result["unit_failed"] = fields["ActiveState"] == "failed" or fields["Result"] != "success"
+            result["unit_failed"] = fields["ActiveState"] == "failed"
+            result["historical_result"] = fields["Result"]
         if mode == "linger":
             linger = subprocess.run(["loginctl", "show-user", str(os.getuid()), "--property=Linger", "--value"],
                                     capture_output=True, text=True, timeout=15, check=False)
@@ -264,23 +270,49 @@ def _set_listen(paseo: Path, home: Path, listen: str) -> tuple[tuple[bool, objec
 
 
 def configure(paseo: Path, home: Path, listen: str) -> str:
-    """Commit only Lifecycle's target daemon fields, preserving them on partial failure."""
-    changes: list[tuple[str, tuple[bool, object]]] = []
+    """Keep committed fields when native Skills effects cannot be established."""
+    _, changed = _set_listen(paseo, home, listen)
+    skills(paseo, home, "install")
+    return "changed" if changed else "verified official Skills"
+
+
+def skills(paseo: Path, home: Path, action: str, *, environment: dict | None = None) -> dict:
+    node = shutil.which("node", path=(environment or os.environ).get("PATH"))
+    if not node:
+        raise PaseoServiceError("Paseo Skills 需要 Node.js")
     try:
-        previous, changed = _set_listen(paseo, home, listen)
-        if changed:
-            changes.append(("daemon.listen", previous))
-        previous, changed = _set_config(paseo, home, "agents.skills.selection", {"mode": "all"})
-        if changed:
-            changes.append(("agents.skills.selection", previous))
-    except BaseException as error:
+        result = subprocess.run([node, str(Path(__file__).with_name("paseo-skills.mjs")), action, str(paseo), str(home)],
+                                capture_output=True, text=True, timeout=150, check=False, env=environment)
+        value = json.loads(result.stdout)
+        if result.returncode or value.get("state") not in {"compatible", "current"}:
+            raise ValueError()
+        return value
+    except (OSError, ValueError, TypeError, subprocess.TimeoutExpired) as error:
+        raise PaseoServiceError("Paseo 官方 Skills 原生安装或核验未完成；保留现场") from error
+
+
+def preflight_candidate(candidate: dict) -> None:
+    if candidate.get("version") != "0.15.3" or not isinstance(candidate.get("path"), str):
+        raise PaseoServiceError("Paseo 候选没有经过验证的 0.15.3 原生 Skills 合同")
+    npm = shutil.which("npm")
+    if not npm:
+        raise PaseoServiceError("Paseo 候选预检需要 npm")
+    with tempfile.TemporaryDirectory(prefix="pennix-paseo-sdk-") as directory:
+        root = Path(directory)
+        environment = {"HOME": directory, "PATH": os.environ.get("PATH", ""),
+                       "XDG_CONFIG_HOME": str(root / "config"), "XDG_STATE_HOME": str(root / "state"),
+                       "XDG_DATA_HOME": str(root / "data"), "XDG_CACHE_HOME": str(root / "cache"),
+                       "CODEX_HOME": str(root / "codex"), "NPM_CONFIG_USERCONFIG": "/dev/null"}
         try:
-            for key, previous in reversed(changes):
-                _restore_config(paseo, home, key, previous)
-        except BaseException as restore_error:
-            raise PaseoServiceError("Paseo 目标配置失败且已写入字段恢复失败") from restore_error
-        raise error
-    return "changed" if changes else "no-op"
+            result = subprocess.run([npm, "install", "--global", "--prefix", directory, "--ignore-scripts",
+                "--include=optional", "--cache", str(root / "npm-cache"), "--registry", "https://registry.npmjs.org/",
+                candidate["path"]], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=180, check=False)
+            if result.returncode:
+                raise PaseoServiceError("Paseo 候选依赖暂存失败；未修改用户安装")
+            skills(root / "bin/paseo", root / "paseo", "probe", environment=environment)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise PaseoServiceError("Paseo 候选原生接口预检未完成；未修改用户安装") from error
 
 
 def _managed_skills() -> list[str]:
@@ -522,7 +554,7 @@ def apply(
                 if result.returncode:
                     raise PaseoServiceError("无法恢复当前用户 linger")
             if stopped_legacy:
-                _systemctl("start", path.stem)
+                raise PaseoServiceError("旧前台 daemon 已停止；保留已恢复的文件，不自动重放未知启动")
         except BaseException as rollback:
             raise PaseoServiceError("Paseo 自启配置失败且恢复失败") from rollback
         raise error

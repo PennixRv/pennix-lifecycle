@@ -22,10 +22,22 @@ class CandidateError(ValueError):
 SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
+def _filename(value: object) -> str:
+    if (not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", value)
+            or value in {".", ".."}):
+        raise CandidateError("candidate filename is invalid")
+    return value
+
+
 def _json(url: str) -> dict:
     request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "pennix-lifecycle"})
     with urllib.request.urlopen(request, timeout=30) as response:
-        value = json.load(response)
+        if urllib.parse.urlsplit(response.url).scheme != "https":
+            raise CandidateError("metadata redirect must use HTTPS")
+        raw = response.read(8 * 1024 * 1024 + 1)
+        if len(raw) > 8 * 1024 * 1024:
+            raise CandidateError("candidate metadata exceeds size limit")
+        value = json.loads(raw)
     if not isinstance(value, dict):
         raise CandidateError("candidate metadata is invalid")
     return value
@@ -57,6 +69,10 @@ def _check_target(candidate: dict, target: dict | None) -> dict:
     return candidate
 
 
+def matches(actual: dict, constraints: dict) -> bool:
+    return all(actual.get(field) == value for field, value in constraints.items())
+
+
 def resolve_npm(component: dict, workspace: Path, target: dict | None = None) -> dict:
     package = component["package"]
     name = package["name"]
@@ -73,6 +89,8 @@ def resolve_npm(component: dict, workspace: Path, target: dict | None = None) ->
     if not match:
         raise CandidateError(f"npm candidate has no SHA-512 integrity: {name}")
     artifact = workspace / "package.tgz"
+    if urllib.parse.urlsplit(dist["tarball"]).hostname != urllib.parse.urlsplit(registry).hostname:
+        raise CandidateError("npm archive host differs from registered registry")
     owned_files.download(dist["tarball"], artifact)
     raw = artifact.read_bytes()
     sha256 = hashlib.sha256(raw).hexdigest()
@@ -96,7 +114,9 @@ def resolve_pypi(component: dict, workspace: Path, target: dict | None = None) -
             or not isinstance(selected.get("url"), str)
             or not re.fullmatch(r"[0-9a-f]{64}", selected.get("digests", {}).get("sha256", ""))):
         raise CandidateError(f"PyPI has no fixed compatible wheel for {name} {version}")
-    artifact = workspace / selected["filename"]
+    artifact = workspace / _filename(selected.get("filename"))
+    if urllib.parse.urlsplit(selected["url"]).hostname != "files.pythonhosted.org":
+        raise CandidateError("PyPI archive host is not registered")
     owned_files.download(selected["url"], artifact)
     sha256 = _digest(artifact)
     if sha256 != selected["digests"]["sha256"]:
@@ -123,9 +143,17 @@ def _gh_release(repo: str, tag: str | None) -> dict:
 def _archive_json(archive: Path, suffix: str) -> dict:
     try:
         with tarfile.open(archive, "r:*") as source:
-            matches = [item for item in source.getmembers()
-                       if item.isfile() and (PurePosixPath(item.name).as_posix() == suffix
-                                             or PurePosixPath(item.name).as_posix().endswith("/" + suffix))]
+            matches = []
+            total = 0
+            for count, item in enumerate(source, 1):
+                total += item.size
+                if count > 100000 or total > 1024 * 1024 * 1024:
+                    raise CandidateError("archive member budget exceeded")
+                name = PurePosixPath(item.name)
+                if name.is_absolute() or ".." in name.parts:
+                    raise CandidateError("archive path is unsafe")
+                if item.isfile() and (name.as_posix() == suffix or name.as_posix().endswith("/" + suffix)):
+                    matches.append(item)
             if len(matches) != 1 or matches[0].size > 1024 * 1024:
                 raise CandidateError(f"archive identity file is missing or ambiguous: {suffix}")
             stream = source.extractfile(matches[0])
@@ -149,7 +177,7 @@ def resolve_release(component: dict, workspace: Path, target: dict | None = None
     if len(assets) != 1:
         raise CandidateError(f"expected one npm asset in {repo}@{release['tagName']}")
     asset = assets[0]
-    path = workspace / asset["name"]
+    path = workspace / _filename(asset["name"])
     result = _run(["gh", "release", "download", release["tagName"], "--repo", repo,
                    "--pattern", asset["name"], "--output", str(path)], timeout=120)
     if result.returncode or not path.is_file():
@@ -251,6 +279,7 @@ def _arch_pkginfo(path: Path) -> tuple[dict, list[str]]:
 
 def _verify_arch_package(component: dict, workspace: Path, filename: str, version: str,
                          url: str, target: dict | None) -> dict:
+    filename = _filename(filename)
     path = workspace / filename
     signature = workspace / f"{filename}.sig"
     owned_files.download(url, path)
@@ -261,7 +290,8 @@ def _verify_arch_package(component: dict, workspace: Path, filename: str, versio
     sha256 = _digest(path)
     info, dependencies = _arch_pkginfo(path)
     name = component["package"]["name"]
-    if info.get("pkgname") != name or f"{info.get('pkgver')}-{info.get('pkgrel')}" != version:
+    # .PKGINFO pkgver already includes epoch and pkgrel.
+    if info.get("pkgname") != name or info.get("pkgver") != version:
         raise CandidateError("official package metadata identity mismatch")
     missing = []
     for dependency in dependencies:
@@ -295,7 +325,10 @@ def resolve_arch(component: dict, workspace: Path, target: dict | None = None) -
     pkgver, pkgrel, filename = metadata.get("pkgver"), metadata.get("pkgrel"), metadata.get("filename")
     if not all(isinstance(value, str) and value for value in (pkgver, pkgrel, filename)):
         raise CandidateError(f"official package metadata unavailable: {name}")
-    version = f"{pkgver}-{pkgrel}"
+    epoch = metadata.get("epoch", 0)
+    if not re.fullmatch(r"[0-9]+", str(epoch)):
+        raise CandidateError("official package epoch is invalid")
+    version = f"{str(epoch) + ':' if int(epoch) else ''}{pkgver}-{pkgrel}"
     url = f"https://geo.mirror.pkgbuild.com/{repo}/os/x86_64/{filename}"
     return _verify_arch_package(component, workspace, filename, version, url, target)
 

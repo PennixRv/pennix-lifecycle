@@ -49,7 +49,10 @@ def read(path: Path, sources: dict[str, str | tuple[str, ...]]) -> dict:
         raise LockError(str(error)) from error
     if value is None:
         return {"schema": 1, "components": {}}
-    return validate(value, sources)
+    validated = validate(value, sources)
+    return {**validated, "components": {
+        key: {**entry, "source": sources[key] if isinstance(sources[key], str) else sources[key][0]}
+        for key, entry in validated["components"].items()}}
 
 
 def write(path: Path, value: dict, sources: dict[str, str | tuple[str, ...]]) -> None:

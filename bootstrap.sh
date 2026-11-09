@@ -29,7 +29,7 @@ run_target() {
       if [[ -v "${name}" ]]; then target_env+=("${name}=${!name}"); fi
     done
   fi
-  runuser -u "${target_user}" -- env "${target_env[@]}" "$@"
+  runuser -u "${target_user}" -- env -i "${target_env[@]}" "$@"
 }
 
 while (($#)); do
@@ -59,6 +59,10 @@ IFS=: read -r _ _ target_uid target_gid _ target_home _ <<<"${passwd_entry}"
 [[ "${target_uid}" =~ ^[0-9]+$ && "${target_uid}" -ne 0 && "${target_home}" == /* ]] || {
   echo 'bootstrap: target must be an existing non-root user' >&2; exit 2;
 }
+if [[ "${EUID}" -ne 0 && "${HOME}" != "${target_home}" ]]; then
+  echo 'bootstrap: HOME must match the target account home' >&2
+  exit 2
+fi
 
 if [[ "${operation}" == uninstall ]]; then
   installed="${target_home}/.local/bin/pennix"
@@ -71,33 +75,39 @@ if [[ "${operation}" == uninstall ]]; then
   exit 0
 fi
 
-if [[ "${release}" != latest && ! "${release}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+if [[ "${release}" != latest && ! "${release}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
   echo 'bootstrap: release must be latest or a vMAJOR.MINOR.PATCH tag' >&2
   exit 2
 fi
 
 if [[ -r /etc/os-release ]]; then . /etc/os-release; fi
 [[ "${ID:-}" == arch ]] || { echo 'bootstrap: Arch Linux is required' >&2; exit 2; }
+[[ "$(uname -m)" == x86_64 ]] || { echo 'bootstrap: x86_64 is required' >&2; exit 2; }
 kernel_markers="$(cat /proc/sys/kernel/osrelease /proc/version 2>/dev/null || true)"
 if [[ "${kernel_markers,,}" == *microsoft* && "${kernel_markers,,}" != *wsl2* && "${kernel_markers,,}" != *microsoft-standard-wsl2* ]]; then
   echo 'bootstrap: Arch on WSL requires WSL2' >&2
   exit 2
 fi
 
+echo 'bootstrap: 将执行完整 Arch 系统升级（pacman -Syu）并安装运行依赖。' >&2
 if [[ "${EUID}" -eq 0 ]]; then
-  pacman -S --needed --noconfirm curl python python-kconfiglib python-tomlkit python-yaml npm git
+  pacman -Syu --needed --noconfirm curl python python-kconfiglib python-tomlkit python-yaml npm git zsh base-devel
 else
   command -v sudo >/dev/null || { echo 'bootstrap: sudo is required to install Arch dependencies' >&2; exit 2; }
   if ((no_input)); then
-    sudo -n pacman -S --needed --noconfirm curl python python-kconfiglib python-tomlkit python-yaml npm git
+    sudo -n pacman -Syu --needed --noconfirm curl python python-kconfiglib python-tomlkit python-yaml npm git zsh base-devel
   else
-    sudo pacman -S --needed --noconfirm curl python python-kconfiglib python-tomlkit python-yaml npm git
+    sudo pacman -Syu --needed --noconfirm curl python python-kconfiglib python-tomlkit python-yaml npm git zsh base-devel
   fi
 fi
 
+export PATH="/usr/bin:/bin:${PATH}"
 for command in curl sha256sum python3; do
   command -v "${command}" >/dev/null || { echo "bootstrap: required command is missing: ${command}" >&2; exit 2; }
 done
+/usr/bin/python3 -c 'import kconfiglib, tomlkit, yaml' || {
+  echo 'bootstrap: Arch Python dependencies are unavailable' >&2; exit 2;
+}
 
 if [[ "${release}" == latest ]]; then
   latest_url="$(curl --proto '=https' --tlsv1.2 -fsSIL -o /dev/null -w '%{url_effective}' "https://github.com/${repo}/releases/latest")"
@@ -105,7 +115,7 @@ if [[ "${release}" == latest ]]; then
 else
   release_tag="${release}"
 fi
-[[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+[[ "${release_tag}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
   echo 'bootstrap: latest release did not resolve to a semver tag' >&2; exit 2;
 }
 release_version="${release_tag#v}"
