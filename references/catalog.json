@@ -142,6 +142,34 @@
         "install_owner": "user"
       }
     },
+    "trellis-paseo-adapter": {
+      "delivery": "package",
+      "lock_source": "npm:@pennixrv/trellis-paseo-adapter:beta",
+      "source": "PennixRv/Trellis optional public Paseo SDK adapter",
+      "owner": "trellis",
+      "scope": "global",
+      "verify_key": "trellis-paseo-adapter --version",
+      "actions": {
+        "install": "managed",
+        "configure": "not-applicable",
+        "upgrade": "managed",
+        "uninstall": "managed",
+        "verify": "managed",
+        "reconcile": "not-applicable"
+      },
+      "project_init": "not-applicable",
+      "probe": "trellis-paseo-adapter",
+      "version_args": ["--version"],
+      "package": {
+        "source": "npm",
+        "name": "@pennixrv/trellis-paseo-adapter",
+        "registry": "https://registry.npmjs.org/",
+        "tag": "beta",
+        "prefix": "$HOME/.local",
+        "install_owner": "user",
+        "allow_scripts": ["esbuild", "node-pty", "msgpackr-extract"]
+      }
+    },
     "pnpm": {
       "delivery": "package",
       "lock_source": "npm:pnpm:latest",
@@ -589,7 +617,7 @@
         "directory": "pennix-skills",
         "source": {
           "repo": "PennixRv/pennix-skills",
-          "ref": "886ebf1a1b6f413f366ec9cfa92cc4e0391772d8",
+          "ref": "d94b1341ba26d6010fd60a3f8f81f7b93c762dba",
           "manifest": "collection.json"
         }
       }

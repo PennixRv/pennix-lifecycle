@@ -66,6 +66,13 @@ config PENNIX_COMPONENT_PASEO_CLI
 	help
 		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
+config PENNIX_COMPONENT_TRELLIS_PASEO_ADAPTER
+	bool "Trellis Paseo 工作树委派适配（可选，Node >=22）"
+	default n
+	depends on PENNIX_COMPONENT_TRELLIS_CLI && PENNIX_COMPONENT_PASEO_CLI
+	help
+		公开 SDK 的同机适配；基础 Trellis 不依赖此包。保留 daemon、认证和工作树。
+
 config PENNIX_COMPONENT_PONYTAIL_PLUGIN
 	bool "Ponytail 插件"
 	default y

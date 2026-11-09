@@ -39,7 +39,7 @@ import native_integrations
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "references" / "catalog.json"
 APPLY_ORDER = [
-    "codex-cli", "trellis-cli", "pnpm", "context-mode", "codegraph-cli", "paseo-cli",
+    "codex-cli", "trellis-cli", "pnpm", "context-mode", "codegraph-cli", "paseo-cli", "trellis-paseo-adapter",
     "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "uv", "tavily-cli",
     "tavily-hikari", "peon-ping", "codex-config", "codex-agents", "pennix-skills-extra",
     "pennix-skills",
@@ -49,6 +49,7 @@ DEPENDENCIES = {
     "codex-config": {"codex-cli"}, "codex-agents": {"codex-cli"},
     "context-mode": {"codex-cli"}, "tavily-hikari": {"tavily-cli", "pennix-skills"},
     "tavily-cli": {"uv"},
+    "trellis-paseo-adapter": {"trellis-cli", "paseo-cli"},
 }
 
 
@@ -584,6 +585,8 @@ def _ensure_connection_dependencies(selected: set[str], connections: dict[str, A
 def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_id: str, operation: str, *, repair: bool = False,
                    candidate: dict[str, Any] | None = None) -> str:
     _verify_inputs(args)
+    if operation in {"install", "upgrade", "uninstall"}:
+        _delegation_preflight(args, component_id, operation)
     component = catalog["components"][component_id]
     owned_files.bind_target(args.codex_home, register=True)
     native = component.get("native_config")
@@ -613,6 +616,37 @@ def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_
         return owner_engine.component_operation(engine_args, catalog, component_id, component, operation)
     except Exception as error:
         raise CliError(f"{component_id} {operation} 失败: {error}") from error
+
+
+def _delegation_preflight(args: argparse.Namespace, component_id: str, operation: str) -> None:
+    if component_id == "trellis-paseo-adapter" and operation != "uninstall":
+        try:
+            version = subprocess.run(["node", "--version"], check=True, capture_output=True, text=True, timeout=15).stdout.strip()
+            if int(version.lstrip("v").split(".")[0]) < 22:
+                raise ValueError("unsupported Node")
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            raise CliError("trellis-paseo-adapter 需要 Node >=22；基础 Trellis 的 Node 要求不变") from error
+    if component_id not in {"codex-cli", "trellis-cli", "trellis-paseo-adapter", "codegraph-cli", "paseo-cli"}:
+        return
+    home = Path(config_model.config_value(args.kconf, "PENNIX_PASEO_HOME"))
+    executable = shutil.which("paseo")
+    if not executable or not home.is_dir():
+        return
+    try:
+        status = subprocess.run([executable, "daemon", "status", "--home", str(home), "--json"], capture_output=True, text=True, timeout=30, check=False)
+        value = json.loads(status.stdout)
+        if status.returncode or not isinstance(value, dict):
+            raise ValueError("unknown daemon")
+        if value.get("pid") is None:
+            return
+        result = subprocess.run([executable, "ls", "-g", "--background", "--json", "--home", str(home)], capture_output=True, text=True, timeout=30, check=False)
+        agents = json.loads(result.stdout)
+        if result.returncode or not isinstance(agents, list) or any(not isinstance(item, dict) or not isinstance(item.get("status"), str) for item in agents):
+            raise ValueError("unknown agents")
+        if any((item.get("labels", {}).get("trellis.attempt") or item.get("labels", {}).get("trellis.task_id")) and (item["status"] != "closed" or item.get("activeTurn")) for item in agents):
+            raise CliError("存在未关闭的 Trellis 工作树委派；先由 controller 保全、接受或取消并核销，再关闭原生 agent，未替换共享组件")
+    except (OSError, ValueError, TypeError, subprocess.TimeoutExpired) as error:
+        raise CliError("Paseo 委派运行态不可核验；保留现场，未替换共享组件") from error
 
 
 def cmd_config_init(args: argparse.Namespace) -> int:
