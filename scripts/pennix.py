@@ -1936,6 +1936,7 @@ def cmd_recover(args: argparse.Namespace) -> int:
                 raise CliError("组件身份、归属或精确目标未证明；保留 unknown")
             args.component_lock = component_lock.set_entry(args.component_lock, step["component"], step["target"], args.component_lock_sources)
             _write_lock(args)
+            active = apply_journal.read()
             active = apply_journal.verified(active, step["id"], {"recovered": True, "state": state})
         else:
             raise CliError("此步骤缺少足够的原生恢复证据；保留 unknown，不能强制清除")

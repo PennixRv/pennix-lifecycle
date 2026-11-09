@@ -98,6 +98,29 @@ class ConvergenceTests(unittest.TestCase):
         self.assertIsNone(apply_journal.read())
         self.assertEqual(json.loads((self.root / "components.lock.json").read_text())["components"]["example"]["version"], "2.0-1")
 
+    def test_recover_finishes_changed_lock_checkpoint_in_one_call(self):
+        config = self.root / "workflow.config"
+        lock = self.root / "components.lock.json"
+        config.write_text("same input")
+        sources = {"example": self.old["source"]}
+        component_lock.write(lock, {"schema": 1, "components": {"example": self.old}}, sources)
+        target = {**self.old, "version": "2.0-1"}
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.root)}):
+            active = apply_journal.start("update", "example", apply_journal.digest(config),
+                apply_journal.digest(lock), [{"id": "example:upgrade", "component": "example",
+                "action": "upgrade", "target": target}])
+        apply_journal.unknown(active, "example:upgrade")
+        args = SimpleNamespace(json=True, resolve="completed", transaction=active["transaction"],
+            step="example:upgrade", component_lock_path=lock, component_lock_sources=sources,
+            component_lock=component_lock.read(lock, sources))
+        with patch.object(pennix, "_load", return_value=(object(), config, {"components": {"example": self.component}})), \
+             patch.object(config_model, "config_value", return_value=str(self.root)), \
+             patch.object(pennix, "_component_status", return_value={"state": "match", "ownership": "lifecycle"}), \
+             patch.object(pennix, "_emit"):
+            self.assertEqual(pennix.cmd_recover(args), 0)
+        self.assertIsNone(apply_journal.read())
+        self.assertEqual(component_lock.read(lock, sources)["components"]["example"], target)
+
     def test_confirmation_drift_stops_before_journal_or_receipt_change(self):
         def confirm(_):
             (self.root / "workflow.config").write_text("concurrent input")

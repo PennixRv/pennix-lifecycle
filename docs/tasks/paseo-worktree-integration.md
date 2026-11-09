@@ -9,3 +9,5 @@
 CodeGraph 的 MCP 项目绑定由已发布原生 `codegraph install --target codex --location local --bound-worktree <root>` 完成；Lifecycle 不写项目配置或自动索引。Skills collection 固定验证后的源码提交。实际发布、安装版本与真实行为在执行后补录，计划不等于通过。
 
 实际升级 CodeGraph 时，原生平台包补装使首次版本探测失败，事务保留 unknown；随后原生 CLI 已就绪，但旧 receipt 尚未更新。0.2.43 为同一事务的 npm upgrade 增加受限恢复：要求旧 lock 与可信 receipt 同源同版本，重新核验事务固定归档摘要、包管理器与命令版本、归档内每个已安装文件；文件篡改、路径重定向、缺 receipt、外部安装均拒绝。不重放安装，不手改 journal，不把版本相同视为充分证据。其他交付方式和首次安装的 unknown 不扩展。
+
+0.2.44 修复恢复完成时的 journal 检查点引用：原生写锁会同步 journal 的 lock_digest，随后必须读取该检查点再标记 verified。新增使用真实隔离 lock/journal 的回归，修复前稳定复现“步骤更新前发生变化”，修复后同一调用完成并归档。实际 CodeGraph 事务已经沿 0.2.43 正式发行入口对账恢复，未重放安装；最终工具安装固定到 0.2.44。
