@@ -15,6 +15,26 @@ import secret_store
 
 
 class SecretStoreTests(unittest.TestCase):
+    def test_first_secret_write_rejects_non_private_existing_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "shared"
+            parent.mkdir(mode=0o755)
+            parent.chmod(0o755)
+            path = parent / "secrets.toml"
+            with self.assertRaises(secret_store.SecretError):
+                secret_store.update(path, {"codex": {"api_key": "private-test-value"}})
+            self.assertFalse(path.exists())
+            self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o755)
+
+    def test_non_utf8_import_is_redacted_and_does_not_create_secret_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "secrets.toml"
+            with self.assertRaises(credential_import.CredentialImportError) as failure:
+                credential_import.import_from_ssh(path, "fixture", ["cch"],
+                    fetch=lambda *_args: b"private-test-value\xff")
+            self.assertNotIn("private-test-value", str(failure.exception))
+            self.assertFalse(path.exists())
+
     def test_update_is_private_and_conflicts_are_not_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config" / "pennix" / "secrets.toml"
