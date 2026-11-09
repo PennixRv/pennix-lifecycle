@@ -23,7 +23,7 @@ class ReleaseError(RuntimeError):
 
 
 def _locations() -> tuple[Path, Path]:
-    data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")).expanduser()
+    data = owned_files.xdg_home("XDG_DATA_HOME", Path.home() / ".local/share")
     return data / "pennix-lifecycle" / "releases", Path.home() / ".local/bin/pennix"
 
 

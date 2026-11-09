@@ -228,3 +228,67 @@ class AuditRegressions(unittest.TestCase):
         with patch.object(owned_files, "read_json", return_value=record):
             with self.assertRaisesRegex(relay_owner.RelayError, "归属字段"):
                 relay_owner._daemon_receipt(self.root)
+
+    def test_catalog_does_not_claim_unsupported_actions_or_marketplace_branch(self):
+        source = json.loads(pennix.CATALOG.read_text())
+        for mutate in [lambda value: value["components"]["pennix-workflow-state"]["actions"].update(reconcile="managed"),
+                       lambda value: value["components"]["ponytail-plugin"]["plugin"]["marketplace"].update(branch="main"),
+                       lambda value: value["components"]["cch-status"]["actions"].update(install=[]),
+                       lambda value: value["components"]["cch-status"]["actions"].update(install="unsupported")]:
+            value = json.loads(json.dumps(source)); mutate(value)
+            path = self.root / "catalog.json"; path.write_text(json.dumps(value))
+            with self.assertRaises(_engine.BootstrapError):
+                _engine.load_catalog(path)
+
+    def test_xdg_empty_values_use_home_defaults_and_relative_values_are_rejected(self):
+        for name, suffix in [("XDG_CONFIG_HOME", ".config"), ("XDG_STATE_HOME", ".local/state"),
+                             ("XDG_DATA_HOME", ".local/share"), ("XDG_CACHE_HOME", ".cache")]:
+            fallback = self.root / suffix
+            with patch.dict(os.environ, {name: ""}):
+                self.assertEqual(owned_files.xdg_home(name, fallback), fallback)
+            for invalid in ["relative", "~/relative", str(self.root / ".." / "other")]:
+                with patch.dict(os.environ, {name: invalid}):
+                    with self.assertRaises(owned_files.OwnershipError):
+                        owned_files.xdg_home(name, fallback)
+
+    def test_init_and_render_preserve_home_intent_across_devices(self):
+        path = config_model.init(str(self.root / "workflow.config"))
+        original = path.read_bytes()
+        self.assertNotIn(str(self.root).encode(), original)
+        self.assertIn(b'CONFIG_PENNIX_CODEX_HOME="${HOME}/.codex"', original)
+        other = self.root / "other-device"
+        with patch.dict(os.environ, {"HOME": str(other)}):
+            loaded, _ = config_model.load(str(path))
+            self.assertEqual(config_model.config_value(loaded, "PENNIX_CODEX_HOME"), str(other / ".codex"))
+            config_model.write(loaded, path, before=loaded.snapshot)
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_pacman_executable_owner_cannot_hide_wrong_package_origin(self):
+        for source, flag in [("official", "-Qn"), ("aur", "-Qm")]:
+            replies = [subprocess.CompletedProcess([], 0, "tool 1.0-1"),
+                       subprocess.CompletedProcess([], 0, "tool"), subprocess.CompletedProcess([], 1, "")]
+            with patch.object(_engine, "_command", return_value="/usr/bin/tool"), \
+                 patch.object(_engine.subprocess, "run", side_effect=replies) as run:
+                with self.assertRaisesRegex(_engine.BootstrapError, "origin differs"):
+                    _engine.package_identity({"package": {"source": source, "name": "tool"}})
+                self.assertEqual(run.call_args.args[0], ["pacman", flag, "tool"])
+
+    def test_uninstall_rejects_unsupported_host_before_reading_configuration(self):
+        with patch.object(_engine.host, "detect_host", return_value={"supported": False, "reason": "unsupported fixture"}), \
+             patch.object(pennix, "_load") as load, patch("sys.stderr"):
+            self.assertEqual(pennix.main(["uninstall", "cch-status", "--confirm", "cch-status"]), 2)
+            load.assert_not_called()
+
+    def test_system_upgrade_refreshes_owned_official_packages_even_when_deselected(self):
+        args = SimpleNamespace(component_lock={}, component_lock_sources={})
+        official = {"package": {"source": "official"}, "lock_source": "arch:core/tool"}
+        catalog = {"components": {"official": official, "aur": {"package": {"source": "aur"}}}}
+        with patch.object(_engine, "_package_receipt", return_value={"version": "1-1"}), \
+             patch.object(_engine, "package_identity", return_value={"version": "2-1"}) as identity, \
+             patch.object(_engine, "_write_package_receipt") as receipt, \
+             patch.object(pennix.component_lock, "set_entry", return_value={}), \
+             patch.object(pennix, "_write_lock") as lock:
+            pennix._refresh_arch_receipts(args, catalog)
+            identity.assert_called_once_with(official)
+            receipt.assert_called_once_with("official", official, "2-1")
+            lock.assert_called_once_with(args)

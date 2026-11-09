@@ -303,7 +303,6 @@
         "marketplace": {
           "name": "ponytail",
           "source": "https://github.com/DietrichGebert/ponytail.git",
-          "branch": "main",
           "sparse": []
         }
       }
@@ -392,7 +391,7 @@
         "upgrade": "not-applicable",
         "uninstall": "not-applicable",
         "verify": "not-applicable",
-        "reconcile": "managed"
+        "reconcile": "not-applicable"
       },
       "project_init": "not-applicable",
       "adapter": "pennix-workflow-state"

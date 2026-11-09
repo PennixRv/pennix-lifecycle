@@ -54,13 +54,24 @@ pathlib.Path('/home/smoke/upgrade-observed').write_text('full system upgrade exp
 """)
             for command in (curl, sudo):
                 command.chmod(0o700)
+            mounts = []
+            for name, replacement in (("curl", curl), ("sudo", sudo)):
+                target = Path("/usr/bin") / name
+                while target.is_symlink():
+                    link = target.readlink()
+                    if target.is_relative_to("/etc"):
+                        alias = etc / target.relative_to("/etc")
+                        alias.parent.mkdir(parents=True, exist_ok=True)
+                        alias.symlink_to(link)
+                    target = link if link.is_absolute() else target.parent / link
+                mounts += ["--ro-bind", str(replacement), str(target)]
             namespace = ["bwrap", "--unshare-all", "--die-with-parent", "--new-session",
                          "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
                          "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64",
                          "--ro-bind", str(etc), "/etc", "--proc", "/proc", "--dev", "/dev",
                          "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", "/var",
                          "--bind", str(home), "/home/smoke", "--ro-bind", str(assets), "/fixtures",
-                         "--ro-bind", str(curl), "/usr/bin/curl", "--ro-bind", str(sudo), "/usr/bin/sudo",
+                         *mounts,
                          "--ro-bind", str(ROOT / "bootstrap.sh"), "/bootstrap.sh", "--chdir", "/home/smoke"]
             env = {"HOME": "/home/smoke", "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
                    "CODEX_HOME": "/home/smoke/nondefault-codex", "XDG_RUNTIME_DIR": "/run/user-test"}

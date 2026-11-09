@@ -25,7 +25,7 @@ _MISSING = object()
 
 
 def _state_path() -> Path:
-    base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")).expanduser()
+    base = owned_files.xdg_home("XDG_STATE_HOME", Path.home() / ".local/state")
     return base / "pennix-lifecycle" / "relay.json"
 
 

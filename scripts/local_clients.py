@@ -216,7 +216,7 @@ def stage(component: dict, workspace: Path, candidate: dict | None = None) -> di
             raise ClientError("Hikari 所需 tvly 未达到最低版本")
         generated = workspace / "generated"
         generated.mkdir(mode=0o700)
-        config = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "tavily-hikari-cli"
+        config = files.xdg_home("XDG_CONFIG_HOME", Path.home() / ".config") / "tavily-hikari-cli"
         real = generated / ".tvly-hikari-real"
         real.write_bytes(asset.read_bytes())
         real.chmod(0o700)

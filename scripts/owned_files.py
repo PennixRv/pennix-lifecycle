@@ -102,8 +102,15 @@ def json_bytes(value) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n").encode()
 
 
+def xdg_home(name: str, fallback: Path) -> Path:
+    path = Path(os.environ.get(name) or fallback)
+    if not path.is_absolute() or ".." in path.parts:
+        raise OwnershipError(f"{name} 必须为无穿越的绝对路径")
+    return path
+
+
 def state_root() -> Path:
-    path = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "pennix-lifecycle"
+    path = xdg_home("XDG_STATE_HOME", Path.home() / ".local/state") / "pennix-lifecycle"
     safe_path(path)
     return path
 

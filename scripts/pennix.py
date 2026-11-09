@@ -807,9 +807,7 @@ def _retry_unknown_update(active: dict, step_id: str, state: str) -> dict:
 
 def _refresh_arch_receipts(args: argparse.Namespace, catalog: dict[str, Any]) -> None:
     updates = []
-    selected = config_model.selected_components(args.kconf)
-    for component_id in selected:
-        component = catalog["components"].get(component_id)
+    for component_id, component in catalog["components"].items():
         package = component.get("package") if component else None
         if not isinstance(package, dict) or package.get("source") != "official":
             continue
@@ -1027,6 +1025,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
             result = subprocess.run(["sudo", "pacman", "-Syu", "--noconfirm"], check=False)
             if result.returncode:
                 raise CliError(f"完整系统升级失败: {result.returncode}")
+            owner_engine._candidate.cache_clear()
             _refresh_arch_receipts(args, catalog)
             return "changed"
         active, results["system-upgrade"] = _journal_mutate(active, "system-upgrade", system_upgrade)
@@ -1795,7 +1794,7 @@ def cmd_secrets_import_ssh(args: argparse.Namespace) -> int:
 
 
 def cmd_cache(args: argparse.Namespace) -> int:
-    cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")).expanduser() / "pennix-lifecycle"
+    cache = owned_files.xdg_home("XDG_CACHE_HOME", Path.home() / ".cache") / "pennix-lifecycle"
     if args.cache_command == "list":
         owned_files.safe_path(cache)
         _emit({"path": str(cache), "entries": sorted(item.name for item in cache.iterdir()) if cache.is_dir() else []}, args.json)
@@ -2011,7 +2010,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if mutating:
             with owned_files.locked():
-                if args.command in {"apply", "repair", "update", "reconcile"} or args.command == "tool" and args.tool_command == "install":
+                if args.command in {"apply", "repair", "update", "reconcile", "uninstall"} or args.command == "tool" and args.tool_command == "install":
                     current_host = owner_engine.host.detect_host()
                     if not current_host["supported"]:
                         raise CliError(str(current_host["reason"]))

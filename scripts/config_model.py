@@ -58,7 +58,7 @@ def _path_value(value: str) -> str:
 
 
 def config_path(explicit: str | None = None) -> Path:
-    base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    base = files.xdg_home("XDG_CONFIG_HOME", Path.home() / ".config")
     value = explicit or str(base / "pennix/workflow.config")
     return Path(_path_value(value))
 
@@ -161,6 +161,10 @@ def values(kconf) -> dict[str, str]:
 
 
 def _render(kconf) -> bytes:
+    for key in PATH_KEYS:
+        symbol = kconf.syms[key]
+        if symbol.user_value is None and symbol.str_value.startswith(str(Path.home()) + "/"):
+            symbol.set_value("${HOME}" + symbol.str_value[len(str(Path.home())):])
     with tempfile.TemporaryDirectory(prefix="pennix-kconfig-") as directory:
         path = Path(directory) / ".config"
         kconf.write_config(str(path))

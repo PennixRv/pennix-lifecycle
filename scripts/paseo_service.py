@@ -24,7 +24,7 @@ OFFICIAL_SKILLS = ("paseo", "paseo-advisor", "paseo-committee", "paseo-handoff",
 
 
 def unit_path() -> Path:
-    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")).expanduser() / "systemd" / "user" / "pennix-paseo.service"
+    return owned_files.xdg_home("XDG_CONFIG_HOME", Path.home() / ".config") / "systemd" / "user" / "pennix-paseo.service"
 
 
 def _receipt_path() -> Path:

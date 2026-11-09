@@ -72,8 +72,15 @@ def load_catalog(path: Path) -> dict[str, Any]:
         component["id"] = key
         if component.get("delivery") not in {"package", "plugin", "client", "static", "collection", "state"}:
             raise BootstrapError(f"catalog delivery is invalid: {key}")
-        if component.get("delivery") != "state" and not isinstance(component.get("actions"), dict):
-            raise BootstrapError(f"catalog actions are missing: {key}")
+        actions = component.get("actions")
+        if (not isinstance(actions, dict) or not actions
+                or not set(actions) <= {"install", "configure", "upgrade", "uninstall", "verify", "reconcile"}
+                or any(not isinstance(value, str) or value not in {"managed", "native-owner", "not-applicable"} for value in actions.values())
+                or component.get("delivery") == "state" and any(value != "not-applicable" for value in actions.values())):
+            raise BootstrapError(f"catalog actions are invalid: {key}")
+        marketplace = component.get("plugin", {}).get("marketplace", {})
+        if "branch" in marketplace:
+            raise BootstrapError(f"catalog marketplace branch is unsupported: {key}")
         if (component.get("delivery") in {"package", "plugin", "client", "collection"}
                 and (not isinstance(component.get("lock_source"), str) or not component["lock_source"])):
             raise BootstrapError(f"catalog lock source is missing: {key}")
@@ -621,6 +628,10 @@ def package_identity(component: dict[str, Any]) -> dict[str, str]:
     parts = result.stdout.strip().split()
     if result.returncode or owner.returncode or len(parts) != 2 or parts[0] != package["name"] or owner.stdout.strip() != package["name"]:
         raise BootstrapError(f"cannot verify pacman executable owner: {package['name']}")
+    origin = subprocess.run(["pacman", "-Qn" if package["source"] == "official" else "-Qm", package["name"]],
+                            capture_output=True, text=True, timeout=30, check=False)
+    if origin.returncode:
+        raise BootstrapError(f"pacman package origin differs from catalog: {package['name']}")
     return {"manager": "pacman", "name": parts[0], "version": parts[1], "command": str(Path(command).resolve())}
 
 

@@ -19,3 +19,7 @@ L1 修复身份/目标互斥、配置快照与确认、来源/锁/平台和事�
 版本 0.2.39，集合固定为 `886ebf1a1b6f413f366ec9cfa92cc4e0391772d8`；包含 Grok 原生提交 `896b81edc1c0a5ad02edf9a313eaeda97f147ed0` 及 Windsurf v0.1.18 精确公开 tarball 投影。Windsurf 公共包 SHA-256 为 `30e15719cc69406bdb33fa595fcb4fc96ebf164ce74029f3796a49b01e6a3f54`，原生 registry 安装、签名和 provenance 验证通过。CCH v0.1.51 原生 GitHub Release 载荷 SHA-256 为 `3d11b98a2d6544be3a48f6d4255f1fd862b04a62d92feacb12638aa32fe06272`，本机已通过原生 update 升级。
 
 最新 Lifecycle 隔离全量 177 项（包含真实 Paseo 公开 SDK 合同）通过，仅未选定实际发行载荷的测试跳过；随后针对实际构建的 0.2.39 载荷 smoke 1 项通过，覆盖 bootstrap、非默认 CODEX_HOME、失败恢复/同版本重试和卸载重装。最终 tag 构建仍须复测同一发行载荷，CI 上传前同样执行隔离载荷门禁。新机、跨登录和未触达远端服务保持未验证。
+
+逐项交付复核继续补齐 M04/M05/M08/M30/M39：默认 HOME 意图可移植、XDG 空值回默认且拒绝相对值、pacman official/foreign 身份核对、catalog 动作有限集合及 state 的不可执行声明、移除未消费 branch。Syu 后清除候选缓存，并刷新有归属的取消选择 official 包供后续安全撤回，不刷新 AUR。卸载补同一平台门禁。新增反例和完整回归进入 0.2.40。
+
+v0.2.39 的 CI 在真实载荷门禁失败，未发布；Ubuntu 的 sudo 系统别名指向隔离 `/etc` 外的目标，测试未复制其别名链。夹具现仅重建 curl/sudo 的必要 `/etc` 别名，替身绑定到最终命令目标，继续隔离用户目录、网络与服务。旧 tag 保留，不覆盖发行物；以 v0.2.40 重新完整验证和发布。
