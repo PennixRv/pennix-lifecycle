@@ -512,6 +512,63 @@
       "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
       "package": {"source": "official", "name": "uv"}
     },
+    "markitdown": {
+      "delivery": "package", "lock_source": "pypi:markitdown",
+      "source": "Microsoft MarkItDown and fixed document libraries through uv tool", "owner": "uv", "scope": "global",
+      "probe": "markitdown", "version_args": ["--version"],
+      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed"},
+      "package": {
+        "source": "uv", "name": "markitdown", "extras": ["pdf", "docx", "pptx", "xlsx"],
+        "with": ["pypdf==7.0.0", "pdfplumber==0.11.10", "pdf2image==1.17.0", "pytesseract==0.3.13", "Pillow==13.0.0", "openpyxl==3.1.5", "pandas==3.1.1", "defusedxml==0.7.1", "lxml==6.1.3"],
+        "imports": {"markitdown": "markitdown", "pypdf": "pypdf", "pdfplumber": "pdfplumber", "pdf2image": "pdf2image", "pytesseract": "pytesseract", "PIL": "Pillow", "openpyxl": "openpyxl", "pandas": "pandas", "defusedxml": "defusedxml", "lxml.etree": "lxml"}
+      }
+    },
+    "pandoc": {
+      "delivery": "package", "lock_source": "arch:extra/pandoc-cli",
+      "source": "Arch official pandoc-cli package", "owner": "pacman", "scope": "global",
+      "probe": "pandoc", "version_args": ["--version"],
+      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
+      "package": {"source": "official", "name": "pandoc-cli", "external_satisfies": true}
+    },
+    "libreoffice": {
+      "delivery": "package", "lock_source": "arch:extra/libreoffice-fresh",
+      "source": "Arch official libreoffice-fresh package", "owner": "pacman", "scope": "global",
+      "probe": "soffice", "version_args": ["--version"],
+      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
+      "package": {"source": "official", "name": "libreoffice-fresh", "external_satisfies": true}
+    },
+    "poppler": {
+      "delivery": "package", "lock_source": "arch:extra/poppler",
+      "source": "Arch official poppler package", "owner": "pacman", "scope": "global",
+      "probe": "pdftotext", "version_args": ["-v"],
+      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
+      "package": {"source": "official", "name": "poppler", "external_satisfies": true}
+    },
+    "tesseract": {
+      "delivery": "package", "lock_source": "arch:extra/tesseract",
+      "source": "Arch official tesseract package", "owner": "pacman", "scope": "global",
+      "probe": "tesseract", "version_args": ["--version"],
+      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
+      "package": {"source": "official", "name": "tesseract", "external_satisfies": true}
+    },
+    "tesseract-eng": {
+      "delivery": "package", "lock_source": "arch:extra/tesseract-data-eng",
+      "source": "Arch official tesseract-data-eng package", "owner": "pacman", "scope": "global",
+      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
+      "package": {"source": "official", "name": "tesseract-data-eng", "identity_only": true, "external_satisfies": true}
+    },
+    "tesseract-chi-sim": {
+      "delivery": "package", "lock_source": "arch:extra/tesseract-data-chi_sim",
+      "source": "Arch official tesseract-data-chi_sim package", "owner": "pacman", "scope": "global",
+      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
+      "package": {"source": "official", "name": "tesseract-data-chi_sim", "identity_only": true, "external_satisfies": true}
+    },
+    "noto-fonts-cjk": {
+      "delivery": "package", "lock_source": "arch:extra/noto-fonts-cjk",
+      "source": "Arch official noto-fonts-cjk package", "owner": "pacman", "scope": "global",
+      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
+      "package": {"source": "official", "name": "noto-fonts-cjk", "identity_only": true, "external_satisfies": true}
+    },
     "tavily-cli": {
       "delivery": "package", "lock_source": "pypi:tavily-cli",
       "source": "official PyPI tavily-cli through uv tool", "owner": "tavily-cli", "scope": "global",
@@ -618,7 +675,7 @@
         "directory": "pennix-skills",
         "source": {
           "repo": "PennixRv/pennix-skills",
-          "ref": "f1cd1f5a5adfcb687330bb0b04e5280eea2c911b",
+          "ref": "1fab5b4ebaf20ec0af8627ad7289631a7f469acd",
           "manifest": "collection.json"
         }
       }

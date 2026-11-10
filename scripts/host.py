@@ -106,11 +106,25 @@ def package_install_command(
     registry: str | None = None,
     prefix: str | None = None,
     allow_scripts: list[str] | None = None,
+    extras: list[str] | None = None,
+    requirements: list[str] | None = None,
 ) -> list[str]:
     if installer not in PACKAGE_MANAGERS or not PACKAGE_NAME.fullmatch(package):
         raise ValueError("invalid package installer or package name")
     if installer == "uv":
-        return ["uv", "tool", "install", "--force", package]
+        if (any(not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", item) for item in extras or [])
+                or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9][A-Za-z0-9.+_-]*", item)
+                       for item in requirements or [])):
+            raise ValueError("uv extras and additional requirements must be fixed names and versions")
+        requirement = package + (f"[{','.join(extras)}]" if extras else "")
+        # Extras precede the version for a named requirement, but follow a wheel path.
+        if extras and "==" in package:
+            name, version = package.split("==", 1)
+            requirement = f"{name}[{','.join(extras)}]=={version}"
+        command = ["uv", "tool", "install", "--force", requirement]
+        for item in requirements or []:
+            command += ["--with", item]
+        return command
     if installer == "npm":
         script_option = (
             f"--allow-scripts={','.join(allow_scripts)}"

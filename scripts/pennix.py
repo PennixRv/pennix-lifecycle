@@ -41,6 +41,7 @@ CATALOG = ROOT / "references" / "catalog.json"
 APPLY_ORDER = [
     "codex-cli", "trellis-cli", "pnpm", "context-mode", "codegraph-cli", "paseo-cli", "trellis-paseo-adapter",
     "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "uv", "tavily-cli",
+    "markitdown", "pandoc", "libreoffice", "poppler", "tesseract", "tesseract-eng", "tesseract-chi-sim", "noto-fonts-cjk",
     "tavily-hikari", "peon-ping", "codex-config", "codex-agents", "pennix-skills-extra",
     "pennix-skills",
 ]
@@ -48,7 +49,7 @@ DEPENDENCIES = {
     "tmux-config": {"tmux"}, "ponytail-plugin": {"codex-cli"},
     "codex-config": {"codex-cli"}, "codex-agents": {"codex-cli"},
     "context-mode": {"codex-cli"}, "tavily-hikari": {"tavily-cli", "pennix-skills"},
-    "tavily-cli": {"uv"},
+    "tavily-cli": {"uv"}, "markitdown": {"uv"},
     "trellis-paseo-adapter": {"trellis-cli", "paseo-cli"},
 }
 
@@ -357,7 +358,8 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
                 status["state"] = "adoption-required"
             if (component.get("delivery") == "package" and status["state"] == "match"
                     and status.get("ownership") != "lifecycle"):
-                action = "adopt" if config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y" else "blocked"
+                action = ("keep" if component.get("package", {}).get("external_satisfies") else
+                          "adopt" if config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y" else "blocked")
                 if action == "blocked":
                     status["detail"] = "已安装但非生命周期归属；需显式开启接管"
             else:
@@ -420,7 +422,9 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
                           detail="精确 Marketplace 来源、版本和干净完整提交匹配；等待专用接管确认")
         installed_state = package_state if component.get("native_config") else status["state"]
         if (component_id in selected and component.get("delivery") in {"package", "plugin", "client", "collection"}
-                and lock_target is None and installed_state != "missing"):
+                and lock_target is None and installed_state != "missing"
+                and not (component.get("package", {}).get("external_satisfies")
+                         and status.get("ownership") == "external" and status["state"] == "match")):
             status.update(state="lock-migration-required", detail="已有安装必须先由可信 owner receipt 初始化 components.lock.json")
             action = "blocked"
         if component_id not in selected:

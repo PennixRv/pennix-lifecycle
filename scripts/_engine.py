@@ -100,6 +100,28 @@ def load_catalog(path: Path) -> dict[str, Any]:
             source = contract["source"]
             if not isinstance(source, dict) or set(source) not in ({"repo", "manifest"}, {"repo", "ref", "manifest"}):
                 raise BootstrapError(f"collection source contract is invalid: {key}")
+        package = component.get("package", {})
+        if not isinstance(package, dict):
+            raise BootstrapError(f"catalog package is invalid: {key}")
+        for flag in ("identity_only", "external_satisfies"):
+            if flag in package and (package[flag] is not True or package.get("source") != "official"
+                                    or component.get("native_config")):
+                raise BootstrapError(f"catalog package policy is invalid: {key}")
+        if package.get("identity_only") and "probe" in component:
+            raise BootstrapError(f"identity-only package must not declare an executable: {key}")
+        if any(field in package for field in ("extras", "with", "imports")):
+            if (package.get("source") != "uv"
+                    or any(not isinstance(package.get(field, []), list) for field in ("extras", "with"))
+                    or not isinstance(package.get("imports", {}), dict)
+                    or any(not isinstance(k, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", k)
+                           or not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", v)
+                           for k, v in package.get("imports", {}).items())):
+                raise BootstrapError(f"catalog uv runtime is invalid: {key}")
+            try:
+                host.package_install_command("uv", package["name"], extras=package.get("extras"),
+                                             requirements=package.get("with"))
+            except (KeyError, TypeError, ValueError) as error:
+                raise BootstrapError(f"catalog uv requirements are invalid: {key}") from error
     return value
 
 
@@ -133,6 +155,8 @@ def _command(component: dict[str, Any]) -> str | None:
 
 
 def _version(component: dict[str, Any], command: str) -> str | None:
+    if component.get("package", {}).get("identity_only"):
+        return package_identity(component)["version"]
     try:
         result = subprocess.run(
             [command, *[str(item) for item in component.get("version_args", [])]],
@@ -562,6 +586,16 @@ def probe_component(component: dict[str, Any], codex_home: Path | None = None, d
         return _plugin_status(component, codex_home)
     if delivery == "state":
         return "unknown", None
+    package = component.get("package", {})
+    if package.get("identity_only"):
+        if package_absent(component):
+            return "missing", None
+        try:
+            observed = package_identity(component)["version"]
+        except BootstrapError as error:
+            return "blocked", str(error)
+        expected = _target_version(component)
+        return ("match" if expected is None or observed == expected else "outdated"), observed
     command = _command(component)
     if command is None:
         if isinstance(component.get("package"), dict) and component["package"].get("source") == "npm":
@@ -572,12 +606,17 @@ def probe_component(component: dict[str, Any], codex_home: Path | None = None, d
     observed = _version(component, command)
     if observed is None:
         return "blocked", command
-    package = component.get("package")
+    package = component.get("package") or {}
     if isinstance(package, dict) and package.get("source") in {"official", "aur"}:
         try:
             observed = package_identity(component)["version"]
         except BootstrapError:
             return "blocked", command
+    if package.get("source") == "uv":
+        try:
+            observed = package_identity(component)["version"]
+        except BootstrapError as error:
+            return "blocked", str(error)
     expected = _target_version(component)
     state = "match" if expected is None or observed == expected else "outdated"
     return state, observed
@@ -587,7 +626,7 @@ def package_identity(component: dict[str, Any]) -> dict[str, str]:
     """Verify the package manager and the executable before claiming ownership."""
     package = component["package"]
     command = _command(component)
-    if not command:
+    if not command and not package.get("identity_only"):
         raise BootstrapError("package executable is missing")
     if package["source"] == "uv":
         directory = subprocess.run(["uv", "tool", "dir"], capture_output=True, text=True, timeout=15, check=False)
@@ -603,7 +642,30 @@ def package_identity(component: dict[str, Any]) -> dict[str, str]:
             version = _version(component, command)
             if version is None:
                 raise ValueError("uv version unavailable")
-        except (OSError, ValueError, KeyError, TypeError) as error:
+            requirements = record["tool"].get("requirements", [])
+            if package.get("extras"):
+                primary = next(item for item in requirements if item.get("name") == package["name"])
+                if set(primary.get("extras", [])) != set(package["extras"]):
+                    raise ValueError("uv extras differ from catalog")
+            for requirement in package.get("with", []):
+                name, pinned = requirement.split("==")
+                normalize = lambda value: re.sub(r"[-_.]+", "-", value).lower()
+                if not any(normalize(item.get("name", "")) == normalize(name)
+                           and item.get("specifier") == "==" + pinned for item in requirements):
+                    raise ValueError("uv additional requirements differ from catalog")
+            if package.get("imports"):
+                pins = dict(item.split("==") for item in package.get("with", []))
+                check = subprocess.run(
+                    [str(tool_root / "bin/python"), "-I", "-c",
+                     "import importlib,importlib.metadata as m,json,sys; "
+                     "[importlib.import_module(k) for k in json.loads(sys.argv[1])]; "
+                     "assert all(m.version(k)==v for k,v in json.loads(sys.argv[2]).items())",
+                     json.dumps(package["imports"]), json.dumps(pins)],
+                    capture_output=True, text=True, timeout=30, check=False,
+                )
+                if check.returncode:
+                    raise ValueError("uv runtime imports or pinned versions differ")
+        except (OSError, ValueError, KeyError, TypeError, StopIteration, subprocess.TimeoutExpired) as error:
             raise BootstrapError("cannot verify uv tool owner") from error
         return {"manager": "uv", "name": package["name"], "version": version, "command": str(Path(command).resolve())}
     if package["source"] == "npm":
@@ -625,15 +687,20 @@ def package_identity(component: dict[str, Any]) -> dict[str, str]:
             raise BootstrapError(f"cannot verify npm package owner: {package['name']}") from error
         return {"manager": "npm", "name": metadata["name"], "version": actual, "command": str(Path(command).resolve())}
     result = subprocess.run(["pacman", "-Q", package["name"]], capture_output=True, text=True, timeout=30, check=False)
-    owner = subprocess.run(["pacman", "-Qoq", str(Path(command).resolve())], capture_output=True, text=True, timeout=30, check=False)
     parts = result.stdout.strip().split()
-    if result.returncode or owner.returncode or len(parts) != 2 or parts[0] != package["name"] or owner.stdout.strip() != package["name"]:
+    if result.returncode or len(parts) != 2 or parts[0] != package["name"]:
+        raise BootstrapError(f"cannot verify pacman package identity: {package['name']}")
+    if command:
+        owner = subprocess.run(["pacman", "-Qoq", str(Path(command).resolve())], capture_output=True, text=True, timeout=30, check=False)
+        if owner.returncode or owner.stdout.strip() != package["name"]:
+            raise BootstrapError(f"cannot verify pacman executable owner: {package['name']}")
+    elif not package.get("identity_only"):
         raise BootstrapError(f"cannot verify pacman executable owner: {package['name']}")
     origin = subprocess.run(["pacman", "-Qn" if package["source"] == "official" else "-Qm", package["name"]],
                             capture_output=True, text=True, timeout=30, check=False)
     if origin.returncode:
         raise BootstrapError(f"pacman package origin differs from catalog: {package['name']}")
-    return {"manager": "pacman", "name": parts[0], "version": parts[1], "command": str(Path(command).resolve())}
+    return {"manager": "pacman", "name": parts[0], "version": parts[1], "command": str(Path(command).resolve()) if command else ""}
 
 
 @lru_cache(maxsize=32)
@@ -696,7 +763,7 @@ def package_owned(
     receipt = _package_receipt(component_id, component)
     if receipt is None:
         return False
-    if _command(component) is None:
+    if _command(component) is None and not component.get("package", {}).get("identity_only"):
         return False
     identity = package_identity(component)
     if observed is None:
@@ -1030,7 +1097,8 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
         install_command = (["sudo", "pacman", "-U", "--needed", "--noconfirm", str(package_file)]
                            if package_file is not None else
                            host.package_install_command(installer, install_name, metadata.get("registry"),
-                                                        metadata.get("prefix"), metadata.get("allow_scripts")))
+                                                        metadata.get("prefix"), metadata.get("allow_scripts"),
+                                                        metadata.get("extras"), metadata.get("with")))
         result = subprocess.run(install_command, check=False)
     if result.returncode:
         raise BootstrapError(f"package install failed: {key}")

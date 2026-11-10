@@ -118,6 +118,51 @@ config PENNIX_COMPONENT_TAVILY_CLI
 	default n
 	depends on PENNIX_COMPONENT_UV
 
+menu "文档本地阅读（Office 与 PDF）"
+
+config PENNIX_DOCUMENT_READING
+	bool "完整本地阅读运行时"
+	default n
+	depends on PENNIX_COMPONENT_UV
+	help
+		选择 Python 文本/表格读取、中英文 OCR、Office 渲染和旧格式转换。
+		系统包首次安装需要同次确认的完整系统升级；既有外部依赖只核验并保留归属。
+
+config PENNIX_COMPONENT_MARKITDOWN
+	bool "MarkItDown 与文档 Python 库（独立 uv 环境）"
+	default y if PENNIX_DOCUMENT_READING
+	depends on PENNIX_COMPONENT_UV
+
+config PENNIX_COMPONENT_PANDOC
+	bool "Pandoc（Word 文本与表格）"
+	default y if PENNIX_DOCUMENT_READING
+
+config PENNIX_COMPONENT_LIBREOFFICE
+	bool "LibreOffice（Office 页面与旧格式转换）"
+	default y if PENNIX_DOCUMENT_READING
+
+config PENNIX_COMPONENT_POPPLER
+	bool "Poppler（PDF 文本与页面渲染）"
+	default y if PENNIX_DOCUMENT_READING
+
+config PENNIX_COMPONENT_TESSERACT
+	bool "Tesseract（本地 OCR）"
+	default y if PENNIX_DOCUMENT_READING
+
+config PENNIX_COMPONENT_TESSERACT_ENG
+	bool "Tesseract 英文语言数据"
+	default y if PENNIX_DOCUMENT_READING
+
+config PENNIX_COMPONENT_TESSERACT_CHI_SIM
+	bool "Tesseract 简体中文语言数据"
+	default y if PENNIX_DOCUMENT_READING
+
+config PENNIX_COMPONENT_NOTO_FONTS_CJK
+	bool "Noto CJK 字体（中文渲染）"
+	default y if PENNIX_DOCUMENT_READING
+
+endmenu
+
 config PENNIX_COMPONENT_PEON_PING
 	bool "OpenPeon / peon-ping 本地运行文件"
 	default n

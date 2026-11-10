@@ -136,12 +136,12 @@ class ConfigModelTests(unittest.TestCase):
         self.assertNotIn("installer", component["client"])
         self.assertIn("NAS service is an external dependency", component["source"])
 
-    def test_catalog_has_seventeen_dynamic_sources_and_unpinned_static_templates(self) -> None:
+    def test_catalog_has_unique_dynamic_sources_and_unpinned_static_templates(self) -> None:
         catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
         dynamic = {key: value for key, value in catalog["components"].items()
                    if value["delivery"] in {"package", "plugin", "client", "collection"}}
-        self.assertEqual(len(dynamic), 17)
-        self.assertEqual(len({value["lock_source"] for value in dynamic.values()}), 17)
+        self.assertEqual(len(dynamic), 25)
+        self.assertEqual(len({value["lock_source"] for value in dynamic.values()}), len(dynamic))
         for component in catalog["components"].values():
             if component.get("delivery") == "static" and "template" in component:
                 self.assertNotIn("revision", component["template"])

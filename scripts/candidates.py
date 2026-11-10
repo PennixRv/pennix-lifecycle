@@ -122,7 +122,9 @@ def resolve_pypi(component: dict, workspace: Path, target: dict | None = None) -
     if sha256 != selected["digests"]["sha256"]:
         raise CandidateError(f"PyPI candidate digest mismatch: {name}")
     return _check_target({"source": component["lock_source"], "version": version, "sha256": sha256,
-                          "path": str(artifact), "impact": f"uv tool {name}=={version}"}, target)
+                          "path": str(artifact), "impact": f"uv tool {name}=={version}"
+                          + (f" extras={','.join(component['package']['extras'])}" if component['package'].get('extras') else "")
+                          + (f" with={','.join(component['package']['with'])}" if component['package'].get('with') else "")}, target)
 
 
 def _gh_release(repo: str, tag: str | None) -> dict:
@@ -413,6 +415,14 @@ RESOLVERS = {
     "tavily-hikari": resolve_client,
     "uv": resolve_arch,
     "tavily-cli": resolve_pypi,
+    "markitdown": resolve_pypi,
+    "pandoc": resolve_arch,
+    "libreoffice": resolve_arch,
+    "poppler": resolve_arch,
+    "tesseract": resolve_arch,
+    "tesseract-eng": resolve_arch,
+    "tesseract-chi-sim": resolve_arch,
+    "noto-fonts-cjk": resolve_arch,
     "peon-ping": resolve_client,
     "pennix-skills": resolve_collection,
     "pennix-skills-extra": resolve_collection,
