@@ -6,4 +6,4 @@
 
 实施涉及集合 owner、CLI 的 plan/status/repair/recover、既有测试、用户规则模板和发布 catalog。按领域测试、完整 unittest、发行构建及正式发布链验证；真实部署、行为验收和根 gitlink 由根任务协调。失败保留可信恢复材料和 journal，不手改安装树。正常停止于本组件正式发行、原生安装及根验收闭环。
 
-2026-11-10：完整单元 199 项通过（2 项需显式运行环境而跳过），其中原生 repair journal → recover、复制中断、目标冲突、来源升级阻断、取消选择仍保留均已覆盖。Context Mode schema 2 → 3 迁移、回执失败回滚及未知共享文件拒绝通过；Skills 来源固定为 `cdf12907706ca615f4f4c184cd9d0db3490a7682`。发行版本 `0.2.46`；Context Mode 沿既有 npm beta 来源和锁文件固定机制更新到 `2.1.5-pennix.2`，不引入第二份版本白名单。正式 payload 门禁、实际部署和组合证据由根任务补录。
+2026-11-10：完整单元 199 项通过（2 项需显式运行环境而跳过），其中原生 repair journal → recover、复制中断、目标冲突、来源升级阻断、取消选择仍保留均已覆盖。Context Mode schema 2 → 3 迁移、回执失败回滚及未知共享文件拒绝通过；Skills 来源固定为 `e8b5982d4b3ab99e37dee83b74fad9c3ed514394`。发行版本 `0.2.46`；Context Mode 沿既有 npm beta 来源和锁文件固定机制更新到 `2.1.5-pennix.2`，不引入第二份版本白名单。实际 payload bootstrap、中断重试、恢复及重装已通过；正式部署和组合证据由根任务补录。
