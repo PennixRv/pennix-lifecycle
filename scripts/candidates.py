@@ -22,8 +22,9 @@ class CandidateError(ValueError):
 SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
-def _filename(value: object) -> str:
-    if (not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", value)
+def _filename(value: object, *, arch_package: bool = False) -> str:
+    pattern = r"[A-Za-z0-9][A-Za-z0-9._+:-]*" if arch_package else r"[A-Za-z0-9][A-Za-z0-9._+-]*"
+    if (not isinstance(value, str) or not re.fullmatch(pattern, value)
             or value in {".", ".."}):
         raise CandidateError("candidate filename is invalid")
     return value
@@ -281,7 +282,7 @@ def _arch_pkginfo(path: Path) -> tuple[dict, list[str]]:
 
 def _verify_arch_package(component: dict, workspace: Path, filename: str, version: str,
                          url: str, target: dict | None) -> dict:
-    filename = _filename(filename)
+    filename = _filename(filename, arch_package=True)
     path = workspace / filename
     signature = workspace / f"{filename}.sig"
     owned_files.download(url, path)
@@ -321,8 +322,7 @@ def resolve_arch(component: dict, workspace: Path, target: dict | None = None) -
     architecture = component["package"].get("architecture", "x86_64")
     if target:
         version = target.get("version", "")
-        plain = version.split(":", 1)[-1]
-        filename = f"{name}-{plain}-{architecture}.pkg.tar.zst"
+        filename = f"{name}-{version}-{architecture}.pkg.tar.zst"
         url = f"https://archive.archlinux.org/packages/{name[0]}/{name}/{filename}"
         return _verify_arch_package(component, workspace, filename, version, url, target)
     metadata = _json(f"https://archlinux.org/packages/{repo}/{architecture}/{name}/json/")

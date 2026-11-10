@@ -24,9 +24,13 @@ class CandidateTests(unittest.TestCase):
             self.assertEqual(query.call_args.args[0], "https://archlinux.org/packages/extra/any/example-data/json/")
             target = {"version": "2:1.0-2", "sha256": "a" * 64}
             candidates.resolve_arch(component, Path(directory), target)
-            self.assertEqual(verify.call_args.args[2], "example-data-1.0-2-any.pkg.tar.zst")
+            self.assertEqual(verify.call_args.args[2], "example-data-2:1.0-2-any.pkg.tar.zst")
             self.assertEqual(verify.call_args.args[3], "2:1.0-2")
-            self.assertIn("/example-data/example-data-1.0-2-any.pkg.tar.zst", verify.call_args.args[4])
+            self.assertIn("/example-data/example-data-2:1.0-2-any.pkg.tar.zst", verify.call_args.args[4])
+            self.assertEqual(candidates._filename("example-data-2:1.0-2-any.pkg.tar.zst", arch_package=True),
+                             "example-data-2:1.0-2-any.pkg.tar.zst")
+            with self.assertRaises(candidates.CandidateError):
+                candidates._filename("../example-data-2:1.0-2-any.pkg.tar.zst", arch_package=True)
 
     def test_arch_dependency_exit_127_and_native_resolution_preview(self):
         component = {"lock_source": "arch:extra/example", "package": {"name": "example"}}
