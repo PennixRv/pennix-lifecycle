@@ -555,19 +555,19 @@
       "delivery": "package", "lock_source": "arch:extra/tesseract-data-eng",
       "source": "Arch official tesseract-data-eng package", "owner": "pacman", "scope": "global",
       "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
-      "package": {"source": "official", "name": "tesseract-data-eng", "identity_only": true, "external_satisfies": true}
+      "package": {"source": "official", "name": "tesseract-data-eng", "architecture": "any", "identity_only": true, "external_satisfies": true}
     },
     "tesseract-chi-sim": {
       "delivery": "package", "lock_source": "arch:extra/tesseract-data-chi_sim",
       "source": "Arch official tesseract-data-chi_sim package", "owner": "pacman", "scope": "global",
       "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
-      "package": {"source": "official", "name": "tesseract-data-chi_sim", "identity_only": true, "external_satisfies": true}
+      "package": {"source": "official", "name": "tesseract-data-chi_sim", "architecture": "any", "identity_only": true, "external_satisfies": true}
     },
     "noto-fonts-cjk": {
       "delivery": "package", "lock_source": "arch:extra/noto-fonts-cjk",
       "source": "Arch official noto-fonts-cjk package", "owner": "pacman", "scope": "global",
       "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
-      "package": {"source": "official", "name": "noto-fonts-cjk", "identity_only": true, "external_satisfies": true, "resolve_dependencies": true}
+      "package": {"source": "official", "name": "noto-fonts-cjk", "architecture": "any", "identity_only": true, "external_satisfies": true, "resolve_dependencies": true}
     },
     "tavily-cli": {
       "delivery": "package", "lock_source": "pypi:tavily-cli",

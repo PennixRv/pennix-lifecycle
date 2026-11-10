@@ -15,6 +15,19 @@ import candidates
 
 
 class CandidateTests(unittest.TestCase):
+    def test_architecture_independent_candidate_and_locked_recovery_use_any(self):
+        component = {"lock_source": "arch:extra/example-data", "package": {"name": "example-data", "architecture": "any"}}
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(candidates, "_json", return_value={"pkgver": "1.0", "pkgrel": "2", "filename": "example-data-1.0-2-any.pkg.tar.zst"}) as query, \
+             patch.object(candidates, "_verify_arch_package", return_value={}) as verify:
+            candidates.resolve_arch(component, Path(directory))
+            self.assertEqual(query.call_args.args[0], "https://archlinux.org/packages/extra/any/example-data/json/")
+            target = {"version": "2:1.0-2", "sha256": "a" * 64}
+            candidates.resolve_arch(component, Path(directory), target)
+            self.assertEqual(verify.call_args.args[2], "example-data-1.0-2-any.pkg.tar.zst")
+            self.assertEqual(verify.call_args.args[3], "2:1.0-2")
+            self.assertIn("/example-data/example-data-1.0-2-any.pkg.tar.zst", verify.call_args.args[4])
+
     def test_arch_dependency_exit_127_and_native_resolution_preview(self):
         component = {"lock_source": "arch:extra/example", "package": {"name": "example"}}
         with tempfile.TemporaryDirectory() as directory:

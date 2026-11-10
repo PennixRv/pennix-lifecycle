@@ -318,13 +318,14 @@ def resolve_arch(component: dict, workspace: Path, target: dict | None = None) -
         raise CandidateError("Arch candidate resolver currently supports x86_64 only")
     name = component["package"]["name"]
     repo = component["lock_source"].split(":", 1)[1].split("/", 1)[0]
+    architecture = component["package"].get("architecture", "x86_64")
     if target:
         version = target.get("version", "")
         plain = version.split(":", 1)[-1]
-        filename = f"{name}-{plain}-x86_64.pkg.tar.zst"
+        filename = f"{name}-{plain}-{architecture}.pkg.tar.zst"
         url = f"https://archive.archlinux.org/packages/{name[0]}/{name}/{filename}"
         return _verify_arch_package(component, workspace, filename, version, url, target)
-    metadata = _json(f"https://archlinux.org/packages/{repo}/x86_64/{name}/json/")
+    metadata = _json(f"https://archlinux.org/packages/{repo}/{architecture}/{name}/json/")
     pkgver, pkgrel, filename = metadata.get("pkgver"), metadata.get("pkgrel"), metadata.get("filename")
     if not all(isinstance(value, str) and value for value in (pkgver, pkgrel, filename)):
         raise CandidateError(f"official package metadata unavailable: {name}")

@@ -109,6 +109,9 @@ def load_catalog(path: Path) -> dict[str, Any]:
                 raise BootstrapError(f"catalog package policy is invalid: {key}")
         if package.get("identity_only") and "probe" in component:
             raise BootstrapError(f"identity-only package must not declare an executable: {key}")
+        if "architecture" in package and (package.get("source") != "official"
+                                          or package["architecture"] not in {"any", "x86_64"}):
+            raise BootstrapError(f"official package architecture is invalid: {key}")
         if any(field in package for field in ("extras", "with", "imports")):
             if (package.get("source") != "uv"
                     or any(not isinstance(package.get(field, []), list) for field in ("extras", "with"))
