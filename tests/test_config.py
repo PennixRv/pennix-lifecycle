@@ -126,7 +126,7 @@ class ConfigModelTests(unittest.TestCase):
         self.assertEqual(target["component"], "tavily-hikari")
         self.assertEqual(
             target["command"],
-            ["python3", "$CODEX_HOME/skills/pennix-skills/pennix-tavily-search/scripts/connection.py"],
+            ["python3", "$HOME/.agents/skills/pennix-skills/pennix-tavily-search/scripts/connection.py"],
         )
         self.assertEqual(component["delivery"], "client")
         self.assertEqual(component["lock_source"], "git:IvanLi-CN/tavily-hikari:scripts/tvly-hikari")

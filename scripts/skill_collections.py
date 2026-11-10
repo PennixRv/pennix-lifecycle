@@ -45,9 +45,126 @@ def destination(component: dict, codex_home: Path) -> Path:
     name = component["collection_contract"]["directory"]
     if not isinstance(name, str) or not NAME.fullmatch(name):
         raise CollectionError("集合目录名称无效")
-    path = codex_home / "skills" / name
+    path = Path.home() / ".agents/skills" / name
     safe_path(path)
     return path
+
+
+def legacy_destination(component: dict, codex_home: Path) -> Path:
+    path = codex_home / "skills" / destination(component, codex_home).name
+    safe_path(path)
+    return path
+
+
+def _migration_dir(component: dict, codex_home: Path) -> Path:
+    return files.shared_root() / "collection-migrations" / destination(component, codex_home).name
+
+
+def _migration_receipt(component: dict, codex_home: Path) -> dict | None:
+    workspace = _migration_dir(component, codex_home)
+    saved = files.read_json(workspace / "migration.json")
+    if saved is None:
+        return None
+    old = legacy_destination(component, codex_home)
+    target = destination(component, codex_home)
+    if not isinstance(saved, dict) or set(saved) != {"schema", "old", "target", "receipt"} or saved["schema"] != 1 or saved["old"] != str(old) or saved["target"] != str(target):
+        raise CollectionError("集合迁移恢复目标不符")
+    record = saved["receipt"]
+    if not isinstance(record, dict) or record.get("destination") != old.name or record.get("target", str(old)) != str(old):
+        raise CollectionError("集合迁移旧 receipt 身份不符")
+    backup = workspace / target.name
+    # Validate the saved receipt through the same trust boundary as an installation.
+    receipt = read_receipt(backup)
+    if receipt != {**record, "destination": backup.name, "target": str(backup)} or digest(backup) != record["digest"]:
+        raise CollectionError("集合迁移恢复资产不符")
+    validate_members(backup, record["manifest"])
+    return record
+
+
+def _available_path(component: dict, codex_home: Path) -> Path:
+    target = destination(component, codex_home)
+    legacy = legacy_destination(component, codex_home)
+    if legacy.exists() or receipt_path(legacy).exists():
+        if target.exists() or receipt_path(target).exists():
+            raise CollectionError("共享集合与旧配置根副本冲突；先核验原生迁移状态")
+        return legacy
+    return target
+
+
+def migrate(component: dict, codex_home: Path) -> str:
+    """Replay a verified same-commit move; private evidence survives process interruption."""
+    old = legacy_destination(component, codex_home)
+    target = destination(component, codex_home)
+    workspace = _migration_dir(component, codex_home)
+    record = _migration_receipt(component, codex_home)
+    if record is None:
+        if target.exists() or receipt_path(target).exists():
+            raise CollectionError("共享集合目标已存在，拒绝迁移覆盖")
+        record = _verified(old)
+        if record["source"] != source_identity(component):
+            raise CollectionError("先 repair 迁移锁定提交，再 update 升级来源")
+        files.ensure_parent(workspace / "migration.json")
+        backup = workspace / target.name
+        if backup.exists():
+            raise CollectionError(f"存在未确认迁移暂存资产: {workspace}")
+        shutil.copytree(old, backup)
+        if digest(backup) != record["digest"] or _verified(old) != record:
+            raise CollectionError("集合在迁移备份期间改变")
+        files.replace(receipt_path(backup), files.json_bytes({**record, "destination": backup.name, "target": str(backup)}), None)
+        files.replace(workspace / "migration.json", files.json_bytes({"schema": 1, "old": str(old), "target": str(target), "receipt": record}), None)
+    if record["source"] != source_identity(component):
+        raise CollectionError("恢复必须使用迁移原锁定提交")
+    backup = workspace / target.name
+    after = {**record, "target": str(target)}
+    before_receipt = files.read(receipt_path(old), private=True)
+    if before_receipt is not None and read_receipt(old) != record:
+        raise CollectionError("迁移旧 receipt 发生外部修改")
+    new_raw = files.read(receipt_path(target), private=True)
+    if new_raw is not None and read_receipt(target) != after:
+        raise CollectionError("迁移目标 receipt 冲突")
+    old_links = links(record["manifest"], old)
+    new_links = links(record["manifest"], target)
+    for link in old_links:
+        if _link_value(link) not in {None, old_links[link], new_links[link]}:
+            raise CollectionError("迁移命令归属发生外部修改")
+    # A crash may leave a partial tree. Only exact subsets of the private snapshot are replayable.
+    for tree in (old, target):
+        safe_path(tree)
+        if tree.exists():
+            for entry in tree.rglob("*"):
+                safe_path(entry)
+                expected = backup / entry.relative_to(tree)
+                if entry.is_dir():
+                    if not expected.is_dir():
+                        raise CollectionError("迁移树中出现未知目录")
+                elif not expected.is_file() or files.read(entry) != files.read(expected) or entry.stat().st_mode & 0o111 != expected.stat().st_mode & 0o111:
+                    raise CollectionError("迁移树内容发生外部修改")
+    # Copy/delete works across filesystems; the journal and private snapshot guard the intermediate state.
+    if old.exists():
+        for entry in sorted(old.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+            safe_path(entry)
+            if entry.is_dir():
+                entry.rmdir()
+            else:
+                if files.read(entry) != files.read(backup / entry.relative_to(old)):
+                    raise CollectionError("退役期间旧集合发生外部修改")
+                entry.unlink()
+        old.rmdir()
+    files.replace(receipt_path(old), None, before_receipt)
+    shutil.copytree(backup, target, dirs_exist_ok=True)
+    if digest(target) != record["digest"]:
+        raise CollectionError("迁移目标摘要不符")
+    files.replace(receipt_path(target), files.json_bytes(after), new_raw)
+    for link, want in new_links.items():
+        before = _link_value(link)
+        if before != want:
+            if before is not None:
+                _set_link(link, None, before)
+            _set_link(link, want, None)
+    if _verified(target) != after:
+        raise CollectionError("迁移后核验失败")
+    shutil.rmtree(workspace)
+    return "changed; migrated locked collection to shared user root"
 
 
 def source_identity(component: dict) -> dict:
@@ -176,7 +293,9 @@ def _verified(path: Path) -> dict:
 
 def inspect(component: dict, codex_home: Path) -> tuple[str, str]:
     try:
-        path = destination(component, codex_home)
+        if _migration_receipt(component, codex_home) is not None:
+            return "migration-required", "集合迁移中断；从原 repair 或 recover 继续"
+        path = _available_path(component, codex_home)
         if not path.exists():
             return ("blocked", "孤立集合 receipt") if receipt_path(path).exists() else ("missing", str(path))
         if not component.get("_lock_target") and not component.get("_candidate_target") and path.exists():
@@ -187,21 +306,25 @@ def inspect(component: dict, codex_home: Path) -> tuple[str, str]:
         value = _verified(path)
         if any(value["source"][key] != source[key] for key in ("repo", "manifest")):
             return "blocked", "集合来源归属不一致"
+        if path != destination(component, codex_home):
+            return "migration-required", f"旧集合 {path}；repair 保持锁定提交迁移到 {destination(component, codex_home)}"
         return ("match", str(path)) if value["source"] == source else ("upgrade-required", "固定来源提交已更新")
     except (CollectionError, OSError, ValueError, KeyError, TypeError) as error:
         return "drifted", str(error)
 
 
 def owned(component: dict, codex_home: Path) -> bool:
-    return inspect(component, codex_home)[0] in {"match", "upgrade-required"}
+    return inspect(component, codex_home)[0] in {"match", "upgrade-required", "migration-required"}
 
 
 def receipt_owned(component: dict, codex_home: Path) -> str:
     """Check Lifecycle ownership without requiring the current catalog source."""
-    path = destination(component, codex_home)
-    if not receipt_path(path).exists():
-        return "missing"
     try:
+        if _migration_receipt(component, codex_home) is not None:
+            return "owned"
+        path = _available_path(component, codex_home)
+        if not receipt_path(path).exists():
+            return "missing"
         record = read_receipt(path)
         if not path.exists() and record.get("target") == str(path):
             for link, target in links(record["manifest"], path).items():
@@ -215,7 +338,10 @@ def receipt_owned(component: dict, codex_home: Path) -> str:
 
 
 def lock_migration(component: dict, codex_home: Path) -> dict | None:
-    path = destination(component, codex_home)
+    saved = _migration_receipt(component, codex_home)
+    if saved is not None:
+        return {"source": component["lock_source"], "ref": saved["source"]["ref"]}
+    path = _available_path(component, codex_home)
     if not path.exists():
         return None
     receipt = _verified(path)
@@ -259,6 +385,13 @@ def _stage(component: dict, workspace: Path, candidate: dict | None = None, *, e
 
 
 def operate(component: dict, codex_home: Path, operation: str, *, candidate: dict | None = None) -> str:
+    legacy = legacy_destination(component, codex_home)
+    if operation == "uninstall" and legacy.exists() and files.read(receipt_path(legacy)) is None:
+        return "preserved"
+    if _migration_receipt(component, codex_home) is not None or legacy_destination(component, codex_home).exists():
+        if operation != "upgrade":
+            raise CollectionError("旧集合须先通过 repair 迁移；共享卸载影响全部宿主配置")
+        return migrate(component, codex_home)
     path = destination(component, codex_home)
     files.ensure_parent(path)
     receipt = receipt_path(path)
@@ -286,7 +419,7 @@ def operate(component: dict, codex_home: Path, operation: str, *, candidate: dic
         return "no-op"
     old = old if operation == "uninstall" else (_verified(path) if path.exists() else None)
     old_raw = files.read(receipt, private=True)
-    workspace = Path(tempfile.mkdtemp(prefix=f".{path.name}.stage-", dir=path.parent))
+    workspace = Path(tempfile.mkdtemp(prefix=f".{path.name}.stage-", dir=path.parent.parent))
     recoverable = False
     try:
         staging, manifest = _stage(component, workspace, candidate) if operation != "uninstall" else (None, None)

@@ -6,7 +6,7 @@
       "select": "PENNIX_TARGET_SIYUAN",
       "owner": "pennix-siyuan-knowledge",
       "component": "pennix-skills",
-      "command": ["python3", "$CODEX_HOME/skills/pennix-skills/pennix-siyuan-knowledge/scripts/connection.py"],
+      "command": ["python3", "$HOME/.agents/skills/pennix-skills/pennix-siyuan-knowledge/scripts/connection.py"],
       "values": {
         "url": "PENNIX_SIYUAN_URL",
         "default_notebook": "PENNIX_SIYUAN_NOTEBOOK"
@@ -32,7 +32,7 @@
       "select": "PENNIX_TARGET_HIKARI",
       "owner": "pennix-tavily-search",
       "component": "tavily-hikari",
-      "command": ["python3", "$CODEX_HOME/skills/pennix-skills/pennix-tavily-search/scripts/connection.py"],
+      "command": ["python3", "$HOME/.agents/skills/pennix-skills/pennix-tavily-search/scripts/connection.py"],
       "functional_command": ["tvly-hikari", "search", "IANA example domain", "--max-results", "1", "--depth", "basic", "--json"],
       "values": {
         "base_url": "PENNIX_HIKARI_URL"
@@ -617,7 +617,7 @@
         "directory": "pennix-skills",
         "source": {
           "repo": "PennixRv/pennix-skills",
-          "ref": "d94b1341ba26d6010fd60a3f8f81f7b93c762dba",
+          "ref": "cdf12907706ca615f4f4c184cd9d0db3490a7682",
           "manifest": "collection.json"
         }
       }

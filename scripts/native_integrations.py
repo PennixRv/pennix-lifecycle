@@ -103,7 +103,7 @@ def _desired(key: str, codex_home: Path, *, enabled: bool, receipt: dict | None 
     elif key == "codegraph":
         value["mcp"] = {"command": _command(key), "args": ["serve", "--mcp"]}
     else:
-        helper = codex_home / "skills/pennix-skills/pennix-siyuan-knowledge/scripts/mcp_headers.py"
+        helper = Path.home() / ".agents/skills/pennix-skills/pennix-siyuan-knowledge/scripts/mcp_headers.py"
         python = shutil.which("python3")
         if python is None or not helper.is_file():
             raise NativeIntegrationError("SiYuan 本机 helper 不可用")
@@ -143,6 +143,8 @@ def _write_receipt(key: str, desired: dict, *, previous: bytes | None, hooks_fil
     if key == "context-mode":
         record.update(schema=2, mcp=desired["mcp"], hooks=desired["hooks"], hooks_file_created=hooks_file_created,
                       trust=trust, skills=desired["skills"])
+        if "skill_root" in desired:
+            record.update(schema=3, skill_root=desired["skill_root"])
     else:
         record.update(mcp=desired["mcp"], baseline=baseline)
     owned_files.replace(_receipt_path(key), owned_files.json_bytes(record), previous)

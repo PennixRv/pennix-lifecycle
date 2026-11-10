@@ -204,6 +204,44 @@ class NativeIntegrationTests(unittest.TestCase):
         native_integrations.unconfigure("context-mode", self.codex)
         self.assertFalse((self.codex / "hooks.json").exists())
 
+    def shared_plan(self):
+        plan = copy.deepcopy(self.plan)
+        for step in plan["print"]["steps"][2:]:
+            step["file"] = str(self.home / ".agents/skills" / Path(step["file"]).parent.name / "SKILL.md")
+        (self.package / "plan.json").write_text(json.dumps(plan))
+
+    def test_shared_skill_migration_binds_receipt_and_preserves_other_host_consumers(self):
+        native_integrations.apply("context-mode", self.codex)
+        self.shared_plan()
+        self.assertEqual("update-required", native_integrations.inspect("context-mode", self.codex, enabled=True)["state"])
+        native_integrations.apply("context-mode", self.codex)
+        record = native_integrations._read_receipt("context-mode")
+        self.assertEqual(3, record["schema"])
+        self.assertEqual(str(self.home / ".agents/skills"), record["skill_root"])
+        for name in context_mode_integration.SKILLS:
+            self.assertFalse((self.codex / "skills" / name / "SKILL.md").exists())
+            self.assertTrue((self.home / ".agents/skills" / name / "SKILL.md").exists())
+        self.assertEqual("current", native_integrations.inspect("context-mode", self.codex, enabled=True)["state"])
+        native_integrations.unconfigure("context-mode", self.codex)
+        for name in context_mode_integration.SKILLS:
+            self.assertTrue((self.home / ".agents/skills" / name / "SKILL.md").exists())
+
+    def test_shared_skill_migration_failure_restores_old_and_preserves_unknown_target(self):
+        native_integrations.apply("context-mode", self.codex)
+        before = native_integrations._read_receipt("context-mode")
+        self.shared_plan()
+        with patch.object(native_integrations, "_write_receipt", side_effect=OSError("receipt failure")):
+            with self.assertRaisesRegex(native_integrations.NativeIntegrationError, "已撤回"):
+                native_integrations.apply("context-mode", self.codex)
+        self.assertEqual(before, native_integrations._read_receipt("context-mode"))
+        self.assertTrue(native_integrations._context_matches(self.codex, before))
+        target = self.home / ".agents/skills/ctx-doctor/SKILL.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("user modified shared Skill")
+        with self.assertRaises(native_integrations.NativeIntegrationError):
+            native_integrations.apply("context-mode", self.codex)
+        self.assertEqual("user modified shared Skill", target.read_text())
+
     def test_absent_native_config_does_not_require_installed_package(self):
         (self.package / "package.json").unlink()
         self.assertEqual(native_integrations.inspect("context-mode", self.codex, enabled=True)["state"], "absent")
@@ -472,7 +510,7 @@ class NativeIntegrationTests(unittest.TestCase):
 
     def test_siyuan_registers_helper_and_retracts_only_its_fields(self):
         import tomllib
-        helper = self.codex / "skills/pennix-skills/pennix-siyuan-knowledge/scripts/mcp_headers.py"
+        helper = self.home / ".agents/skills/pennix-skills/pennix-siyuan-knowledge/scripts/mcp_headers.py"
         helper.parent.mkdir(parents=True)
         helper.write_text('import json\nprint(json.dumps({"url": "https://notes.example.test/mcp"}))\n')
         path = self.codex / "config.toml"

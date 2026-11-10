@@ -364,6 +364,8 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
                 action = "keep" if status["state"] in {"match", "current", "present"} else "install"
             if status["state"] == "upgrade-required":
                 action = "blocked"
+            if status["state"] == "migration-required":
+                action = "repair"
             if status["state"] in {"drifted", "blocked"}:
                 action = "repair"
             if status["state"] == "adoption-required":
@@ -395,9 +397,9 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
                 elif component.get("delivery") == "collection":
                     ownership = skill_collections.receipt_owned(component, args.codex_home)
                     if ownership == "owned":
-                        action = "uninstall"
+                        action = "keep"
                         status.update(state="owned-legacy", ownership="lifecycle",
-                                      detail="当前 catalog source 已变化；仍由本 Lifecycle receipt 归属")
+                                      detail="共享用户集合保留；取消此配置选择不自动卸载。显式卸载影响全部宿主配置")
                     elif ownership.startswith("blocked:"):
                         action = "blocked"
                         status.update(detail=ownership, ownership="unknown")
@@ -948,7 +950,7 @@ def _preflight_pending_owners(args: argparse.Namespace, value: dict, catalog: di
                 elif spec["command"][0] in manifest["commands"]:
                     command = [str(staging / manifest["commands"][spec["command"][0]])]
                 else:
-                    command = [item.replace("$CODEX_HOME/skills/pennix-skills", str(staging)) for item in spec["command"]]
+                    command = [item.replace("$HOME/.agents/skills/pennix-skills", str(staging)) for item in spec["command"]]
                 payload = connection_owners._payload(name, spec, args.kconf,
                     Path(config_model.config_value(args.kconf, "PENNIX_SECRETS_FILE")), "configure")
                 connection_owners._run(command, "validate", payload, codex_home=args.codex_home)
@@ -1292,7 +1294,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
         missing_owned = (status["state"] == "missing" and component.get("delivery") == "package"
                          and owner_engine._package_receipt(args.component, component) is not None
                          and owner_engine.package_absent(component))
-        if status["state"] not in {"match", "outdated"} and not missing_owned:
+        if status["state"] not in {"match", "outdated", "migration-required"} and not missing_owned:
             raise CliError(f"组件状态不允许锁定目标修复: {status['state']} ({status.get('detail', '')})")
         if component.get("delivery") == "package" and status.get("ownership") != "lifecycle" and not missing_owned:
             raise CliError("repair 需要可信 Lifecycle package receipt")
@@ -1302,6 +1304,19 @@ def cmd_repair(args: argparse.Namespace) -> int:
             raise CliError("repair 需要可信 Lifecycle client receipt")
         if component.get("delivery") == "collection" and not owner_engine.collection_owned(component, args.codex_home):
             raise CliError("repair 需要可信 Lifecycle collection receipt")
+        if component.get("delivery") == "collection" and status["state"] == "migration-required":
+            steps = [{"id": f"{args.component}:repair", "component": args.component,
+                      "action": "upgrade", "target": entry}]
+            active = _open_transaction(args, "repair", args.component, steps)
+            def migrate_collection():
+                result = skill_collections.migrate(component, args.codex_home)
+                args.component_lock = component_lock.set_entry(args.component_lock, args.component, entry, args.component_lock_sources)
+                _write_lock(args)
+                return result
+            active, result = _journal_mutate(active, steps[0]["id"], migrate_collection)
+            apply_journal.clear()
+            _emit({"operation": "repair", "component": args.component, "status": result}, args.json)
+            return 0
         with tempfile.TemporaryDirectory(prefix="pennix-repair-") as directory:
             try:
                 candidate = candidates.resolve(component, Path(directory), entry)
@@ -1794,7 +1809,9 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             return result
         active, results[key] = _journal_mutate(active, step["id"], withdraw)
     apply_journal.clear()
-    _emit({"operation": "uninstall", "config_unchanged": True, "results": results}, args.json)
+    shared = [key for key in targets if catalog["components"][key]["delivery"] == "collection"]
+    _emit({"operation": "uninstall", "config_unchanged": True, "results": results,
+           **({"shared_scope": "同一用户的全部宿主配置", "shared_collections": shared} if shared else {})}, args.json)
     return 0
 
 
@@ -1949,6 +1966,9 @@ def cmd_recover(args: argparse.Namespace) -> int:
                 if component["delivery"] == "plugin":
                     owned = owner_engine._plugin_owned(step["component"], component, home)
                 elif component["delivery"] == "collection":
+                    if skill_collections._migration_receipt(component, home) is not None:
+                        skill_collections.migrate(component, home)
+                        state = skill_collections.inspect(component, home)[0]
                     owned = skill_collections.owned(component, home)
                 elif component["delivery"] == "client":
                     owned = owner_engine.local_clients.receipt(step["component"], component) is not None

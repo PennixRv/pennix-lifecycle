@@ -79,16 +79,24 @@ def parse_plan(value, root: Path, home: Path, node: str):
         _require(isinstance(item, dict) and set(item) == {"trusted_hash"}
                  and isinstance(item["trusted_hash"], str) and re.fullmatch(r"sha256:[0-9a-f]{64}", item["trusted_hash"]))
     skills = {}
+    skill_roots = set()
     for step in commands:
         _require(isinstance(step, dict) and set(step) == {"kind", "file", "block"} and step["kind"] == "skill")
         name = Path(step["file"]).parent.name if isinstance(step["file"], str) else ""
-        _require(name in SKILLS and name not in skills and step["file"] == str(home / "skills" / name / "SKILL.md"))
+        skill_root = Path(step["file"]).parent.parent
+        _require(name in SKILLS and name not in skills and skill_root in {home / "skills", Path.home() / ".agents/skills"}
+                 and step["file"] == str(skill_root / name / "SKILL.md"))
+        skill_roots.add(skill_root)
         body = step["block"]
         _require(isinstance(body, str) and len(body) <= 8192 and body.startswith(f"---\nname: {name}\n")
                  and "disable-model-invocation: true\n" in body)
         skills[name] = body
     _require(set(skills) == SKILLS)
-    return {"mcp": mcp, "hooks": hooks, "trust": trust, "skills": skills}
+    _require(len(skill_roots) == 1)
+    result = {"mcp": mcp, "hooks": hooks, "trust": trust, "skills": skills}
+    if skill_root != home / "skills":
+        result["skill_root"] = str(skill_root)
+    return result
 
 
 def validate_path(value):
@@ -148,8 +156,8 @@ def target(home: Path, path=None):
 
 def validate_receipt(value):
     base = {"schema", "key", "codex_home", "desired_digest", "mcp", "hooks", "hooks_file_created"}
-    _require(isinstance(value, dict) and type(value.get("schema")) is int and value["schema"] in (1, 2)
-             and set(value) == (base | {"trust", "skills"} if value["schema"] == 2 else base)
+    _require(isinstance(value, dict) and type(value.get("schema")) is int and value["schema"] in (1, 2, 3)
+             and set(value) == (base | {"trust", "skills", "skill_root"} if value["schema"] == 3 else base | {"trust", "skills"} if value["schema"] == 2 else base)
              and value["key"] == "context-mode" and isinstance(value["codex_home"], str)
              and Path(value["codex_home"]).is_absolute()
              and re.fullmatch(r"[0-9a-f]{64}", value.get("desired_digest", ""))
@@ -159,7 +167,7 @@ def validate_receipt(value):
     _require(isinstance(environment, dict), "context-mode native receipt env 无效")
     if "PATH" in environment:
         validate_path(environment["PATH"])
-    if value["schema"] == 2:
+    if value["schema"] >= 2:
         _require(isinstance(value["trust"], dict) and isinstance(value["skills"], dict)
                  and set(value["skills"]) == SKILLS and len(value["trust"]) == 4)
         prefix = str(Path(value["codex_home"]) / "hooks.json")
@@ -168,6 +176,8 @@ def validate_receipt(value):
                      and isinstance(item, dict) and set(item) == {"trusted_hash"}
                      and isinstance(item["trusted_hash"], str) and re.fullmatch(r"sha256:[0-9a-f]{64}", item["trusted_hash"]))
         _require(all(isinstance(body, str) and len(body) <= 8192 for body in value["skills"].values()))
+    if value["schema"] == 3:
+        _require(value["skill_root"] == str(Path.home() / ".agents/skills"), "共享 Skill receipt 目标不符")
     return value
 
 
@@ -212,7 +222,7 @@ def matches(owner, home, record):
         return False
     state = owner._toml(home / "config.toml").get("hooks", {}).get("state", {})
     return (all(state.get(k) == v for k, v in record["trust"].items())
-            and all(files.read(home / "skills" / name / "SKILL.md") == body.encode()
+            and all(files.read(Path(record.get("skill_root", home / "skills")) / name / "SKILL.md") == body.encode()
                     for name, body in record["skills"].items()))
 
 
@@ -227,16 +237,22 @@ def auxiliary(owner, home, previous, desired):
     for key in set(old_trust) | set(new_trust):
         _require(state.get(key) == old_trust.get(key), "context-mode trust 漂移或由其他 owner 管理")
     pending = []
-    for name in set(old_skills) | set(new_skills):
-        _require(name in SKILLS)
-        skill = home / "skills" / name / "SKILL.md"
+    old_root = Path(previous.get("skill_root", home / "skills"))
+    new_root = Path(desired.get("skill_root", home / "skills"))
+    old_files = {old_root / name / "SKILL.md": body.encode() for name, body in old_skills.items()}
+    new_files = {new_root / name / "SKILL.md": body.encode() for name, body in new_skills.items()}
+    if previous.get("skill_root") and not new_skills:
+        # Other hosts and unknown Codex profiles can still consume this shared user resource.
+        new_files = dict(old_files)
+    for skill in old_files.keys() | new_files.keys():
+        _require(skill.parent.name in SKILLS)
         raw = files.read(skill)
-        _require(raw == (old_skills[name].encode() if name in old_skills else None),
+        _require(raw == old_files.get(skill) or skill not in old_files and raw == new_files.get(skill),
                  "context-mode 命令 Skill 漂移或由其他 owner 管理")
         # Unknown siblings are never silently adopted as part of a command directory.
         if skill.parent.exists():
             _require({p.name for p in skill.parent.iterdir()} <= {"SKILL.md"}, "context-mode 命令目录含未知资产")
-        pending.append((skill, raw, new_skills[name].encode() if name in new_skills else None))
+        pending.append((skill, raw, new_files.get(skill)))
     if old_trust or new_trust:
         hooks = document.setdefault("hooks", tomlkit.table())
         state = hooks.setdefault("state", tomlkit.table())
@@ -299,7 +315,7 @@ def apply(owner, home, desired, receipt, *, repair=False):
     old_hooks = owner._managed_hooks(hooks_document) if repair else (receipt["hooks"] if receipt else {})
     projected = merge_hooks(hooks_document.get("hooks", {}), old_hooks, desired["hooks"])
     trust = trust_for_hooks(home, projected, desired["trust"])
-    auxiliary(owner, home, previous, {"trust": trust, "skills": desired["skills"]})  # no writes
+    auxiliary(owner, home, previous, {**desired, "trust": trust})  # no writes
     owner._edit_hooks(home, old_hooks, desired["hooks"], dry_run=True)
     previous_raw = files.read(owner._receipt_path("context-mode"), private=True)
     old_mcp = receipt["mcp"] if receipt else None
@@ -315,7 +331,7 @@ def apply(owner, home, desired, receipt, *, repair=False):
         owner._edit_hooks(home, old_hooks, desired["hooks"])
         changed_hooks = True
         hooks_after = files.read(home / "hooks.json")
-        for path, before, after in auxiliary(owner, home, previous, {"trust": trust, "skills": desired["skills"]}):
+        for path, before, after in auxiliary(owner, home, previous, {**desired, "trust": trust}):
             files.replace(path, after, before)
             writes.append((path, before, after))
         record = {**desired, "trust": trust}
@@ -379,4 +395,4 @@ def unconfigure(owner, home, receipt):
         directory = home / "skills" / name
         if directory.is_dir() and not any(directory.iterdir()):
             directory.rmdir()
-    return "changed; preserved context-mode index/session data"
+    return "changed; preserved shared user skills and context-mode index/session data"

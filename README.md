@@ -39,6 +39,16 @@ pennix secrets import-ssh --alias office-wsl-via-nas --service codex
 `uninstall <component> --confirm <component>` 不修改配置；要永久取消组件，先在
 `config edit` 中取消选择，再执行 `apply`。
 
+用户 Skill 集合保留 `pennix-skills` 和 `pennix-skills-extra` 层级，统一安装到
+`$HOME/.agents/skills`，同一用户的宿主配置共用这份内容；CODEX_HOME 继续管理
+配置与认证，不选择集合版本。旧 CODEX_HOME/skills 集合由 `pennix repair <collection>`
+在原锁定提交迁移，`pennix update <collection>` 单独升级来源。plan/status 显示
+`migration-required` 时先 repair；未知归属、内容漂移和新旧目标冲突拒绝覆盖。
+迁移中断保留私有恢复副本及 journal，由 `recover --resolve completed` 核验并续接。
+取消一个配置中的集合选择保留共享资源；显式卸载集合会影响此用户的全部宿主配置。
+Context Mode 的三个命令 Skill 由其原生计划渲染，Lifecycle 按新旧回执核验和迁移，
+卸载单个宿主接入时保留可能仍由其他宿主使用的共享 Skill。
+
 与 `workflow.config` 同目录的 `components.lock.json` 记录每个动态组件已核验的
 来源、版本、提交或发布引用和摘要。它由 Lifecycle 原子写入，不应手工编辑。首次
 安装缺少锁时，`apply` 只解析一次当前候选，完成安装和后置核验后写入锁；已有可信
