@@ -15,6 +15,27 @@ import candidates
 
 
 class CandidateTests(unittest.TestCase):
+    def test_arch_dependency_exit_127_and_native_resolution_preview(self):
+        component = {"lock_source": "arch:extra/example", "package": {"name": "example"}}
+        with tempfile.TemporaryDirectory() as directory:
+            def download(url, path):
+                path.write_bytes(b"signed package")
+            def run(command, **kwargs):
+                if command[0] == "pacman-key":
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                if command[1] == "-T":
+                    return subprocess.CompletedProcess(command, 127, "missing-lib\n", "")
+                self.assertEqual(command[:5], ["pacman", "-U", "--print", "--print-format", "%n %v %l"])
+                return subprocess.CompletedProcess(command, 0, "missing-lib 1-1 https://mirror.test/lib.pkg\nexample 2-1 /tmp/example.pkg\n", "")
+            with patch.object(candidates.owned_files, "download", side_effect=download), \
+                 patch.object(candidates, "_arch_pkginfo", return_value=({"pkgname": "example", "pkgver": "2-1"}, ["missing-lib"])), \
+                 patch.object(candidates, "_run", side_effect=run):
+                with self.assertRaisesRegex(candidates.CandidateError, "uninstalled dependencies"):
+                    candidates._verify_arch_package(component, Path(directory), "example.pkg", "2-1", "https://mirror.test/example.pkg", None)
+                component["package"]["resolve_dependencies"] = True
+                value = candidates._verify_arch_package(component, Path(directory), "example.pkg", "2-1", "https://mirror.test/example.pkg", None)
+                self.assertIn("missing-lib 1-1", value["impact"])
+
     def test_collection_catalog_pin_is_used_without_resolving_mutable_head(self):
         commit = "b" * 40
         component = {"lock_source": "git:example/skills:collection.json", "collection_contract": {

@@ -103,7 +103,7 @@ def load_catalog(path: Path) -> dict[str, Any]:
         package = component.get("package", {})
         if not isinstance(package, dict):
             raise BootstrapError(f"catalog package is invalid: {key}")
-        for flag in ("identity_only", "external_satisfies"):
+        for flag in ("identity_only", "external_satisfies", "resolve_dependencies"):
             if flag in package and (package[flag] is not True or package.get("source") != "official"
                                     or component.get("native_config")):
                 raise BootstrapError(f"catalog package policy is invalid: {key}")
@@ -1024,6 +1024,11 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
             raise BootstrapError(f"package uninstall failed: {key}")
         _remove_package_receipt(key)
         return "changed"
+    if metadata.get("resolve_dependencies"):
+        kconf = getattr(args, "kconf", None)
+        if not (kconf and kconf.syms.get("PENNIX_SYSTEM_UPGRADE")
+                and kconf.syms["PENNIX_SYSTEM_UPGRADE"].tri_value):
+            raise BootstrapError("official dependency resolution requires the confirmed full system upgrade")
     _ensure_npm_prefix(metadata)
     if state != "missing":
         package_identity(component)

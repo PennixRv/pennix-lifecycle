@@ -528,14 +528,14 @@
       "source": "Arch official pandoc-cli package", "owner": "pacman", "scope": "global",
       "probe": "pandoc", "version_args": ["--version"],
       "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
-      "package": {"source": "official", "name": "pandoc-cli", "external_satisfies": true}
+      "package": {"source": "official", "name": "pandoc-cli", "external_satisfies": true, "resolve_dependencies": true}
     },
     "libreoffice": {
       "delivery": "package", "lock_source": "arch:extra/libreoffice-fresh",
       "source": "Arch official libreoffice-fresh package", "owner": "pacman", "scope": "global",
       "probe": "soffice", "version_args": ["--version"],
       "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
-      "package": {"source": "official", "name": "libreoffice-fresh", "external_satisfies": true}
+      "package": {"source": "official", "name": "libreoffice-fresh", "external_satisfies": true, "resolve_dependencies": true}
     },
     "poppler": {
       "delivery": "package", "lock_source": "arch:extra/poppler",
@@ -567,7 +567,7 @@
       "delivery": "package", "lock_source": "arch:extra/noto-fonts-cjk",
       "source": "Arch official noto-fonts-cjk package", "owner": "pacman", "scope": "global",
       "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
-      "package": {"source": "official", "name": "noto-fonts-cjk", "identity_only": true, "external_satisfies": true}
+      "package": {"source": "official", "name": "noto-fonts-cjk", "identity_only": true, "external_satisfies": true, "resolve_dependencies": true}
     },
     "tavily-cli": {
       "delivery": "package", "lock_source": "pypi:tavily-cli",

@@ -298,17 +298,18 @@ def _verify_arch_package(component: dict, workspace: Path, filename: str, versio
     missing = []
     for dependency in dependencies:
         result = _run(["pacman", "-T", dependency], timeout=30)
-        if result.returncode == 1:
+        if result.returncode in {1, 127}:
             missing.append(dependency)
         elif result.returncode != 0:
             raise CandidateError("cannot safely check official package dependencies")
-    if missing:
+    if missing and not component["package"].get("resolve_dependencies"):
         raise CandidateError(f"official package requires uninstalled dependencies: {', '.join(missing)}")
-    preview = _run(["pacman", "-U", "--print", str(path)], timeout=30)
+    preview = _run(["pacman", "-U", "--print", "--print-format", "%n %v %l", str(path)], timeout=30)
     if preview.returncode or not preview.stdout.strip():
         raise CandidateError("pacman cannot preview the exact local package")
     candidate = {"source": component["lock_source"], "version": version, "sha256": sha256,
-                 "path": str(path), "impact": f"pacman installs only {name} {version} from a signed local package"}
+                 "path": str(path), "impact": f"pacman installs {name} {version} from a signed local package"
+                 + (f"; native dependency preview:\n{preview.stdout.strip()}" if missing else "")}
     return _check_target(candidate, target)
 
 

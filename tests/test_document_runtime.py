@@ -137,6 +137,18 @@ class DocumentRuntimeTests(unittest.TestCase):
                 with self.assertRaises(engine.BootstrapError):
                     engine.load_catalog(Path(stream.name))
 
+    def test_dependency_resolution_requires_full_upgrade_and_preserves_receipt_on_rejection(self):
+        c = self.catalog["components"]["pandoc"]
+        with patch.object(host, "detect_host", return_value={"supported": True}), \
+             patch.object(engine, "probe_component", return_value=("missing", None)), \
+             patch.object(engine, "package_owned", return_value=False), \
+             patch.object(engine.subprocess, "run") as run, \
+             patch.object(engine, "_write_package_receipt") as receipt:
+            with self.assertRaisesRegex(engine.BootstrapError, "full system upgrade"):
+                engine.component_operation(SimpleNamespace(codex_home=Path("/tmp/codex")), {}, "pandoc", c, "install")
+            run.assert_not_called()
+            receipt.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,7 +41,7 @@ pennix secrets import-ssh --alias office-wsl-via-nas --service codex
 
 文档阅读可选择 `PENNIX_DOCUMENT_READING` 分组：MarkItDown 的四项 extras 和固定附加 Python 库共用一个 uv tool 环境，配合 Pandoc、LibreOffice、Poppler、中英文 Tesseract 数据及 Noto CJK 字体。各依赖仍可独立选择；默认配置不自动开启此组。现有外部系统包只验证原生包名、来源及可执行文件归属，保持 external，不写接管 receipt，也不因取消选择而卸载。首次缺包遵守完整系统升级门禁。
 
-`package.extras` 是 uv extra 名称数组，`package.with` 只接受 `name==version` 固定需求，`package.imports` 映射所需模块和发行包名。安装、升级与恢复都从同一 catalog 生成参数；状态检查核对 uv receipt、入口归属、实际导入及固定版本。`package.identity_only=true` 仅用于无可执行入口的官方系统包；`external_satisfies=true` 仅允许已核验的外部官方依赖保持原归属。普通 npm/uv 包和有原生配置的组件不能使用这些系统包策略。新增组件还须登记 APPLY_ORDER、候选解析器和 Kconfig/defconfig，现有闭合集合测试负责发现遗漏。
+`package.extras` 是 uv extra 名称数组，`package.with` 只接受 `name==version` 固定需求，`package.imports` 映射所需模块和发行包名。安装、升级与恢复都从同一 catalog 生成参数；状态检查核对 uv receipt、入口归属、实际导入及固定版本。`package.identity_only=true` 仅用于无可执行入口的官方系统包；`external_satisfies=true` 仅允许已核验的外部官方依赖保持原归属。`resolve_dependencies=true` 允许 Pandoc、LibreOffice 和字体在已确认完整系统升级的边界内，使用 pacman 对固定签名本地包作原生依赖预览和安装；共享间接依赖由 pacman 管理，不伪造单独 Lifecycle 归属，也不在回退时递归删除。普通 npm/uv 包和有原生配置的组件不能使用这些系统包策略。新增组件还须登记 APPLY_ORDER、候选解析器和 Kconfig/defconfig，现有闭合集合测试负责发现遗漏。
 
 用户 Skill 集合保留 `pennix-skills` 和 `pennix-skills-extra` 层级，统一安装到
 `$HOME/.agents/skills`，同一用户的宿主配置共用这份内容；CODEX_HOME 继续管理
