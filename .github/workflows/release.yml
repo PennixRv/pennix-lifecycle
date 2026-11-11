@@ -17,8 +17,11 @@ jobs:
           python-version: "3.x"
       - name: Prepare isolated payload test dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap python3-kconfiglib python3-tomlkit python3-yaml
+          command -v bwrap
+          # Payload isolation uses /usr/bin/python3; install its pure Python
+          # dependencies through the same PyPI route as the source gate.
+          sudo "$(command -v python)" -m pip install --no-deps --target /usr/lib/python3/dist-packages kconfiglib==14.1.0 tomlkit==0.13.3
+          /usr/bin/python3 -c 'import kconfiglib, tomlkit, yaml'
       - name: Verify source
         run: |
           python -m venv .venv
