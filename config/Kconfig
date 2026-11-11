@@ -18,6 +18,12 @@ config PENNIX_PASEO_HOME
 	help
 		独立于 CODEX_HOME；保留身份、配对、认证和会话。
 
+config PENNIX_COPILOT_HOME
+	string "Copilot CLI 家目录"
+	default "$HOME/.copilot"
+	help
+		仅管理明确选择的原生接入；不复制 Codex 配置或认证。
+
 config PENNIX_SECRETS_FILE
 	string "集中秘密文件"
 	default "$HOME/.config/pennix/secrets.toml"
@@ -48,11 +54,29 @@ config PENNIX_COMPONENT_PNPM
 		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
 config PENNIX_COMPONENT_CONTEXT_MODE
-	bool "Context Mode（程序、Codex MCP 与六类 Hook）"
-	default y
-	depends on PENNIX_COMPONENT_CODEX_CLI && PENNIX_CODEX_HOOKS
+	bool "Context Mode 程序"
+	default y if PENNIX_COMPONENT_CODEX_CLI && PENNIX_CODEX_HOOKS
 	help
 		一并管理 npm 程序、MCP 和六类 Hook；保留用户索引与会话数据。
+
+config PENNIX_CONTEXT_MODE_CODEX
+	bool "Codex 的 Context Mode MCP 与 Hooks"
+	default y
+	depends on PENNIX_COMPONENT_CONTEXT_MODE && PENNIX_COMPONENT_CODEX_CLI && PENNIX_CODEX_HOOKS
+
+config PENNIX_TARGET_COPILOT_CONTEXT_MODE
+	bool "Copilot CLI 的 Context Mode MCP、Hooks 与命令 Skills"
+	default n
+	depends on PENNIX_COMPONENT_CONTEXT_MODE
+	help
+		必须已有 Copilot CLI；保持 Codex 的选择不变，独立记录目录和归属。
+
+config PENNIX_TARGET_COPILOT_CODEGRAPH
+	bool "Copilot CLI 的 CodeGraph MCP"
+	default n
+	depends on PENNIX_COMPONENT_CODEGRAPH_CLI
+	help
+		只执行全局 MCP 登记，不初始化项目索引。
 
 config PENNIX_COMPONENT_CODEGRAPH_CLI
 	bool "CodeGraph CLI"

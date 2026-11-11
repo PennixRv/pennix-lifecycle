@@ -122,7 +122,7 @@ def configured_path(home: Path):
     return value
 
 
-def target(home: Path, path=None):
+def target(home: Path, path=None, *, agent="codex", parser=parse_plan):
     root = Path.home() / ".local/lib/node_modules/@pennixrv/context-mode"
     entry = Path.home() / ".local/bin/context-mode"
     try:
@@ -135,18 +135,19 @@ def target(home: Path, path=None):
         node = str(Path(node).resolve(strict=True))
         # The only subprocess is the fixed, read-only plan request. No plan argv is executed.
         with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as error:
-            environment = {**os.environ, "CODEX_HOME": str(home)}
+            _require(agent in {"codex", "copilot-cli"})
+            environment = {**os.environ, "CODEX_HOME" if agent == "codex" else "COPILOT_HOME": str(home)}
             if path is not None:
                 environment["PATH"] = path
-            result = subprocess.run([node, str(root / "cli.mjs"), "setup", "--print", "codex", "--json"],
+            result = subprocess.run([node, str(root / "cli.mjs"), "setup", "--print", agent, "--json"],
                                     env=environment, stdout=output, stderr=error,
                                     timeout=30, check=False)
             _require(result.returncode == 0 and output.tell() <= 131072 and error.tell() <= 16384)
             output.seek(0)
-            desired = parse_plan(json.load(output, object_pairs_hook=files.unique_pairs), root, home, node)
+            desired = parser(json.load(output, object_pairs_hook=files.unique_pairs), root, home, node)
             # Codex filters its MCP child environment. Preserve the selected native
             # home explicitly; otherwise a custom CODEX_HOME falls back to HOME/.codex.
-            desired["mcp"]["env"] = {"CODEX_HOME": str(home)}
+            desired["mcp"]["env"] = {"CODEX_HOME" if agent == "codex" else "COPILOT_HOME": str(home)}
             if path is not None:
                 desired["mcp"]["env"]["PATH"] = validate_path(path)
             return desired

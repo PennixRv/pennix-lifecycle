@@ -138,15 +138,21 @@ def inspect_target(
     codex_home: Path,
     desired_digest: str | None = None,
     credential_mode: str | None = None,
+    *, target_home: Path | None = None, enabled: bool = True,
 ) -> dict[str, Any]:
     try:
+        if spec.get("host") == "copilot-cli":
+            if target_home is None:
+                raise ConnectionError("Copilot 目标根必须由当前配置明确提供")
+            return {"target": target, "target_home": str(target_home),
+                    **native_integrations.copilot.inspect(spec["native"], target_home, enabled=enabled)}
         payload: dict[str, Any] = {"target": target}
         if desired_digest is not None:
             payload["desired_digest"] = desired_digest
         if credential_mode is not None:
             payload["credential_mode"] = credential_mode
         return {"target": target, **_run(_command(spec, codex_home), "inspect", payload, codex_home=codex_home)}
-    except ConnectionError as error:
+    except (ConnectionError, native_integrations.NativeIntegrationError, OSError) as error:
         return {"target": target, "state": "blocked", "owned": False, "detail": str(error)}
 
 
@@ -154,6 +160,21 @@ def plan(kconf: Any, catalog: dict[str, Any], codex_home: Path, secrets_path: Pa
     result: dict[str, dict[str, Any]] = {}
     for target, spec in target_specs(catalog).items():
         selected = config_model.config_value(kconf, spec["select"]) == "y"
+        if spec.get("host") == "copilot-cli":
+            home = Path(config_model.config_value(kconf, "PENNIX_COPILOT_HOME"))
+            status = inspect_target(target, spec, codex_home, target_home=home, enabled=selected)
+            action = ("keep" if status["state"] == "current" else "configure") if selected else (
+                "unconfigure" if status.get("owned") else "keep")
+            if status["state"] in {"blocked", "drifted", "external"}:
+                action = "blocked" if selected or status.get("owned") else "keep"
+            if action in {"configure", "unconfigure"}:
+                try:
+                    validate_target(target, spec, kconf, codex_home, secrets_path, action)
+                except (ConnectionError, native_integrations.NativeIntegrationError, OSError) as error:
+                    action = "blocked"
+                    status.update(state="blocked", detail=str(error))
+            result[target] = {**status, "target": target, "selected": selected, "action": action}
+            continue
         desired: tuple[dict[str, str], dict[str, str]] | None = None
         if selected:
             try:
@@ -229,14 +250,28 @@ def _payload(target: str, spec: dict, kconf: Any, secrets_path: Path, action: st
 
 
 def validate_target(target: str, spec: dict, kconf: Any, codex_home: Path, secrets_path: Path, action: str) -> dict:
+    if spec.get("host") == "copilot-cli":
+        try:
+            return native_integrations.copilot.validate(spec["native"],
+                Path(config_model.config_value(kconf, "PENNIX_COPILOT_HOME")), action)
+        except native_integrations.NativeIntegrationError as error:
+            raise ConnectionError(str(error), effect="none") from error
     payload = _payload(target, spec, kconf, secrets_path, action)
     return _run(_command(spec, codex_home), "validate", payload, codex_home=codex_home)
 
 
 def apply_target(target: str, spec: dict[str, Any], kconf: Any, codex_home: Path, secrets_path: Path, action: str,
-                 *, operation_id: str | None = None) -> str:
+                  *, operation_id: str | None = None, repair: bool = False) -> str:
     if action == "keep":
         return "no-op"
+    if spec.get("host") == "copilot-cli":
+        try:
+            home = Path(config_model.config_value(kconf, "PENNIX_COPILOT_HOME"))
+            if action == "unconfigure":
+                return native_integrations.copilot.unconfigure(spec["native"], home, operation_id=operation_id)
+            return native_integrations.copilot.apply(spec["native"], home, repair=repair, operation_id=operation_id)
+        except native_integrations.NativeIntegrationError as error:
+            raise ConnectionError(str(error), effect=getattr(error, "effect", "unknown")) from error
     command = _command(spec, codex_home)
     payload = _payload(target, spec, kconf, secrets_path, action)
     if operation_id is not None:

@@ -2,6 +2,26 @@
   "schema": 3,
   "aur_helper": {"repo": "https://aur.archlinux.org/yay-bin.git", "ref": "13e0a4754d106a9252b7479bf1b370fbe454fc48"},
   "configuration_targets": {
+    "copilot-context-mode": {
+      "select": "PENNIX_TARGET_COPILOT_CONTEXT_MODE",
+      "owner": "context-mode",
+      "component": "context-mode",
+      "host": "copilot-cli",
+      "native": "context-mode",
+      "command": ["copilot"],
+      "values": {"home": "PENNIX_COPILOT_HOME"},
+      "secrets": {}
+    },
+    "copilot-codegraph": {
+      "select": "PENNIX_TARGET_COPILOT_CODEGRAPH",
+      "owner": "codegraph",
+      "component": "codegraph-cli",
+      "host": "copilot-cli",
+      "native": "codegraph",
+      "command": ["copilot"],
+      "values": {"home": "PENNIX_COPILOT_HOME"},
+      "secrets": {}
+    },
     "siyuan": {
       "select": "PENNIX_TARGET_SIYUAN",
       "owner": "pennix-siyuan-knowledge",
@@ -219,7 +239,7 @@
       },
       "native_config": {
         "owner": "context-mode",
-        "select": "PENNIX_COMPONENT_CONTEXT_MODE"
+        "select": "PENNIX_CONTEXT_MODE_CODEX"
       },
       "project_init": "not-applicable",
       "probe": "context-mode",
@@ -649,7 +669,7 @@
         "directory": "pennix-skills-extra",
         "source": {
           "repo": "PennixRv/pennix-skills-extra",
-          "ref": "8e70c9581c44d56d964c25ee4001a723a86cf84b",
+          "ref": "c114e0d7dc8228dc87f2931caa486fb00d1f4999",
           "manifest": "collection.json"
         }
       }
@@ -675,7 +695,7 @@
         "directory": "pennix-skills",
         "source": {
           "repo": "PennixRv/pennix-skills",
-          "ref": "1fab5b4ebaf20ec0af8627ad7289631a7f469acd",
+          "ref": "767b018c0bc4fd6bd8ebe687d9749141c8a30050",
           "manifest": "collection.json"
         }
       }

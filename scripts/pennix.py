@@ -1259,6 +1259,24 @@ def cmd_apply(args: argparse.Namespace) -> int:
     return 0
 
 
+def _copilot_steps(args, catalog):
+    return [{"id": f"connection:{name}:configure", "component": f"connection:{name}",
+             "action": "configure", "target": {}}
+            for name, spec in catalog.get("configuration_targets", {}).items()
+            if spec.get("host") == "copilot-cli" and spec["component"] == args.component
+            and config_model.config_value(args.kconf, spec["select"]) == "y"]
+
+
+def _configure_copilot(args, catalog, active, *, repair=False):
+    for step in _copilot_steps(args, catalog):
+        name = step["component"].split(":", 1)[1]
+        active, _ = _journal_mutate(active, step["id"], lambda name=name:
+            connection_owners.apply_target(name, catalog["configuration_targets"][name], args.kconf,
+                args.codex_home, Path(config_model.config_value(args.kconf, "PENNIX_SECRETS_FILE")), "configure", repair=repair,
+                operation_id=f"{active['transaction']}:{step['id']}"))
+    return active
+
+
 def cmd_repair(args: argparse.Namespace) -> int:
     kconf, _, catalog = _load(args)
     args.kconf = kconf
@@ -1334,6 +1352,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
             if native and config_model.config_value(kconf, native["select"]) == "y":
                 steps.append({"id": f"{args.component}:configure", "component": args.component,
                               "action": "configure", "target": {}})
+            steps.extend(_copilot_steps(args, catalog))
             active = _open_transaction(args, "repair", args.component, steps)
             if apply_journal.step(active, steps[0]["id"])["target"] != candidate_target:
                 raise CliError("修复候选与已记录的精确目标不同")
@@ -1353,6 +1372,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
         active, configured = _journal_mutate(active, f"{args.component}:configure",
             lambda: _run_component(args, catalog, args.component, "configure", repair=True))
         result = f"{result}; native {configured}"
+    active = _configure_copilot(args, catalog, active, repair=True)
     apply_journal.clear()
     _emit({"operation": "repair", "component": args.component, "status": result}, args.json)
     return 0
@@ -1626,6 +1646,7 @@ def cmd_update(args: argparse.Namespace) -> int:
             lock_digest = apply_journal.digest(args.component_lock_path)
             steps = [{"id": upgrade_step_id, "component": args.component,
                       "action": "upgrade", "target": target}]
+            steps.extend(_copilot_steps(args, catalog))
             if has_restart_step:
                 steps.append({"id": restart_step_id, "component": "paseo-daemon",
                               "action": "restart", "target": {"mode": mode,
@@ -1638,6 +1659,7 @@ def cmd_update(args: argparse.Namespace) -> int:
             _write_lock(args)
             return result
         active, result = _journal_mutate(active, step_id, update_component)
+        active = _configure_copilot(args, catalog, active)
         if restart_pending:
             def restart_paseo():
                 current = paseo_service.runtime(paseo, paseo_home, mode, run)
@@ -1718,7 +1740,10 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             targets.append(key)
         owned_connections = []
         for target, spec in catalog["configuration_targets"].items():
-            status = connection_owners.inspect_target(target, spec, args.codex_home)
+            status = connection_owners.inspect_target(target, spec, args.codex_home, enabled=False,
+                target_home=Path(config_model.config_value(kconf, "PENNIX_COPILOT_HOME")) if spec.get("host") == "copilot-cli" else None)
+            if spec.get("host") == "copilot-cli" and status["state"] == "blocked":
+                raise CliError(f"全量卸载无法核验 Copilot 连接归属: {target}")
             if status.get("owned"):
                 if status["state"] not in {"current", "orphaned"}:
                     raise CliError(f"全量卸载预检发现连接漂移: {target}")
@@ -1933,6 +1958,20 @@ def cmd_recover(args: argparse.Namespace) -> int:
     step = apply_journal.step(active, args.step)
     if args.resolve in {"not-started", "restored"}:
         required = "none" if args.resolve == "not-started" else "restored"
+        if step["component"].startswith("connection:") and args.resolve == "restored":
+            target = step["component"].split(":", 1)[1]
+            spec = catalog["configuration_targets"].get(target, {})
+            if spec.get("host") == "copilot-cli":
+                if step["status"] == "verified":
+                    raise CliError("已核验步骤不能按失败恢复撤回")
+                if step["action"] != "configure":
+                    raise CliError("Copilot 撤回事务只能核验完成；不能推断重新安装授权")
+                effect = native_integrations.copilot.recover(spec["native"],
+                    Path(config_model.config_value(kconf, "PENNIX_COPILOT_HOME")),
+                    operation_id=f"{active['transaction']}:{step['id']}")
+                if effect in {"none", "restored"}:
+                    active = apply_journal.rejected(active, step["id"], "restored")
+                    step = apply_journal.step(active, args.step)
         if step["status"] != "pending" or (step.get("observed") or {}).get("effect") != required:
             if not (args.resolve == "not-started" and step["status"] == "pending" and step["observed"] is None):
                 raise CliError("没有绑定此步骤的无副作用或恢复前值证据；不能释放 unknown")
@@ -1946,10 +1985,19 @@ def cmd_recover(args: argparse.Namespace) -> int:
             spec = catalog["configuration_targets"].get(target)
             if spec is None:
                 raise CliError("恢复目标未登记")
+            if spec.get("host") == "copilot-cli" and step["action"] == "configure":
+                native_integrations.copilot.complete(spec["native"],
+                    Path(config_model.config_value(kconf, "PENNIX_COPILOT_HOME")),
+                    operation_id=f"{active['transaction']}:{step['id']}")
+            if spec.get("host") == "copilot-cli" and step["action"] == "unconfigure":
+                native_integrations.copilot.unconfigure(spec["native"],
+                    Path(config_model.config_value(kconf, "PENNIX_COPILOT_HOME")), recovery=True,
+                    operation_id=f"{active['transaction']}:{step['id']}")
             values, secrets = connection_owners._inputs(target, spec, kconf,
                 Path(config_model.config_value(kconf, "PENNIX_SECRETS_FILE"))) if step["action"] == "configure" else ({}, {})
             desired = connection_owners._desired_digest(target, values, secrets) if step["action"] == "configure" else None
-            state = connection_owners.inspect_target(target, spec, home, desired, values.get("credential_mode"))
+            state = connection_owners.inspect_target(target, spec, home, desired, values.get("credential_mode"),
+                target_home=Path(config_model.config_value(kconf, "PENNIX_COPILOT_HOME")) if spec.get("host") == "copilot-cli" else None)
             if (step["action"] == "configure" and (state["state"] != "current" or not state["owned"])
                     or step["action"] == "unconfigure" and state["state"] not in {"missing", "absent"}):
                 raise CliError("owner 未证明步骤后置条件；保留 unknown")

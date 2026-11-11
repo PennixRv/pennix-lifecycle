@@ -53,6 +53,20 @@ pennix secrets import-ssh --alias office-wsl-via-nas --service codex
 Context Mode 的三个命令 Skill 由其原生计划渲染，Lifecycle 按新旧回执核验和迁移，
 卸载单个宿主接入时保留可能仍由其他宿主使用的共享 Skill。
 
+Copilot CLI 接入必须显式选择 `PENNIX_TARGET_COPILOT_CONTEXT_MODE` 或
+`PENNIX_TARGET_COPILOT_CODEGRAPH`，两项默认关闭；`PENNIX_COPILOT_HOME` 决定实际配置根。
+`PENNIX_CONTEXT_MODE_CODEX` 保留既有 Codex 默认选择，程序安装可与宿主接入分别管理。
+CodeGraph 只执行原生 global MCP 登记，不创建索引。Context Mode 使用固定包的
+`setup --print copilot-cli --json` 计划，核验四类 Hook、三个命令 Skill 和 MCP 后再执行；
+不复用 Codex TOML、Hook 信任或认证。共享命令包含各宿主的原生工具名，私有命令仍由原生发现。
+
+Copilot 回执和目标登记按宿主、组件、实际目录区分，历史 `native/{key}.json` 只属于 Codex。
+共享集合缺失时通过 `copilot skill add <目录>` 登记，记录新增项并精确撤回，不复制集合。
+plan/status/check、组件 update/repair、取消选择后的 apply 与 recover 共用原有锁和事务。
+repair 只恢复缺失的自有内容；未知编辑、回执损坏、用户禁用或管理策略禁用均保留现场。
+失败的 configure 可沿原生 recover 恢复已记录前值，未完成的撤回只继续核验精确移除；
+不调用 Context Mode 全局 remove，也不覆盖其他 MCP、用户 Hook 或已有目录登记。
+
 与 `workflow.config` 同目录的 `components.lock.json` 记录每个动态组件已核验的
 来源、版本、提交或发布引用和摘要。它由 Lifecycle 原子写入，不应手工编辑。首次
 安装缺少锁时，`apply` 只解析一次当前候选，完成安装和后置核验后写入锁；已有可信

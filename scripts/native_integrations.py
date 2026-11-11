@@ -16,6 +16,7 @@ import tomlkit
 import owned_files
 import hook_integrations
 import context_mode_integration as context_mode
+import copilot_integrations as copilot
 import sys
 
 
