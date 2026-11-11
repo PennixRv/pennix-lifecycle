@@ -335,6 +335,16 @@ def restore_directories(home, record):
 
 
 def unconfigure(key, home, *, recovery=False, operation_id=None):
+    effect = ["none"]
+    try:
+        return _unconfigure(key, home, recovery=recovery, operation_id=operation_id, effect=effect)
+    except (Error, files.OwnershipError, OSError, ValueError) as cause:
+        error = Error(str(cause))
+        error.effect = effect[0]
+        raise error from cause
+
+
+def _unconfigure(key, home, *, recovery, operation_id, effect):
     if not recovery:
         validate(key, home, "unconfigure")
     record = read(key, home)
@@ -345,6 +355,7 @@ def unconfigure(key, home, *, recovery=False, operation_id=None):
         require(record["operation"] == {"id": operation_id, "action": "unconfigure"}, "Copilot 恢复不属于同一撤回步骤")
     else:
         record["operation"] = {"id": operation_id, "action": "unconfigure"}
+        effect[0] = "unknown"
         files.replace(path, files.json_bytes(record), files.read(path))
     current = server(key, home)
     require(current in (record["desired"]["mcp"], record["baseline"]["mcp"]), "Copilot MCP 存在未知改动")
@@ -354,6 +365,7 @@ def unconfigure(key, home, *, recovery=False, operation_id=None):
         baseline = None if body is None else body.encode()
         require(before in (baseline, record["desired"]["files"][p].encode()), "Copilot 文件存在未知改动")
         changes.append((Path(p), baseline, before))
+    effect[0] = "unknown"
     restore_directories(home, record)
     for path, baseline, before in changes:
         files.replace(path, baseline, before)

@@ -198,6 +198,15 @@ class CopilotIntegrationTests(unittest.TestCase):
         with self.assertRaises(copilot.Error):
             copilot.inspect("context-mode", self.target)
 
+    def test_prewrite_withdraw_rejection_preserves_receipt_and_reports_no_effect(self):
+        copilot.apply("context-mode", self.target)
+        receipt = copilot.read("context-mode", self.target)
+        (self.target / "skills/ctx-stats/SKILL.md").write_text("user edit")
+        with self.assertRaises(copilot.Error) as caught:
+            copilot.unconfigure("context-mode", self.target)
+        self.assertEqual(caught.exception.effect, "none")
+        self.assertEqual(copilot.read("context-mode", self.target), receipt)
+
     def test_missing_collections_use_native_directory_registration_and_exact_withdraw(self):
         directory = self.home / ".agents/skills/pennix-skills"
         directory.mkdir(parents=True)
