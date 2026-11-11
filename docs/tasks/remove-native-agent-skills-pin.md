@@ -5,3 +5,7 @@
 本次仅修改 `pennix-skills` pin，Lifecycle 版本由 `0.2.53` 更新为 `0.2.54`。保留其他组件、安装器、权限、配置、秘密与事务协议。沿既有完整隔离 unittest、原生 build-release、独立 payload 测试和 GitHub CI 发行；公共归档核验后通过其自身 `pennix tool install` 安装，再原生更新集合。禁止手改安装树、锁或 receipt。
 
 本地完整隔离测试 228 项通过（2 项既有条件跳过），实际 payload 安装、恢复、重装测试通过。`v0.2.54` 的 CI 两次均因 Ubuntu 镜像 DNS 失败停在依赖准备，未发行、未部署。改为复用 source gate 已采用的 PyPI 路线，在临时 runner 的系统 Python 位置安装相同纯 Python 依赖；bubblewrap 与 yaml 仍须真实可用，否则失败。隔离测试和实际 payload 门禁保持。向前发行 `0.2.55`，不改动已推送 tag 或绕过 CI 发布。
+
+`v0.2.55` 固定源码为 `a070f8041f44d1af7e332f4a360ff9e5b3daf80b`，GitHub CI `43043101300` 成功。公共归档 SHA-256 为 `e461e6cbb029dd183e283c0e9cd394400ff8de39761b089c0f15de2c1fdda12b`；公共校验文件一致，解压后的 tar 与本地原生构建逐字相同，39 个成员路径安全。压缩字节差异未被误报为相同归档。
+
+已通过公共 payload 的原生 `pennix tool install` 安装 0.2.55，再通过原生 `pennix update pennix-skills` 核对并安装唯一固定候选 `823c3b69049d421e39d0768031669914e33f384a`；集合归档 SHA-256 为 `c9d87ac76b70c176afebe515c8274e7ef15c5b8fdca47f4f5e6897ac52bb6fa0`。修改后的两份指引与源码一致，恢复状态为 idle。没有直接修改安装树、事务状态或其他组件配置。后续 Trellis 安装与三项目组合验收由根任务继续负责，本组件不重复发行文档收尾提交。
