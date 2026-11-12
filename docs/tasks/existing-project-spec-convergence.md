@@ -6,4 +6,10 @@
 
 验证沿既有完整隔离 unittest、`scripts/build-release.sh` 和显式 archive 的 payload 安装／恢复／重装测试。公开发布使用既有 tag CI，核验公共包与固定源码原生构建一致；然后由公共包自身 `pennix tool install` 更新工具，以 `pennix update` 更新精确 Trellis beta.18、集合及必要 adapter，按实际原生 help 和计划执行。系统部署不替代三个明确项目的原生资产更新与 spec 收敛。
 
-本记录初始状态为待验证候选，不代表已发布或部署；实际结果写回本文件和根任务。
+## 实际结果
+
+固定发行源码 `7a54d0550a52327fd41adfba09f1432fa8cca8f7`，tag `v0.2.56`；公开 CI [43143302221](https://github.com/PennixRv/pennix-lifecycle/actions/runs/43143302221) 成功。源码测试 228 项，226 通过、2 跳过；实际发行载荷安装、恢复和重装测试通过。
+
+公共 archive SHA256 为 `db399ff602560f5aeaaf4d8026e029a8de96e93302a2f1a4f53ec95dc78bbcb3`，与公共校验文件及 GitHub asset digest 一致。与本地固定构建的 gzip 摘要不同，但解压 tar 完全相同，39 个条目的名称、模式、类型、正文一致。已从核验的公共载荷执行 `pennix tool install --json`，实际返回 `installed 0.2.56`，没有执行新机系统升级。
+
+已安装工具通过原生 `update pennix-skills` 及 `repair pennix-skills` 成功更新、重装上述固定集合，原生 status 为 match。Trellis beta.18 尚无 GitHub 发布运行记录及公共 npm 包，CLI/adapter 和三个项目资产暂未更新；这属于根侧尚未完成的组合交付，不能因本工具已发布而关闭根任务。
