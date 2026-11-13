@@ -117,12 +117,16 @@ class BaseEnvironmentTests(unittest.TestCase):
     def test_no_tty_shell_is_quiet_and_path_preserves_project_and_deduplicates(self):
         base.apply(self.kconf,self.catalog)
         project = self.home/'project/.venv';(project/'bin').mkdir(parents=True)
-        env = {**os.environ,'VIRTUAL_ENV':str(project),'PATH':f'/usr/bin::{self.home}/.local/bin:/mnt/c/Windows:{self.home}/.npm-global/bin:/usr/bin'}
+        env = {**os.environ,'VIRTUAL_ENV':str(project),'PATH':f'/usr/bin::{self.home}/.local/bin:/mnt/c/Windows:{self.home}/.npm-global/bin:{self.home}/go/bin:/usr/bin'}
         for shell in ['bash','zsh']:
             p = subprocess.run([shell,'-c','. "$XDG_CONFIG_HOME/pennix/base/env.sh"; . "$XDG_CONFIG_HOME/pennix/base/env.sh"; printf "%s" "$PATH"'],env=env,capture_output=True,text=True)
             self.assertEqual(p.returncode,0,p.stderr)
             parts=p.stdout.split(':');self.assertEqual(parts[0],str(project/'bin'));self.assertEqual(len(parts),len(set(parts)))
             self.assertNotIn('',parts);self.assertNotIn('/mnt/c/Windows',parts)
+            self.assertEqual(parts[1:4],[str(self.home/x) for x in ['.local/bin','.cargo/bin','.go/bin']])
+            self.assertNotIn(str(self.home/'go/bin'),parts)
+            go=subprocess.run([shell,'-c','. "$XDG_CONFIG_HOME/pennix/base/env.sh"; printf "%s\\n" "$GOPATH" "$GOBIN"'],env=env,capture_output=True,text=True,check=True)
+            self.assertEqual(go.stdout.splitlines(),[str(self.home/'.go'),str(self.home/'.go/bin')])
         p=subprocess.run(['zsh','-ic','true'],env=env,capture_output=True,text=True)
         self.assertEqual(p.returncode,0,p.stderr);self.assertEqual(p.stdout,'')
 
