@@ -48,3 +48,5 @@ Node.js 24.22.3 的官方 Arch 包已通过签名核验，并在临时目录运�
 真实验收暴露 P10k 模板的参数清理会移除之前设置的禁用向导标志，0.3.6 在加载后恢复明确策略；同时将基础 owner 错误交给既有 CLI 错误处理，保留事务摘要，避免裸 traceback。临时验收脚本另修正三个测试前提：独立 XDG 目录须具备 env.sh、Git 显式 --global 读取 include 须加 --includes、OCR 字间空白不视为识别失败；这些修正没有改动部署配置。
 
 容器构建验收同时收紧为默认的 BuildKit 路径：基础清单补齐同属 Arch 官方 Docker 工具链的 docker-buildx 0.38.2（仅依赖既有 glibc），不以 DOCKER_BUILDKIT=0 强制旧构建器作为最终证据。不增加第三方仓库、服务或外部镜像，仍使用本地 scratch 示例及既有 daemon。
+
+0.3.6 的 CI 43406037655、250 项源码回归及独立公开载荷验证通过，pennix 九组真实验收全过。home 安装相同公开工具、合并 profile 并绑定三个已批准文件摘要后，plan 在包写入前发现跨来源别名问题：component_lock.read 将旧 npm pnpm 来源规范化为 arch，破坏原生迁移所需旧锁证据。0.3.7 只规范化同包管理器的通道别名；跨包管理器保留已验证旧来源，直至 owner 显式迁移成功。增加真实锁文件读取不变、旧身份保留及迁移后新锁的回归。home 的 uv/Pandoc/LibreOffice 存量外部更新另走原生 reconcile，不伪造记录或以重装掩盖。

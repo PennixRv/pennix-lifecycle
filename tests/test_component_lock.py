@@ -55,6 +55,21 @@ class ComponentLockTests(unittest.TestCase):
 
             self.assertEqual(component_lock.read(path, sources)["components"]["package"], current_entry)
 
+    def test_cross_manager_alias_keeps_the_old_source_until_explicit_migration(self):
+        old = {'source': 'npm:pnpm:latest', 'version': '10.32.1'}
+        sources = {'pnpm': ('arch:extra/pnpm', old['source'])}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'components.lock.json'
+            path.write_text(json.dumps({'schema': 1, 'components': {'pnpm': old}}))
+            path.chmod(0o600)
+            before = path.read_bytes()
+            loaded = component_lock.read(path, sources)
+            self.assertEqual(loaded['components']['pnpm'], old)
+            self.assertEqual(path.read_bytes(), before)
+            new = {'source': sources['pnpm'][0], 'version': '12.19.0-1'}
+            component_lock.write(path, component_lock.set_entry(loaded, 'pnpm', new, sources), sources)
+            self.assertEqual(component_lock.read(path, sources)['components']['pnpm'], new)
+
 
 if __name__ == "__main__":
     unittest.main()

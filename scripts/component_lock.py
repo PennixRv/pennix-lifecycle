@@ -50,9 +50,13 @@ def read(path: Path, sources: dict[str, str | tuple[str, ...]]) -> dict:
     if value is None:
         return {"schema": 1, "components": {}}
     validated = validate(value, sources)
-    return {**validated, "components": {
-        key: {**entry, "source": sources[key] if isinstance(sources[key], str) else sources[key][0]}
-        for key, entry in validated["components"].items()}}
+    components = {}
+    for key, entry in validated['components'].items():
+        canonical = sources[key] if isinstance(sources[key], str) else sources[key][0]
+        # Channel aliases can normalize; a manager transition needs its original owner evidence.
+        same_manager = entry['source'].split(':', 1)[0] == canonical.split(':', 1)[0]
+        components[key] = {**entry, 'source': canonical if same_manager else entry['source']}
+    return {**validated, 'components': components}
 
 
 def write(path: Path, value: dict, sources: dict[str, str | tuple[str, ...]]) -> None:
