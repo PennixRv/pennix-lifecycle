@@ -494,9 +494,11 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             "unit_state": "absent", "mode": "off", "run": False, "listen": "", "runtime": {"running": False}}
         return {"config": str(path), "codex_home": str(args.codex_home), "components": components,
                 "connections": {}, "functional_checks_requested": False,
-                "side_effects": {"path": {"action": path_env.inspect(str(Path.home()/'.local'))},
+                "side_effects": {"path": {"action": "keep", "path": str(Path.home()/'.zshrc'), "prefix": str(Path.home()/'.local')},
                     "system_upgrade": config_model.config_value(kconf, "PENNIX_SYSTEM_UPGRADE") == "y",
-                    "system_upgrade_command": "sudo pacman -Syu --noconfirm"}}
+                    "system_upgrade_command": "sudo pacman -Syu --noconfirm",
+                    "system_upgrade_components": [key for key, item in components.items() if item.get('selected')
+                        and catalog['components'].get(key, {}).get('package', {}).get('source') in {'official', 'aur'}]}}
     prefix = Path.home() / ".local"
     paseo = prefix / "bin" / "paseo"
     if not paseo.is_file():
@@ -579,7 +581,7 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
     return {"config": str(path), "codex_home": str(args.codex_home), "components": components, "connections": connections,
             "functional_checks_requested": config_model.config_value(kconf, "PENNIX_FUNCTIONAL_CHECKS") == "y",
             "side_effects": {
-                "path": {"path": str(Path.home() / ".zshrc"), "prefix": str(Path.home() / ".local"), "action": path_env.inspect(str(Path.home() / ".local"))},
+                "path": {"path": str(Path.home() / ".zshrc"), "prefix": str(Path.home() / ".local"), "action": "keep" if "base-environment" in selected else path_env.inspect(str(Path.home() / ".local"))},
                 "system_upgrade": config_model.config_value(kconf, "PENNIX_SYSTEM_UPGRADE") == "y",
                 "system_upgrade_command": "sudo pacman -Syu --noconfirm",
                 "system_upgrade_components": arch_components,

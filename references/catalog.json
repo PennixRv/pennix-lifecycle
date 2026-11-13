@@ -533,7 +533,7 @@
       "source": "Arch official uv package", "owner": "uv", "scope": "global",
       "probe": "uv", "version_args": ["--version"],
       "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
-      "package": {"source": "official", "name": "uv"}
+      "package": {"source": "official", "name": "uv", "external_satisfies": true}
     },
     "markitdown": {
       "delivery": "package", "lock_source": "pypi:markitdown",

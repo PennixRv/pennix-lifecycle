@@ -309,6 +309,8 @@ def uninstall():
     state = native_state()
     if old["npm_prefix"] and state["npm_prefix"] == str(Path.home()/'.local') and old["npm_prefix"] != state["npm_prefix"]:
         _run(["npm", "config", "set", "prefix", old["npm_prefix"], "--location=user"])
+    elif old['npm_prefix'] is None and state['npm_prefix'] == str(Path.home()/'.local'):
+        _run(['npm', 'config', 'delete', 'prefix', '--location=user'])
     if state["shell"] == "/usr/bin/zsh" and old["shell"] != state["shell"]:
         _run(["sudo", "chsh", "-s", old["shell"], state["user"]])
     # Container data is shared; only reverse Docker settings when the native owner proves no workload.

@@ -1,5 +1,7 @@
 """Isolated base lifecycle: no host package, account, daemon or shell mutation."""
 import hashlib
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -123,8 +125,32 @@ class BaseEnvironmentTests(unittest.TestCase):
         with patch.object(pennix,'_component_status',side_effect=status),patch.object(pennix.pnpm_migration,'needed',return_value=False):
             value=pennix._plan(args)
         self.assertEqual(value['connections'],{})
+        self.assertEqual(value['side_effects']['path']['action'],'keep')
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            pennix._emit(value,False)
+        self.assertIn('PATH: keep',output.getvalue())
         for key,item in value['components'].items():
             if key not in base.SCOPE:self.assertEqual(item['action'],'keep')
+
+    def test_bootstrap_uv_stays_with_native_owner_without_fabricating_a_lock(self):
+        args=pennix.parser().parse_args(['plan','--scope','base'])
+        def status(args,key,component):
+            return {'state':'match','ownership':'external'} if key=='uv' else {'state':'missing'}
+        with patch.object(pennix,'_component_status',side_effect=status),\
+             patch.object(engine,'package_lock_migration',return_value=None),\
+             patch.object(pennix.pnpm_migration,'needed',return_value=False):
+            value=pennix._plan(args)
+        self.assertEqual(value['components']['uv']['action'],'keep')
+        self.assertEqual(value['components']['uv']['ownership'],'external')
+        self.assertNotIn('uv',args.component_lock['components'])
+
+    def test_uninstall_removes_the_prefix_added_when_npm_was_initially_absent(self):
+        base.apply(self.kconf,self.catalog)
+        record=base.receipt();record['native']['npm_prefix']=None;base._save(record)
+        with patch.object(base,'_run',return_value='') as native,\
+             patch.object(base.subprocess,'run',return_value=SimpleNamespace(returncode=1,stdout='')):
+            base.uninstall()
+        native.assert_called_once_with(['npm','config','delete','prefix','--location=user'])
 
     def test_known_tmux_upgrade_keeps_cch_and_unknown_changes_block(self):
         path=self.home/'.tmux.conf'
