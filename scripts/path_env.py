@@ -81,6 +81,7 @@ def base_targets() -> dict[Path, bytes]:
         config / "environment.d/60-pennix-base.conf": (
             'PATH=${HOME}/.local/bin:${HOME}/.cargo/bin:${HOME}/go/bin:/usr/local/sbin:/usr/local/bin:/usr/bin\n'
             'LANG=zh_CN.UTF-8\nLC_MESSAGES=en_US.UTF-8\nLANGUAGE=en_US:en:C\nGOBIN=${HOME}/go/bin\n'
+            'EDITOR=nvim\nVISUAL=nvim\n'
         ).encode(),
     }
 

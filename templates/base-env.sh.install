@@ -20,4 +20,6 @@ export LANG=zh_CN.UTF-8
 export LC_MESSAGES=en_US.UTF-8
 export LANGUAGE=en_US:en:C
 export GOBIN="$HOME/go/bin"
+export EDITOR=nvim
+export VISUAL=nvim
 unset _pennix_rest _pennix_new _pennix_item
