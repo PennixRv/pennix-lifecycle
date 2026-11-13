@@ -28,7 +28,7 @@ def digest(root: Path) -> str:
             continue
         info = path.lstat()
         if info.st_uid != os.getuid() or (not path.is_symlink() and info.st_mode & 0o022):
-            raise RuntimeError("工具运行环境归属或权限不安全")
+            raise RuntimeError(f"工具运行环境归属或权限不安全: {relative} uid={info.st_uid} mode={stat.S_IMODE(info.st_mode):o}")
         if path.is_symlink():
             if not path.resolve(strict=True).is_relative_to(root):
                 raise RuntimeError("工具运行环境包含外部链接")
