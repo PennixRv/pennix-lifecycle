@@ -600,6 +600,7 @@ def _emit(value: Any, as_json: bool) -> None:
             if item.get("detail"):
                 print(f"  {item['detail']}")
             if key == "base-environment":
+                print(f"  template: {item.get('template_source')} @ {item.get('template_version')}")
                 for change in item.get("files", []):
                     print(f"  {change['action']}: {change['path']} ({change['before_sha256'] or 'missing'} -> {change['after_sha256']})")
                 packages = item.get("packages", {})
@@ -2104,6 +2105,13 @@ def cmd_recover(args: argparse.Namespace) -> int:
         elif component and step["action"] in {"install", "upgrade", "adopt", "adopt-upgrade"} and step["target"]:
             component["_lock_target"] = step["target"]
             args.kconf, args.codex_home = kconf, home
+            if (step["action"] == "install" and component.get("package", {}).get("source") == "official"
+                    and owner_engine.package_absent(component)):
+                if not any(item["id"] == "system-upgrade" and item["status"] == "verified" for item in active["steps"]):
+                    raise CliError("缺失的官方包恢复须有同次完整系统升级证据；保留 unknown")
+                with tempfile.TemporaryDirectory(prefix="pennix-recover-arch-") as directory:
+                    candidate = candidates.resolve(component, Path(directory), step["target"])
+                    _run_component(args, catalog, step["component"], "install", candidate=candidate)
             status = _component_status(args, step["component"], component)
             if component.get("native_config"):
                 state, observed = owner_engine.probe_component(component, home)

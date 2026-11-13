@@ -130,6 +130,44 @@ class ConvergenceTests(unittest.TestCase):
         self.assertIsNone(apply_journal.read())
         self.assertEqual(owned_files.read_json(self.receipt_path), self.receipt)
 
+    def test_recover_missing_official_package_uses_frozen_target_and_upgrade_gate(self):
+        config, lock = self.root/'workflow.config', self.root/'components.lock.json'
+        config.write_text('same input')
+        sources = {'example': 'arch:extra/example'}
+        component = {'delivery': 'package', 'package': {'source': 'official', 'name': 'example'}}
+        target = {'source': sources['example'], 'version': '2.0-1', 'sha256': 'a'*64}
+        component_lock.write(lock, {'schema': 1, 'components': {}}, sources)
+        for upgraded, absent in [(False, True), (True, False), (True, True)]:
+            with self.subTest(upgraded=upgraded, absent=absent), patch.dict(os.environ,
+                    {'XDG_STATE_HOME': str(self.root/f'state-{upgraded}-{absent}')}):
+                with patch.dict(os.environ, {'CODEX_HOME': str(self.root)}):
+                    active = apply_journal.start('apply', None, apply_journal.digest(config), apply_journal.digest(lock), [
+                        {'id': 'system-upgrade', 'component': 'system', 'action': 'upgrade', 'target': {}},
+                        {'id': 'example:install', 'component': 'example', 'action': 'install', 'target': target}])
+                if upgraded:
+                    active = apply_journal.verified(active, 'system-upgrade', {})
+                apply_journal.unknown(active, 'example:install')
+                args = SimpleNamespace(json=True, resolve='completed', transaction=active['transaction'],
+                    step='example:install', component_lock_path=lock, component_lock_sources=sources,
+                    component_lock=component_lock.read(lock, sources))
+                with patch.object(pennix, '_load', return_value=(object(), config, {'components': {'example': component}})), \
+                     patch.object(config_model, 'config_value', return_value=str(self.root)), \
+                     patch.object(engine, 'package_absent', return_value=absent), \
+                     patch.object(pennix.candidates, 'resolve', return_value={'path': '/verified'}) as resolve, \
+                     patch.object(pennix, '_run_component') as install, \
+                     patch.object(pennix, '_component_status', side_effect=lambda *_: {'state': 'match', 'ownership': 'lifecycle' if install.called else 'external'}), \
+                     patch.object(pennix, '_emit'):
+                    if upgraded and absent:
+                        self.assertEqual(pennix.cmd_recover(args), 0)
+                        self.assertEqual(resolve.call_args.args[2], target)
+                        self.assertEqual(install.call_args.args[3], 'install')
+                        self.assertIsNone(apply_journal.read())
+                        self.assertEqual(component_lock.read(lock, sources)['components']['example'], target)
+                    else:
+                        with self.assertRaises(pennix.CliError): pennix.cmd_recover(args)
+                        install.assert_not_called()
+                        self.assertEqual(apply_journal.step(apply_journal.read(), 'example:install')['status'], 'unknown')
+
     def test_resume_refuses_new_installed_identity(self):
         with self.assertRaises(OSError):
             self.run_reconcile(fail_lock=True)

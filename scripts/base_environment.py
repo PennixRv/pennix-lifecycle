@@ -201,6 +201,8 @@ def inspect(kconf):
         current = not changes and not packages["versions"] and native_ready(native)
         return {"state": "blocked" if blocked else "current" if current else "missing",
                 "ownership": "lifecycle" if record else "external", "files": changes,
+                "template_version": (ROOT/'VERSION').read_text().strip(),
+                "template_source": "pennix-lifecycle/templates/base-*.install",
                 "conflicts": blocked, "packages": packages,
                 "native": native, "detail": "基础模板、软件和原生设置" if not blocked else "用户修改或外部配置需审阅摘要接管"}
     except (OSError, ValueError, files.OwnershipError, BaseError) as error:
