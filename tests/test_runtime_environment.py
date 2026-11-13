@@ -30,12 +30,16 @@ class RuntimeEnvironmentTests(unittest.TestCase):
             if '-m' in command and 'venv' in command:
                 target=Path(command[-1]);(target/'bin').mkdir(parents=True)
                 (target/'bin/python').write_text('fixture interpreter '+str(len(self.calls)))
+            if 'pip' in command:
+                lock=Path(command[command.index('--python')+1]).parent.parent/'.lock'
+                lock.write_text('');lock.chmod(0o666)
             return SimpleNamespace(returncode=0)
         self.run=patch.object(runtime.subprocess,'run',side_effect=execute);self.run.start();self.addCleanup(self.run.stop)
 
     def test_private_runtime_pins_python_hashes_and_ignores_external_uv_configuration(self):
         runtime.prepare(self.source)
         self.assertTrue(runtime.verify(self.source))
+        self.assertEqual((self.source/'.runtime/.lock').stat().st_mode & 0o777,0o600)
         commands=[c for c,k in self.calls]
         self.assertIn('--copies',commands[0]);self.assertIn('--without-pip',commands[0])
         self.assertIn('--require-hashes',commands[1]);self.assertIn('--no-python-downloads',commands[1])

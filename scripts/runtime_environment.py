@@ -80,6 +80,13 @@ def prepare(release: Path) -> None:
         subprocess.run(["/usr/bin/uv", "--no-config", "pip", "install", "--no-python-downloads",
                         "--python", str(environment / "bin/python"), "--default-index", "https://pypi.org/simple",
                         "--require-hashes", "--no-deps", "--only-binary", ":all:", "-r", str(requirements)], check=True, env=env)
+        # uv deliberately creates its venv lock as 0666, independently of umask.
+        lock = environment / '.lock'
+        if lock.exists() or lock.is_symlink():
+            info = lock.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                raise RuntimeError("uv 环境锁的类型或归属不安全")
+            lock.chmod(0o600)
         subprocess.run([str(environment / "bin/python"), "-I", "-B", "-c",
                         "import kconfiglib,menuconfig,tomlkit,yaml"], check=True, env=env)
         record = {"schema": 1, "digest": digest(environment), "python": python_digest,
