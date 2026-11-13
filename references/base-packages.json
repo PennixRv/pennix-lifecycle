@@ -4,7 +4,7 @@
     "zsh", "zsh-autosuggestions", "zsh-completions", "zsh-syntax-highlighting", "fzf", "zoxide", "fastfetch",
     "vim", "neovim", "nano", "less", "man-db", "man-pages", "which", "tree", "bat", "eza", "fd", "ripgrep", "jq", "go-yq", "sqlite", "rsync", "zip", "unzip", "7zip",
     "base-devel", "cmake", "ninja", "pkgconf", "gdb", "lld", "python", "python-pip", "nodejs-lts-krypton", "npm", "rust", "go",
-    "git", "github-cli", "gitea-cli", "git-lfs", "git-delta", "curl", "wget", "bind", "inetutils", "iproute2", "iputils", "lsof", "strace", "traceroute", "htop", "bubblewrap", "inotify-tools", "socat", "openbsd-netcat", "util-linux", "procps-ng", "psmisc", "shellcheck", "shfmt", "ruff", "docker", "docker-compose"
+    "git", "github-cli", "gitea-cli", "git-lfs", "git-delta", "curl", "wget", "bind", "inetutils", "iproute2", "iputils", "lsof", "strace", "traceroute", "htop", "bubblewrap", "inotify-tools", "socat", "openbsd-netcat", "util-linux", "procps-ng", "psmisc", "shellcheck", "shfmt", "ruff", "docker", "docker-compose", "docker-buildx"
   ],
   "aur": ["oh-my-zsh-git", "zsh-theme-powerlevel10k"]
 }

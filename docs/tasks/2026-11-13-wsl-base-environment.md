@@ -46,3 +46,5 @@ Node.js 24.22.3 的官方 Arch 包已通过签名核验，并在临时目录运�
 0.3.5 的 CI 43403986712、249 项源码回归及独立公开载荷测试通过。目标经原生恢复完成 Pandoc，再安装 0.3.5 继续 apply。基础官方包、yay 和文档组安装完成后，AUR 两个 GitHub 源出现目标侧 TLS EOF；保留基础 receipt 和同一 journal，经临时 SSH 回环 SOCKS 下载通道重试原始 HTTPS 源及 PKGBUILD 校验，恢复成功后立即关闭通道，无持久代理配置。
 
 真实验收暴露 P10k 模板的参数清理会移除之前设置的禁用向导标志，0.3.6 在加载后恢复明确策略；同时将基础 owner 错误交给既有 CLI 错误处理，保留事务摘要，避免裸 traceback。临时验收脚本另修正三个测试前提：独立 XDG 目录须具备 env.sh、Git 显式 --global 读取 include 须加 --includes、OCR 字间空白不视为识别失败；这些修正没有改动部署配置。
+
+容器构建验收同时收紧为默认的 BuildKit 路径：基础清单补齐同属 Arch 官方 Docker 工具链的 docker-buildx 0.38.2（仅依赖既有 glibc），不以 DOCKER_BUILDKIT=0 强制旧构建器作为最终证据。不增加第三方仓库、服务或外部镜像，仍使用本地 scratch 示例及既有 daemon。
