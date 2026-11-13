@@ -65,5 +65,15 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertEqual(release_owner._installed_digest(current),old)
         self.assertEqual(release_owner._active_target(self.home/'.local/bin/pennix',current.parent),current)
 
+    def test_internal_venv_links_are_allowed_but_external_targets_and_writable_files_are_rejected(self):
+        root=self.source/'.runtime';(root/'bin').mkdir(parents=True)
+        executable=root/'bin/python';executable.write_text('interpreter');executable.chmod(0o700)
+        link=root/'bin/python3';link.symlink_to('python')
+        self.assertTrue(runtime.digest(root))
+        executable.chmod(0o720)
+        with self.assertRaisesRegex(runtime.RuntimeError,'权限'):runtime.digest(root)
+        executable.chmod(0o700);link.unlink();link.symlink_to('/usr/bin/python3')
+        with self.assertRaisesRegex(runtime.RuntimeError,'外部链接'):runtime.digest(root)
+
 
 if __name__=='__main__':unittest.main()

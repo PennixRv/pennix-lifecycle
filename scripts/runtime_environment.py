@@ -27,7 +27,7 @@ def digest(root: Path) -> str:
         if "__pycache__" in relative.parts or path.suffix == ".pyc":
             continue
         info = path.lstat()
-        if info.st_uid != os.getuid() or info.st_mode & 0o022:
+        if info.st_uid != os.getuid() or (not path.is_symlink() and info.st_mode & 0o022):
             raise RuntimeError("工具运行环境归属或权限不安全")
         if path.is_symlink():
             if not path.resolve(strict=True).is_relative_to(root):
