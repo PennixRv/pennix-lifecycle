@@ -52,3 +52,13 @@ Node.js 24.22.3 的官方 Arch 包已通过签名核验，并在临时目录运�
 0.3.6 的 CI 43406037655、250 项源码回归及独立公开载荷验证通过，pennix 九组真实验收全过。home 安装相同公开工具、合并 profile 并绑定三个已批准文件摘要后，plan 在包写入前发现跨来源别名问题：component_lock.read 将旧 npm pnpm 来源规范化为 arch，破坏原生迁移所需旧锁证据。0.3.7 只规范化同包管理器的通道别名；跨包管理器保留已验证旧来源，直至 owner 显式迁移成功。增加真实锁文件读取不变、旧身份保留及迁移后新锁的回归。home 的 uv/Pandoc/LibreOffice 存量外部更新另走原生 reconcile，不伪造记录或以重装掩盖。
 
 用户在实施中明确希望 Go 用户目录改为隐藏的 .go。0.3.8 将公共 Shell 和用户服务的 GOPATH 统一为 ~/.go、GOBIN 为 ~/.go/bin，PATH 同步替换并去掉旧 ~/go/bin；系统 Go 的 /usr/bin/go、/usr/lib/go 和独立编译缓存保持原生归属。扩展 Bash/zsh 隔离回归与真实服务/用户入口验收。设备盘点确认两端均无 ~/.go；home 的 ~/go 仅有 pkg，pennix 的 ~/go 仅有空 bin。后续只在没有 Go 写入和目标不存在时原位重命名，保留模块缓存；不为一次迁移新增通用目录管理框架。
+
+## 最终设备验收
+
+正式 v0.3.8（4cc60b4，CI 43407849338）251 项源码回归通过、2 项原生条件跳过，构建及公开载荷独立门禁均通过。公开 tar SHA-256 为 `9e3d57d03400d0a01aa9c6da20d8a9ebaf73458fbbca93181e28bc4695776a6e`。两端安装同一公开工具并经原生入口应用；Go 工作区在确认无写入和目标不存在后原位改名，目录 inode 和模块内容保留。
+
+两端各九组真实验收全过：新会话 Shell/PATH/locale、PTY 主题/插件/私人覆盖、用户服务 transient unit、语言编译/包管理器、npm/Cargo/Go 用户入口、Git/Neovim/独立 tmux、文档/PDF/Office/OCR、默认 BuildKit 构建及容器/Compose、原生 base check。home 的新 SSH 登录验证 docker 组与无额外 LC_ALL；旧 Agent 进程的继承环境不作为新登录结果。六份公共模板文件逐一同摘要；私人身份、CCH 和机器内容独立。
+
+home 已原生 reconcile 存量官方包差异，迁移 Node 26→24、npm pnpm→官方 12.19.0，退出旧入口与 pnpm 迁移备份，journal idle。现役 Paseo/Trellis/adapter/Context Mode/CodeGraph/CCH 入口在实际 Node24 下可运行；Paseo/adapter 八个已安装 Linux 原生模块加载通过。CCH source 摘要及原有 Codex 进程保留。两端 sshd/NAS 隧道正常，既有密钥互联回归通过。未运行重启、睡眠、异网及实际剪贴板/字体目视验收，符合原接受边界。
+
+新机 AUR 构建附带的 yay-bin-debug、zsh-theme-powerlevel10k-debug 经 pacman 依赖检查后精确移除，共约 16.84 MiB；未删除软件缓存、Go 模块缓存、既有容器数据或用户历史。具名测试项目、工具入口、tmux server、容器和镜像均已退出；余下交付文档、任务及 Git 收尾由根任务记录。
