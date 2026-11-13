@@ -15,7 +15,34 @@ pennix apply
 
 可用 `--release vMAJOR.MINOR.PATCH` 固定版本；root 调用必须显式传入 `--user USER`，工具自身卸载使用 `bootstrap.sh uninstall`。bootstrap 只准备工具运行依赖，不安装 AUR helper 或工作流组件。
 
-支持范围为 Arch Linux / WSL2 Arch、x86_64、zsh 自动 PATH 管理。bootstrap 会先执行完整 `pacman -Syu`，安装系统 Python 及 Kconfiglib、TOML、YAML、base-devel 等运行依赖；不以局部依赖升级替代完整系统准备。普通用户的 HOME 必须与目标账户一致；root→用户调用清空宿主环境。自定义 XDG 目录可在普通用户入口保留。
+支持范围为 Arch Linux / WSL2 Arch、x86_64。bootstrap 会先执行完整 `pacman -Syu`，准备 curl、CA/keyring、系统 Python 和 uv；Kconfiglib、TOML、YAML 按发行内的完整哈希锁安装到工具私有 `.runtime`，不再要求系统 Kconfiglib/AUR 包或全局 pip。不以局部依赖升级替代完整系统准备。普通用户的 HOME 必须与目标账户一致；root→用户调用清空宿主环境。自定义 XDG 目录可在普通用户入口保留。发现未结事务时 bootstrap 先停止，不能用重装清除 unknown。
+
+## 开发基础环境
+
+普通工具安装保持最小默认。显式选择开发基础环境时，使用同一固定发行的公开 bootstrap：
+
+```sh
+bash /path/to/bootstrap.sh install --release v0.3.0 --profile development --git-name 'Your Name' --git-email 'you@example.org'
+```
+
+这会生成或合并 `development` profile，展示基础范围计划，再要求确认完整系统升级与应用。Git 白名单身份只绑定在目标机，不带入认证。已有工具可使用：
+
+```sh
+pennix config init --profile development --git-name 'Your Name' --git-email 'you@example.org'
+pennix plan --scope base --json
+pennix apply --scope base
+pennix check --scope base --json
+```
+
+新配置只选择基础能力、共享 pnpm/uv/tmux/tmux-config 和文档组；已有配置仅合并这些选择，保留其他组件和设备专属值。`--scope base` 不配置、卸载或启停范围外的工作流集成和 Paseo。基础包清单由 `references/base-packages.json` 唯一维护；软件继续归 pacman/AUR 数据库，不建立机器级全依赖锁。系统使用 Node.js 24 LTS、官方 pnpm、系统 Rust/Cargo 和 Go，不增加语言版本管理器。AUR 候选必须有维护者且未被标记过期；Oh My Zsh 的 VCS 版本由原生 `pkgver` 生成。
+
+稳定公共配置位于 `$XDG_CONFIG_HOME/pennix/base`，P10k 位于 `~/.p10k.zsh`。公共 PATH 由 `path_env` 管理，覆盖 zsh、Bash 和适用的 `environment.d`；保留项目 venv 优先级，去重并移除旧 `.npm-global`、无来源 `~/bin`、Windows PATH 及 Codex 临时注入路径。Shell 无 TTY 时不初始化主题，不自动启动 tmux/fastfetch。私人覆盖可分别使用 `zshrc.local.zsh`、`p10k.local.zsh`、`nvim.local.lua`，工具不创建空占位文件或覆盖它们。
+
+plan 展示目标、前后摘要、接管对象和原生设置。已有整份 P10k 或包含旧主题初始化的 `.zshrc` 必须先审阅，再把目标绝对路径与当时 SHA-256 写入 `PENNIX_BASE_ADOPT_FILES` 的 JSON 映射；摘要变化、符号链接、未知用户修改、重复/缺失标记均停止。Git 通过原生 include 加载公共偏好与私有身份，保留项目覆盖和认证。tmux 仅升级可证明的上一版受管段，保留 CCH 与外部内容。
+
+基础部署会生成指定中英文 locale、设置目标用户默认 zsh、启用本地 Docker 服务并加入 docker 组；新登录后核验组权限。保留现有 Docker 数据，不开放 TCP API。已有 npm pnpm 只有在旧锁、receipt 和实际身份一致时才退出原 owner；精确旧归档作为私有恢复材料保留，官方安装、后置验证及新锁提交成功后才退出。迁移中断使用同一事务的 `recover --resolve completed` 续接，或 `recover --resolve restored` 从已核验的旧归档恢复原 owner 和锁；未知系统包归属会阻断撤回，不手写归属。
+
+`repair base-environment` 可补回缺失的自有配置；用户修改继续阻断，缺失软件须回到有完整升级确认的 apply。`uninstall base-environment --confirm base-environment` 精确恢复原配置及适用原生设置，保留软件、文档和共享依赖；Docker 已有容器或镜像时保留服务和组设置。工具自身卸载不删除稳定基础配置。Python ABI 变化时通过同版本 bootstrap 重建私有工具环境，切换或回执失败保留原活动身份。
 
 同设备同用户仅维护一个目标，允许非默认 CODEX_HOME。共享锁和目标登记不随 XDG_STATE_HOME 改变；切换状态目录或目标会阻断，不能绕过已有事务。跨设备只传递 `workflow.config` 的配置意图；目标机重新解析包身份并建立本机锁、receipt、秘密和 journal，不复制这些运行记录。
 

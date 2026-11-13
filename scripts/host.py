@@ -121,7 +121,8 @@ def package_install_command(
         if extras and "==" in package:
             name, version = package.split("==", 1)
             requirement = f"{name}[{','.join(extras)}]=={version}"
-        command = ["uv", "tool", "install", "--force", requirement]
+        command = ["uv", "tool", "install", "--force", "--python", "/usr/bin/python3",
+                   "--no-python-downloads", requirement]
         for item in requirements or []:
             command += ["--with", item]
         return command
@@ -165,7 +166,7 @@ def ensure_aur_helper(spec: dict[str, str]) -> str:
         raise RuntimeError("AUR helper 固定来源无效")
     dependencies = subprocess.run(["pacman", "-T", "base-devel", "git"], capture_output=True, check=False)
     if dependencies.returncode:
-        raise RuntimeError("AUR helper 需要完整系统升级后准备 base-devel/git；请先运行 bootstrap，不进行局部依赖升级")
+        raise RuntimeError("AUR helper 需要 base-devel/git；请先应用 development profile，或经完整系统升级显式准备依赖，不进行局部依赖升级")
     commands = []
     with tempfile.TemporaryDirectory(prefix="pennix-aur-helper-") as directory:
         commands += [["git", "init", directory],

@@ -31,6 +31,8 @@ import paseo_service
 import relay_owner
 import release_owner
 import skill_collections
+import base_environment
+import pnpm_migration
 import owned_files
 import secret_store
 import native_integrations
@@ -44,8 +46,10 @@ APPLY_ORDER = [
     "markitdown", "pandoc", "libreoffice", "poppler", "tesseract", "tesseract-eng", "tesseract-chi-sim", "noto-fonts-cjk",
     "tavily-hikari", "peon-ping", "codex-config", "codex-agents", "pennix-skills-extra",
     "pennix-skills",
+    "base-environment",
 ]
 DEPENDENCIES = {
+    "base-environment": base_environment.SHARED,
     "tmux-config": {"tmux"}, "ponytail-plugin": {"codex-cli"},
     "codex-config": {"codex-cli"}, "codex-agents": {"codex-cli"},
     "context-mode": {"codex-cli"}, "tavily-hikari": {"tavily-cli", "pennix-skills"},
@@ -168,6 +172,8 @@ def _package_diagnostics(component_id: str, component: dict[str, Any], state: st
 
 
 def _component_status(args: argparse.Namespace, component_id: str, component: dict[str, Any]) -> dict[str, Any]:
+    if component_id == "base-environment":
+        return base_environment.inspect(args.kconf)
     if component_id == "codex-config":
         values = config_model.values(args.kconf)
         status = codex_config.inspect(args.codex_home / "config.toml", values)
@@ -268,6 +274,34 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
     selected = config_model.selected_components(kconf)
     components: dict[str, Any] = {}
     for component_id, component in catalog["components"].items():
+        if getattr(args, "scope", None) == "base" and component_id not in base_environment.SCOPE:
+            components[component_id] = {"selected": False, "action": "keep", "state": "outside-scope"}
+            continue
+        if component_id == "base-environment":
+            if component_id in selected:
+                status = base_environment.inspect(kconf)
+                action = "blocked" if status["state"] == "blocked" else "keep" if status["state"] == "current" else "install"
+                if status.get("packages", {}).get("versions") and config_model.config_value(kconf, "PENNIX_SYSTEM_UPGRADE") != "y":
+                    action = "blocked"
+                    status["detail"] = "基础软件安装需要同次确认的完整系统升级"
+            else:
+                owned = base_environment.receipt() is not None
+                status = {"state": "current" if owned else "missing"}
+                action = "uninstall" if owned else "keep"
+            components[component_id] = {**status, "selected": component_id in selected, "action": action}
+            continue
+        if component_id == "pnpm" and pnpm_migration.needed():
+            try:
+                pnpm_migration.inspect(args.component_lock["components"].get("pnpm"))
+                status = {"state": "migration-required", "source_migration": True,
+                          "detail": "经旧 npm receipt/锁核验后退出旧入口，安装官方 pnpm 并更新唯一归属"}
+                action = "install" if component_id in selected else "blocked"
+                if config_model.config_value(kconf, "PENNIX_SYSTEM_UPGRADE") != "y":
+                    action = "blocked"
+            except (owner_engine.BootstrapError, owned_files.OwnershipError) as error:
+                status, action = {"state": "blocked", "detail": str(error)}, "blocked"
+            components[component_id] = {**status, "selected": component_id in selected, "action": action}
+            continue
         if component.get("delivery") == "state":
             components[component_id] = {"selected": False, "action": "ignored", "state": "runtime-state"}
             continue
@@ -367,7 +401,7 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             if status["state"] == "upgrade-required":
                 action = "blocked"
             if status["state"] == "migration-required":
-                action = "repair"
+                action = "install" if component_id == "tmux-config" else "repair"
             if status["state"] in {"drifted", "blocked"}:
                 action = "repair"
             if status["state"] == "adoption-required":
@@ -455,6 +489,14 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
                 action = "blocked"
                 status["detail"] = "lock 不代表归属；plugin 需要独立可信 receipt 和专用接管确认"
         components[component_id] = {**status, "selected": component_id in selected, "action": action}
+    if getattr(args, "scope", None) == "base":
+        components["paseo-autostart"] = {"selected": False, "action": "keep", "state": "outside-scope",
+            "unit_state": "absent", "mode": "off", "run": False, "listen": "", "runtime": {"running": False}}
+        return {"config": str(path), "codex_home": str(args.codex_home), "components": components,
+                "connections": {}, "functional_checks_requested": False,
+                "side_effects": {"path": {"action": path_env.inspect(str(Path.home()/'.local'))},
+                    "system_upgrade": config_model.config_value(kconf, "PENNIX_SYSTEM_UPGRADE") == "y",
+                    "system_upgrade_command": "sudo pacman -Syu --noconfirm"}}
     prefix = Path.home() / ".local"
     paseo = prefix / "bin" / "paseo"
     if not paseo.is_file():
@@ -555,6 +597,14 @@ def _emit(value: Any, as_json: bool) -> None:
             print(f"{key}: {item['action']} ({item['state']})")
             if item.get("detail"):
                 print(f"  {item['detail']}")
+            if key == "base-environment":
+                for change in item.get("files", []):
+                    print(f"  {change['action']}: {change['path']} ({change['before_sha256'] or 'missing'} -> {change['after_sha256']})")
+                packages = item.get("packages", {})
+                for name, version in packages.get("versions", {}).items():
+                    print(f"  package: {name}={version}")
+                for conflict in item.get("conflicts", []):
+                    print(f"  conflict: {conflict}")
         for key, item in value.get("connections", {}).items():
             print(f"connection:{key}: {item['action']} ({item['state']})")
             if item.get("detail"):
@@ -595,6 +645,8 @@ def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_
         _delegation_preflight(args, component_id, operation)
     component = catalog["components"][component_id]
     owned_files.bind_target(args.codex_home, register=True)
+    if component_id == "base-environment":
+        return base_environment.uninstall() if operation == "uninstall" else base_environment.apply(args.kconf, catalog)
     native = component.get("native_config")
     if native and operation in {"configure", "unconfigure"}:
         if operation == "unconfigure":
@@ -616,6 +668,10 @@ def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_
     if candidate:
         engine_args.candidate = candidate
         engine_args.explicit_update = operation == "upgrade"
+    if component_id == "pnpm" and operation in {"install", "upgrade"} and pnpm_migration.needed():
+        if candidate is None:
+            raise CliError("pnpm 来源迁移缺少同事务的精确官方候选")
+        return pnpm_migration.apply(engine_args, catalog, component, candidate)
     try:
         if component.get("delivery") in {"static", "collection"}:
             return owner_engine.static_operation(engine_args, component_id, component, operation, catalog)
@@ -683,7 +739,9 @@ def _delegation_preflight(args: argparse.Namespace, component_id: str, operation
 
 
 def cmd_config_init(args: argparse.Namespace) -> int:
-    path = config_model.init(args.config, force=args.force, defconfig=args.defconfig)
+    path = config_model.init(args.config, force=args.force, defconfig=args.defconfig,
+                             profile=getattr(args, "profile", None),
+                             git_name=getattr(args, "git_name", None), git_email=getattr(args, "git_email", None))
     print(path)
     return 0
 
@@ -770,7 +828,7 @@ def _apply_steps(value: dict[str, Any], args: argparse.Namespace, catalog: dict[
         action = item.get("action")
         if item.get("selected") and action in {"install", "adopt", "upgrade", "adopt-upgrade"}:
             steps.append({"id": f"{key}:{action}", "component": key, "action": action,
-                          "target": item.get("candidate_target") or args.component_lock["components"].get(key, {})})
+                          "target": {} if item.get("source_migration") else item.get("candidate_target") or args.component_lock["components"].get(key, {})})
         if item.get("selected") and item.get("plugin_adoption"):
             steps.append({"id": f"{key}:adopt-plugin", "component": key,
                           "action": "adopt-plugin", "target": item["plugin_adoption"]})
@@ -875,6 +933,10 @@ def _retry_unknown_update(active: dict, step_id: str, state: str) -> dict:
 def _refresh_arch_receipts(args: argparse.Namespace, catalog: dict[str, Any]) -> None:
     updates = []
     for component_id, component in catalog["components"].items():
+        if getattr(args, "scope", None) == "base" and component_id not in base_environment.SCOPE:
+            continue
+        if component_id == "pnpm" and pnpm_migration.needed():
+            continue
         package = component.get("package") if component else None
         if not isinstance(package, dict) or package.get("source") != "official":
             continue
@@ -1135,6 +1197,8 @@ def cmd_apply(args: argparse.Namespace) -> int:
                 raise CliError(f"journal 引用未知组件: {component_id}")
             operation = "upgrade" if action in {"upgrade", "adopt-upgrade"} else "install"
             target = step["target"] or args.component_lock["components"].get(component_id)
+            if component_id == "pnpm" and pnpm_migration.needed() and not step["target"]:
+                target = (pnpm_migration.pending() or {}).get("new_target")
             component["_lock_target"] = target if target else component.get("_lock_target")
             if component.get("delivery") in {"package", "plugin", "client", "collection"}:
                 with tempfile.TemporaryDirectory(prefix="pennix-candidate-") as directory:
@@ -1150,6 +1214,8 @@ def cmd_apply(args: argparse.Namespace) -> int:
                         result = _run_component(args, catalog, component_id, operation, candidate=candidate)
                         args.component_lock = component_lock.set_entry(args.component_lock, component_id, target, args.component_lock_sources)
                         _write_lock(args)
+                        if component_id == "pnpm":
+                            pnpm_migration.finish(component, target)
                         return result
                     active, results[component_id] = _journal_mutate(active, step_id, install)
             else:
@@ -1372,7 +1438,8 @@ def cmd_repair(args: argparse.Namespace) -> int:
         active, configured = _journal_mutate(active, f"{args.component}:configure",
             lambda: _run_component(args, catalog, args.component, "configure", repair=True))
         result = f"{result}; native {configured}"
-    active = _configure_copilot(args, catalog, active, repair=True)
+    if args.component != "base-environment":
+        active = _configure_copilot(args, catalog, active, repair=True)
     apply_journal.clear()
     _emit({"operation": "repair", "component": args.component, "status": result}, args.json)
     return 0
@@ -1958,6 +2025,14 @@ def cmd_recover(args: argparse.Namespace) -> int:
     step = apply_journal.step(active, args.step)
     if args.resolve in {"not-started", "restored"}:
         required = "none" if args.resolve == "not-started" else "restored"
+        if step['component'] == 'pnpm' and args.resolve == 'restored' and step['status'] != 'verified' and pnpm_migration.pending():
+            args.kconf, args.codex_home = kconf, home
+            previous = pnpm_migration.restore(_args_for_engine(args, 'install'), catalog, catalog['components']['pnpm'])
+            args.component_lock = component_lock.set_entry(args.component_lock, 'pnpm', previous, args.component_lock_sources)
+            _write_lock(args)
+            pnpm_migration.finish_restore(previous)
+            active = apply_journal.rejected(apply_journal.read(), step['id'], 'restored')
+            step = apply_journal.step(active, args.step)
         if step["component"].startswith("connection:") and args.resolve == "restored":
             target = step["component"].split(":", 1)[1]
             spec = catalog["configuration_targets"].get(target, {})
@@ -2006,6 +2081,23 @@ def cmd_recover(args: argparse.Namespace) -> int:
                 if mcp["state"] != ("current" if step["action"] == "configure" else "absent"):
                     raise CliError("SiYuan MCP 后置条件未证明")
             active = apply_journal.verified(active, step["id"], {"state": state["state"], "recovered": True})
+        elif step["component"] == "pnpm" and pnpm_migration.needed() and step["target"]:
+            component["_lock_target"] = step["target"]
+            args.kconf, args.codex_home = kconf, home
+            with tempfile.TemporaryDirectory(prefix="pennix-pnpm-recover-") as directory:
+                candidate = candidates.resolve(component, Path(directory), step["target"])
+                _run_component(args, catalog, "pnpm", "install", candidate=candidate)
+            args.component_lock = component_lock.set_entry(args.component_lock, "pnpm", step["target"], args.component_lock_sources)
+            _write_lock(args)
+            pnpm_migration.finish(component, step["target"])
+            active = apply_journal.verified(apply_journal.read(), step["id"], {"recovered": True, "state": "match"})
+        elif step["component"] == "base-environment" and step["action"] in {"install", "upgrade"}:
+            if base_environment.receipt() is None:
+                raise CliError("基础环境没有同目标 owner receipt；不能释放 unknown")
+            base_environment.apply(kconf, catalog)
+            if base_environment.inspect(kconf)["state"] != "current":
+                raise CliError("基础环境 owner 未证明完成")
+            active = apply_journal.verified(active, step["id"], {"recovered": True, "state": "current"})
         elif component and step["action"] in {"install", "upgrade", "adopt", "adopt-upgrade"} and step["target"]:
             component["_lock_target"] = step["target"]
             args.kconf, args.codex_home = kconf, home
@@ -2066,12 +2158,16 @@ def parser() -> argparse.ArgumentParser:
         if name == "init":
             child.add_argument("--force", action="store_true")
             child.add_argument("--defconfig", help="从严格校验的 defconfig 生成 workflow.config")
+            child.add_argument("--profile", choices=["development"], help="显式合并基础能力及共享依赖，不取消已有选择")
+            child.add_argument("--git-name", help="仅向目标机绑定 Git 姓名，不复制认证")
+            child.add_argument("--git-email", help="仅向目标机绑定 Git 邮箱，不复制认证")
         child.set_defaults(function=function)
 
     for name, function in (("plan", cmd_plan), ("status", cmd_status), ("check", cmd_check), ("apply", cmd_apply)):
         child = sub.add_parser(name)
         child.add_argument("--config")
         child.add_argument("--json", action="store_true")
+        child.add_argument("--scope", choices=["base"], help="仅处理基础能力和共享依赖，不撤回范围外组件")
         child.set_defaults(function=function)
 
     repair = sub.add_parser("repair")

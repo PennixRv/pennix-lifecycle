@@ -97,7 +97,8 @@ def _validate(kconf: StrictKconfig, raw: str) -> None:
         raise ConfigError("配置语法无效: " + kconf.diagnostics[0])
     assignments = _parse_assignments(raw, kconf)
     for symbol in kconf.unique_defined_syms:
-        if symbol.name.startswith("PENNIX_COMPONENT_") and symbol.visibility and symbol.name not in assignments:
+        if (symbol.name.startswith("PENNIX_COMPONENT_") and symbol.visibility and symbol.name not in assignments
+                and symbol.name != "PENNIX_COMPONENT_BASE_ENVIRONMENT"):
             raise ConfigError(f"组件选择缺失，需核对新配置项: {symbol.name}")
     for name, value in assignments.items():
         symbol = kconf.syms[name]
@@ -186,27 +187,51 @@ def write(kconf, path: Path, before=_UNSPECIFIED) -> None:
     files.replace(path, output, previous, mode=mode & 0o600)
 
 
-def init(explicit: str | None = None, *, force: bool = False, defconfig: str | None = None) -> Path:
+def init(explicit: str | None = None, *, force: bool = False, defconfig: str | None = None,
+         profile: str | None = None, git_name: str | None = None, git_email: str | None = None) -> Path:
     path = config_path(explicit)
     previous = files.read(path)
-    if previous is not None and not force:
+    if profile is not None and (profile != "development" or force or defconfig):
+        raise ConfigError("development profile 不与 --force/--defconfig 混用")
+    if (git_name is not None or git_email is not None) and profile is None:
+        raise ConfigError("Git 白名单值仅用于显式 development profile")
+    if previous is not None and not force and profile is None:
         load(str(path))
         return path
     if defconfig:
-        profile = Path(defconfig).expanduser()
-        if not profile.is_absolute():
-            profile = Path.cwd() / profile
-        if profile.is_symlink():
+        defconfig_path = Path(defconfig).expanduser()
+        if not defconfig_path.is_absolute():
+            defconfig_path = Path.cwd() / defconfig_path
+        if defconfig_path.is_symlink():
             raise ConfigError("defconfig 必须是普通文件")
         try:
-            profile = profile.resolve(strict=True)
+            defconfig_path = defconfig_path.resolve(strict=True)
         except OSError as error:
-            raise ConfigError(f"defconfig 不存在: {profile}") from error
-        if profile.is_symlink() or not profile.is_file():
+            raise ConfigError(f"defconfig 不存在: {defconfig_path}") from error
+        if defconfig_path.is_symlink() or not defconfig_path.is_file():
             raise ConfigError("defconfig 必须是普通文件")
-        kconf = _load_file(profile)
+        kconf = _load_file(defconfig_path)
     else:
-        kconf = _new()
+        kconf = load(str(path))[0] if previous is not None and profile else _new()
+    if profile:
+        import base_environment
+        if previous is None:
+            for symbol in kconf.unique_defined_syms:
+                if symbol.name.startswith("PENNIX_COMPONENT_"):
+                    symbol.set_value("n")
+            kconf.syms["PENNIX_PASEO_AUTOSTART_OFF"].set_value("y")
+            kconf.syms["PENNIX_PASEO_RUN"].set_value("n")
+        kconf.syms["PENNIX_COMPONENT_BASE_ENVIRONMENT"].set_value("y")
+        for key in base_environment.SHARED | base_environment.DOCUMENTS:
+            kconf.syms["PENNIX_COMPONENT_" + key.upper().replace("-", "_")].set_value("y")
+        kconf.syms["PENNIX_DOCUMENT_READING"].set_value("y")
+        kconf.syms["PENNIX_SYSTEM_UPGRADE"].set_value("y")
+        kconf.syms["PENNIX_ADOPT_EXISTING_PACKAGES"].set_value("y")
+        for key, value in [("PENNIX_BASE_GIT_NAME", git_name), ("PENNIX_BASE_GIT_EMAIL", git_email)]:
+            if value is not None:
+                if not value or any(c in value for c in "\n\r\0"):
+                    raise ConfigError("Git 身份值为空或包含控制字符")
+                kconf.syms[key].set_value(value)
     write(kconf, path, before=previous)
     return path
 
@@ -236,8 +261,9 @@ def edit(explicit: str | None = None) -> Path:
 
 
 def selected_components(kconf) -> set[str]:
-    return {key.removeprefix("PENNIX_COMPONENT_").lower().replace("_", "-")
+    result = {key.removeprefix("PENNIX_COMPONENT_").lower().replace("_", "-")
             for key in values(kconf) if key.startswith("PENNIX_COMPONENT_") and kconf.syms[key].tri_value}
+    return result
 
 
 def config_value(kconf, name: str) -> str:

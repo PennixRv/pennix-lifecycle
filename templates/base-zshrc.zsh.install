@@ -1,0 +1,29 @@
+[[ -o interactive && -t 0 && -t 1 ]] || return 0
+export ZSH=/usr/share/oh-my-zsh
+export ZSH_CUSTOM="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}"
+export ZSH_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/oh-my-zsh"
+zstyle ':omz:update' mode disabled
+ZSH_THEME=''
+plugins=(git sudo archlinux systemd extract colored-man-pages)
+source "$ZSH/oh-my-zsh.sh"
+autoload -Uz add-zsh-hook
+add-zsh-hook -d precmd omz_termsupport_cwd 2>/dev/null
+HISTFILE=$HOME/.zsh_history
+HISTSIZE=50000
+SAVEHIST=50000
+setopt share_history hist_ignore_all_dups hist_ignore_space hist_verify
+export COLORTERM=truecolor
+eval "$(zoxide init zsh)"
+eval "$(fzf --zsh)"
+alias ls='eza --group-directories-first --color=auto'
+alias cat='bat --paging=never --style=plain'
+typeset -g POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD=true
+source /usr/share/zsh-theme-powerlevel10k/powerlevel10k.zsh-theme
+source "$HOME/.p10k.zsh"
+if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/p10k.local.zsh" ]]; then
+  source "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/p10k.local.zsh"
+  (( ! $+functions[p10k] )) || p10k reload
+fi
+source /usr/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh
+source /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+[[ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/zshrc.local.zsh" ]] || source "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/zshrc.local.zsh"

@@ -1,0 +1,13 @@
+vim.opt.number = true
+vim.opt.relativenumber = true
+vim.opt.ignorecase = true
+vim.opt.smartcase = true
+vim.opt.expandtab = true
+vim.opt.shiftwidth = 2
+vim.opt.tabstop = 2
+vim.opt.termguicolors = true
+vim.opt.undofile = true
+vim.opt.signcolumn = 'yes'
+-- 尊重 Neovim 原生 provider 探测，不向 SSH 会话强制注入宿主剪贴板。
+local personal = vim.fn.stdpath('config') .. '/../pennix/base/nvim.local.lua'
+if vim.fn.filereadable(personal) == 1 then dofile(personal) end

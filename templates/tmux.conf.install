@@ -2,3 +2,18 @@ set -g default-terminal "xterm-256color"
 set-option -ga terminal-overrides ",xterm-256color:Tc"
 set -g window-style "fg=#F5F5F5,bg=#1E1E1E"
 set -g window-active-style "fg=#F5F5F5,bg=#1E1E1E"
+set -g prefix C-b
+set -g mouse on
+set -g history-limit 50000
+set -g base-index 1
+set -g renumber-windows on
+set -g focus-events on
+set -g allow-passthrough on
+set -s extended-keys on
+set -as terminal-features 'xterm*:extkeys'
+bind | split-window -h -c "#{pane_current_path}"
+bind - split-window -v -c "#{pane_current_path}"
+bind h select-pane -L
+bind j select-pane -D
+bind k select-pane -U
+bind l select-pane -R

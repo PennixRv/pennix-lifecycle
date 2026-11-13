@@ -7,10 +7,13 @@ operation='install'
 release='latest'
 target_user=''
 no_input=0
+profile=''
+git_name=''
+git_email=''
 
 usage() {
   cat <<'EOF'
-Usage: bootstrap.sh [install|uninstall] [--release TAG] [--user USER] [--no-input]
+Usage: bootstrap.sh [install|uninstall] [--release TAG] [--user USER] [--no-input] [--profile development --git-name NAME --git-email EMAIL]
 
 install downloads and verifies the current official lifecycle runtime.
 uninstall removes only the active lifecycle tool release.
@@ -38,10 +41,21 @@ while (($#)); do
     --release) (($# >= 2)) || { usage >&2; exit 2; }; release="$2"; shift 2 ;;
     --user) (($# >= 2)) || { usage >&2; exit 2; }; target_user="$2"; shift 2 ;;
     --no-input) no_input=1; shift ;;
+    --profile) (($# >= 2)) || { usage >&2; exit 2; }; profile="$2"; shift 2 ;;
+    --git-name) (($# >= 2)) || { usage >&2; exit 2; }; git_name="$2"; shift 2 ;;
+    --git-email) (($# >= 2)) || { usage >&2; exit 2; }; git_email="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
 done
+[[ -z "${profile}" || "${profile}" == development ]] || { echo 'bootstrap: unsupported profile' >&2; exit 2; }
+[[ "${operation}" != uninstall || -z "${profile}" ]] || { echo 'bootstrap: uninstall does not accept a profile' >&2; exit 2; }
+if [[ -n "${git_name}${git_email}" && "${profile}" != development ]]; then
+  echo 'bootstrap: Git identity requires the development profile' >&2; exit 2
+fi
+if [[ "${profile}" == development && ( -z "${git_name}" || -z "${git_email}" ) ]]; then
+  echo 'bootstrap: development profile requires explicit --git-name and --git-email' >&2; exit 2
+fi
 
 if [[ "${EUID}" -eq 0 ]]; then
   [[ -n "${target_user}" ]] || { echo 'bootstrap: root requires --user USER' >&2; exit 2; }
@@ -61,6 +75,14 @@ IFS=: read -r _ _ target_uid target_gid _ target_home _ <<<"${passwd_entry}"
 }
 if [[ "${EUID}" -ne 0 && "${HOME}" != "${target_home}" ]]; then
   echo 'bootstrap: HOME must match the target account home' >&2
+  exit 2
+fi
+
+state_home="${target_home}/.local/state"
+if [[ "${EUID}" -ne 0 ]]; then state_home="${XDG_STATE_HOME:-${state_home}}"; fi
+[[ "${state_home}" == /* && "/${state_home}/" != */../* ]] || { echo 'bootstrap: unsafe state directory' >&2; exit 2; }
+if [[ -e "${state_home}/pennix-lifecycle/apply-journal.json" || -L "${state_home}/pennix-lifecycle/apply-journal.json" ]]; then
+  echo 'bootstrap: pending lifecycle transaction; inspect with the installed pennix recover before tool replacement' >&2
   exit 2
 fi
 
@@ -91,13 +113,13 @@ fi
 
 echo 'bootstrap: 将执行完整 Arch 系统升级（pacman -Syu）并安装运行依赖。' >&2
 if [[ "${EUID}" -eq 0 ]]; then
-  pacman -Syu --needed --noconfirm curl python python-kconfiglib python-tomlkit python-yaml npm git zsh base-devel
+  pacman -Syu --needed --noconfirm curl ca-certificates archlinux-keyring python uv
 else
   command -v sudo >/dev/null || { echo 'bootstrap: sudo is required to install Arch dependencies' >&2; exit 2; }
   if ((no_input)); then
-    sudo -n pacman -Syu --needed --noconfirm curl python python-kconfiglib python-tomlkit python-yaml npm git zsh base-devel
+    sudo -n pacman -Syu --needed --noconfirm curl ca-certificates archlinux-keyring python uv
   else
-    sudo pacman -Syu --needed --noconfirm curl python python-kconfiglib python-tomlkit python-yaml npm git zsh base-devel
+    sudo pacman -Syu --needed --noconfirm curl ca-certificates archlinux-keyring python uv
   fi
 fi
 
@@ -105,9 +127,6 @@ export PATH="/usr/bin:/bin:${PATH}"
 for command in curl sha256sum python3; do
   command -v "${command}" >/dev/null || { echo "bootstrap: required command is missing: ${command}" >&2; exit 2; }
 done
-/usr/bin/python3 -c 'import kconfiglib, tomlkit, yaml' || {
-  echo 'bootstrap: Arch Python dependencies are unavailable' >&2; exit 2;
-}
 
 if [[ "${release}" == latest ]]; then
   latest_url="$(curl --proto '=https' --tlsv1.2 -fsSIL -o /dev/null -w '%{url_effective}' "https://github.com/${repo}/releases/latest")"
@@ -175,7 +194,19 @@ source_dir="${tmp}/unpacked/pennix-lifecycle"
 
 if [[ "${EUID}" -eq 0 ]]; then
   chown -R "${target_uid}:${target_gid}" "${tmp}"
-  run_target "${source_dir}/pennix" tool install
+  run_target /usr/bin/python3 -B "${source_dir}/scripts/install_tool.py"
 else
-  "${source_dir}/pennix" tool install
+  /usr/bin/python3 -B "${source_dir}/scripts/install_tool.py"
+fi
+if [[ "${profile}" == development ]]; then
+  installed="${target_home}/.local/bin/pennix"
+  if [[ "${EUID}" -eq 0 ]]; then
+    run_target "${installed}" config init --profile development --git-name "${git_name}" --git-email "${git_email}"
+    run_target "${installed}" plan --scope base
+    run_target "${installed}" apply --scope base
+  else
+    "${installed}" config init --profile development --git-name "${git_name}" --git-email "${git_email}"
+    "${installed}" plan --scope base
+    "${installed}" apply --scope base
+  fi
 fi

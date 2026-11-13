@@ -1,0 +1,23 @@
+# 由 path_env 提供；仅使用 Shell 内建命令，允许重复加载。
+_pennix_rest=${PATH-}:
+_pennix_new="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/go/bin"
+if [ -n "${VIRTUAL_ENV-}" ] && [ -d "$VIRTUAL_ENV/bin" ]; then
+  _pennix_new="$VIRTUAL_ENV/bin:$_pennix_new"
+fi
+while [ -n "$_pennix_rest" ]; do
+  _pennix_item=${_pennix_rest%%:*}
+  _pennix_rest=${_pennix_rest#*:}
+  case "$_pennix_item" in
+    ''|.|"$HOME/bin"|"$HOME/.npm-global/bin"|/mnt/[a-z]/*|*/.codex/tmp/*) continue ;;
+  esac
+  case ":$_pennix_new:" in
+    *:"$_pennix_item":*) ;;
+    *) _pennix_new="$_pennix_new:$_pennix_item" ;;
+  esac
+done
+export PATH=$_pennix_new
+export LANG=zh_CN.UTF-8
+export LC_MESSAGES=en_US.UTF-8
+export LANGUAGE=en_US:en:C
+export GOBIN="$HOME/go/bin"
+unset _pennix_rest _pennix_new _pennix_item

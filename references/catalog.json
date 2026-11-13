@@ -101,6 +101,11 @@
     }
   },
   "components": {
+    "base-environment": {
+      "delivery": "static", "adapter": "base-environment", "owner": "pennix",
+      "source": "versioned development base templates and native settings", "scope": "global",
+      "actions": {"install": "managed", "configure": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed"}
+    },
     "codex-cli": {
       "delivery": "package",
       "lock_source": "aur:openai-codex-bin",
@@ -192,8 +197,9 @@
     },
     "pnpm": {
       "delivery": "package",
-      "lock_source": "npm:pnpm:latest",
-      "source": "official pnpm npm package pinned to the Trellis toolchain",
+      "lock_source": "arch:extra/pnpm",
+      "lock_source_aliases": ["npm:pnpm:latest"],
+      "source": "Arch official pnpm package; project versions follow packageManager",
       "owner": "pnpm",
       "scope": "global",
       "verify_key": "pnpm --version",
@@ -211,12 +217,9 @@
         "--version"
       ],
       "package": {
-        "source": "npm",
+        "source": "official",
         "name": "pnpm",
-        "registry": "https://registry.npmjs.org/",
-        "tag": "latest",
-        "prefix": "$HOME/.local",
-        "install_owner": "user"
+        "resolve_dependencies": true
       }
     },
     "context-mode": {

@@ -34,6 +34,20 @@ class ReleasePayloadTests(unittest.TestCase):
             asset_name = f"pennix-lifecycle-{version}.tar.gz"
             shutil.copyfile(archive, assets / asset_name)
             (assets / f"{asset_name}.sha256").write_text(f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {asset_name}\n")
+            # Download only the hash-pinned wheels before entering the networkless namespace.
+            requirements = fixture / 'runtime-requirements.txt'
+            with tarfile.open(archive) as source:
+                requirements.write_bytes(source.extractfile('pennix-lifecycle/references/runtime-requirements.txt').read())
+            wheels = assets / 'wheels'
+            target_python = subprocess.check_output(['/usr/bin/python3', '-c', 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'], text=True).strip()
+            subprocess.run([__import__('sys').executable, '-m', 'pip', 'download', '--require-hashes', '--python-version', target_python,
+                            '--only-binary=:all:', '--no-deps', '--index-url', 'https://pypi.org/simple',
+                            '-r', str(requirements), '--dest', str(wheels)], check=True, capture_output=True, timeout=120)
+            shutil.copyfile('/usr/bin/uv', assets/'uv-real')
+            (assets/'uv-real').chmod(0o700)
+            uv = fixture/'uv'
+            uv.write_text('#!/bin/sh\nexec /fixtures/uv-real "$@" --no-index --find-links /fixtures/wheels\n')
+            uv.chmod(0o700)
             curl = fixture / "curl"
             curl.write_text("""#!/usr/bin/python3
 import pathlib,sys
@@ -55,7 +69,7 @@ pathlib.Path('/home/smoke/upgrade-observed').write_text('full system upgrade exp
             for command in (curl, sudo):
                 command.chmod(0o700)
             mounts = []
-            for name, replacement in (("curl", curl), ("sudo", sudo)):
+            for name, replacement in (("curl", curl), ("sudo", sudo), ("uv", uv)):
                 target = Path("/usr/bin") / name
                 while target.is_symlink():
                     link = target.readlink()
@@ -98,7 +112,8 @@ for s in k.unique_defined_syms:
 k.syms['PENNIX_CODEX_HOME'].set_value('/home/smoke/nondefault-codex')
 config_model.write(k,p,before=k.snapshot)
 """
-            run("python3", "-c", script)
+            python = f'/home/smoke/.local/share/pennix-lifecycle/releases/{version}/.runtime/bin/python'
+            run(python, "-c", script)
             run("/home/smoke/.local/bin/pennix", "config", "check", "--json")
             run("/home/smoke/.local/bin/pennix", "plan", "--json")
             # Inject failure after staging and entry switch, then reuse that same version.
@@ -111,7 +126,11 @@ import release_owner,owned_files
 entry=Path('/home/smoke/.local/bin/pennix')
 old=entry.resolve()
 candidate=Path('/tmp/candidate')
-shutil.copytree(old.parent,candidate)
+candidate.mkdir()
+for name in release_owner.RUNTIME:
+    item=old.parent/name
+    if item.is_dir(): shutil.copytree(item,candidate/name)
+    else: shutil.copy2(item,candidate/name)
 (candidate/'VERSION').write_text('99.0.1\\n')
 replace=owned_files.replace
 def fail(path,content,before,**kwargs):
@@ -127,7 +146,7 @@ assert entry.resolve().parent.name=='99.0.1'
 assert release_owner.uninstall()=='uninstalled'
 assert not entry.exists()
 """
-            run("python3", "-c", recovery)
+            run(python, "-c", recovery)
             self.assertFalse(entry.is_symlink())
             run("bash", "/bootstrap.sh", "install", "--release", f"v{version}", "--no-input")
             run("/home/smoke/.local/bin/pennix", "recover", "--json")

@@ -4,6 +4,31 @@ config PENNIX_CONFIG_FORMAT
 	string
 	default "5"
 
+menu "开发基础环境（默认关闭）"
+
+config PENNIX_COMPONENT_BASE_ENVIRONMENT
+	bool "管理开发基础环境与稳定配置"
+	default n
+	help
+		通过 development profile 选择共享依赖；撤销保留软件和用户数据。
+
+config PENNIX_BASE_GIT_NAME
+	string "本机 Git 姓名"
+	default ""
+	depends on PENNIX_COMPONENT_BASE_ENVIRONMENT
+
+config PENNIX_BASE_GIT_EMAIL
+	string "本机 Git 邮箱"
+	default ""
+	depends on PENNIX_COMPONENT_BASE_ENVIRONMENT
+
+config PENNIX_BASE_ADOPT_FILES
+	string "已审阅文件的绝对路径与 SHA-256 JSON 映射"
+	default "{}"
+	depends on PENNIX_COMPONENT_BASE_ENVIRONMENT
+
+endmenu
+
 menu "位置与私有输入"
 
 config PENNIX_CODEX_HOME

@@ -41,6 +41,8 @@ def _replace(contents: str, block: str) -> str:
 
 
 def inspect(prefix: str) -> str:
+    if _base_env().is_file():
+        return "keep"
     raw = files.read(_target())
     before = raw.decode("utf-8") if raw is not None else ""
     return "keep" if _replace(before, _block(prefix)) == before else "apply"
@@ -53,6 +55,8 @@ def activate(prefix: Path) -> None:
 
 
 def apply(prefix: str) -> str:
+    if _base_env().is_file():
+        return "no-op"
     path = _target()
     raw = files.read(path)
     before = raw.decode("utf-8") if raw is not None else ""
@@ -62,6 +66,23 @@ def apply(prefix: str) -> str:
     mode = path.stat().st_mode & 0o777 if raw is not None else 0o600
     files.replace(path, after.encode(), raw, mode=mode)
     return "changed"
+
+
+def _base_env() -> Path:
+    return files.xdg_home("XDG_CONFIG_HOME", Path.home() / ".config") / "pennix/base/env.sh"
+
+
+def base_targets() -> dict[Path, bytes]:
+    """One PATH rule, expressed separately for Shell and environment.d."""
+    config = files.xdg_home("XDG_CONFIG_HOME", Path.home() / ".config")
+    root = Path(__file__).resolve().parents[1]
+    return {
+        _base_env(): (root / "templates/base-env.sh.install").read_bytes(),
+        config / "environment.d/60-pennix-base.conf": (
+            'PATH=${HOME}/.local/bin:${HOME}/.cargo/bin:${HOME}/go/bin:/usr/local/sbin:/usr/local/bin:/usr/bin\n'
+            'LANG=zh_CN.UTF-8\nLC_MESSAGES=en_US.UTF-8\nLANGUAGE=en_US:en:C\nGOBIN=${HOME}/go/bin\n'
+        ).encode(),
+    }
 
 
 def remove() -> str:

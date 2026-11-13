@@ -1,3 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-exec "$(dirname "$(readlink -f "$0")")/scripts/pennix.py" "$@"
+runtime="$(dirname "$(readlink -f "$0")")"
+if [[ -x "${runtime}/.runtime/bin/python" ]]; then
+  exec "${runtime}/.runtime/bin/python" -B "${runtime}/scripts/pennix.py" "$@"
+fi
+exec /usr/bin/python3 -B "${runtime}/scripts/pennix.py" "$@"

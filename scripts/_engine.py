@@ -31,6 +31,10 @@ BEGIN_AGENTS = "# pennix-lifecycle:managed-agents:begin"
 END_AGENTS = "# pennix-lifecycle:managed-agents:end"
 BEGIN_TMUX = "# pennix-lifecycle:managed-tmux:begin"
 END_TMUX = "# pennix-lifecycle:managed-tmux:end"
+LEGACY_TMUX = ('set -g default-terminal "xterm-256color"\n'
+               'set-option -ga terminal-overrides ",xterm-256color:Tc"\n'
+               'set -g window-style "fg=#F5F5F5,bg=#1E1E1E"\n'
+               'set -g window-active-style "fg=#F5F5F5,bg=#1E1E1E"')
 
 
 class BootstrapError(RuntimeError):
@@ -262,7 +266,9 @@ def _static_state(component_id: str, codex_home: Path, component: dict[str, Any]
         return "drifted"
     start = current.index(BEGIN_TMUX)
     finish = current.index(END_TMUX, start) + len(END_TMUX)
-    return "current" if current[start:finish] == block else "drifted"
+    if current[start:finish] == block:
+        return "current"
+    return "outdated" if current[start:finish] == f"{BEGIN_TMUX}\n{LEGACY_TMUX}\n{END_TMUX}" else "drifted"
 
 
 def _operate_static(component_id: str, codex_home: Path, component: dict[str, Any], operation: str, expected_sha256: str | None = None) -> str:
@@ -318,6 +324,17 @@ def _operate_static(component_id: str, codex_home: Path, component: dict[str, An
         return "changed"
     if state == "current":
         return "no-op"
+    if state == "outdated":
+        start = current.index(BEGIN_TMUX)
+        finish = current.index(END_TMUX, start) + len(END_TMUX)
+        output = current[:start] + block + current[finish:]
+        legacy = ("# >>> pennix-workflow-lifecycle:tmux-config:v1 >>>\n"
+                  "# template-revision: sha256:41715d030309cdb256a592ffebbae456a478c89ab101bc7c69db27ac4a137cd8\n"
+                  "# block-digest: sha256:755d66771bdd45fc0d39d776b4fe76f6bfdb93786e54ee29c77c5436c1b22425\n"
+                  + LEGACY_TMUX + "\n# <<< pennix-workflow-lifecycle:tmux-config:v1 <<<\n")
+        output = output.replace(legacy, "")
+        owned_files.replace(path, output.encode(), before)
+        return "changed"
     if state != "missing":
         raise BootstrapError(f"refusing {state} tmux config")
     owned_files.replace(path, (current + ("\n" if current and not current.endswith("\n") else "") + block + "\n").encode(), before)
@@ -582,7 +599,7 @@ def probe_component(component: dict[str, Any], codex_home: Path | None = None, d
         return local_clients.inspect(component["id"], component)
     if adapter in {"codex-agents", "tmux-config"}:
         state = _static_state(adapter, codex_home, component)
-        return {"missing": "missing", "current": "match"}.get(state, "blocked" if state == "blocked" else "drifted"), state
+        return {"missing": "missing", "current": "match", "outdated": "migration-required"}.get(state, "blocked" if state == "blocked" else "drifted"), state
     if delivery == "collection":
         return skill_collections.inspect(component, codex_home)
     if isinstance(component.get("plugin"), dict):

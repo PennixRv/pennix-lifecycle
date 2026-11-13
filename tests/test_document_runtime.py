@@ -28,7 +28,8 @@ class DocumentRuntimeTests(unittest.TestCase):
         for package, requirement in [("/tmp/package.whl", "/tmp/package.whl[pdf,xlsx]"),
                                      ("markitdown==0.1.9", "markitdown[pdf,xlsx]==0.1.9")]:
             self.assertEqual(host.package_install_command("uv", package, **options),
-                             ["uv", "tool", "install", "--force", requirement, "--with", "pypdf==7.0.0"])
+                             ["uv", "tool", "install", "--force", "--python", "/usr/bin/python3",
+                              "--no-python-downloads", requirement, "--with", "pypdf==7.0.0"])
         for invalid in ("pypdf", "pypdf>=7", "pypdf @ https://example.test/a.whl"):
             with self.assertRaises(ValueError):
                 host.package_install_command("uv", "markitdown", requirements=[invalid])

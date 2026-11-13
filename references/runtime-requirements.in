@@ -1,0 +1,4 @@
+# Kconfiglib 14.1.0 is the explicitly accepted maintenance exception.
+kconfiglib==14.1.0
+tomlkit==0.15.2
+PyYAML==6.0.3

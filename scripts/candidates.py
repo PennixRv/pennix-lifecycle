@@ -406,7 +406,7 @@ RESOLVERS = {
     "codex-cli": _resolve_aur,
     "trellis-cli": resolve_npm,
     "trellis-paseo-adapter": resolve_npm,
-    "pnpm": resolve_npm,
+    "pnpm": resolve_arch,
     "context-mode": resolve_npm,
     "codegraph-cli": resolve_npm,
     "paseo-cli": resolve_npm,

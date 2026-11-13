@@ -10,6 +10,7 @@ import json
 import re
 
 import owned_files
+import runtime_environment
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,9 +101,13 @@ def _installed_digest(path: Path) -> str:
         if not os.access(path / "pennix", os.X_OK):
             raise ReleaseError("旧发行缺少可执行入口")
         return owned_files.digest(path)
-    if contents != set(RUNTIME) or _version(path) != path.name:
+    has_runtime = contents == set(RUNTIME) | {runtime_environment.DIRECTORY, runtime_environment.MANIFEST}
+    if contents != set(RUNTIME) and not has_runtime or _version(path) != path.name:
         raise ReleaseError(f"发行目录包含非发行资源，拒绝自动清理: {path}")
-    return _runtime_digest(path)
+    source = _runtime_digest(path)
+    if has_runtime:
+        return hashlib.sha256((source + runtime_environment.verify(path)).encode()).hexdigest()
+    return source
 
 
 def _assert_release_tree(releases: Path, *allowed: Path | None) -> dict[Path, str]:
@@ -138,6 +143,7 @@ def _install(source: Path) -> str:
     if current is None and previous_receipt is not None:
         raise ReleaseError("存在无活动入口的发行归属记录；拒绝覆盖")
     target = releases / version
+    created_target = False
     inactive = _assert_release_tree(releases, current, target)
     if current and current != target:
         stored = _receipt(previous_receipt)
@@ -147,6 +153,25 @@ def _install(source: Path) -> str:
         if _runtime_digest(target) != source_digest:
             raise ReleaseError(f"目标发行目录已存在且不能安全复用: {target}")
         if current == target:
+            manifest = target / runtime_environment.MANIFEST
+            before_manifest = owned_files.read(manifest, private=True)
+            previous_runtime = target / runtime_environment.DIRECTORY
+            needs_backup = before_manifest is not None and owned_files.read_json(manifest)["python"] != hashlib.sha256(Path('/usr/bin/python3').read_bytes()).hexdigest()
+            with tempfile.TemporaryDirectory(prefix='pennix-runtime-restore-') as directory:
+                backup = Path(directory) / 'runtime'
+                if needs_backup:
+                    shutil.copytree(previous_runtime, backup, symlinks=True)
+                try:
+                    runtime_environment.prepare(target)
+                    owned_files.replace(receipt_path, owned_files.json_bytes({
+                        "schema": 1, "version": version, "path": str(target), "digest": _installed_digest(target),
+                    }), previous_receipt)
+                except BaseException:
+                    if needs_backup:
+                        shutil.rmtree(previous_runtime)
+                        shutil.copytree(backup, previous_runtime, symlinks=True)
+                        owned_files.replace(manifest, before_manifest, owned_files.read(manifest, private=True))
+                    raise
             for item, expected in inactive.items():
                 if _installed_digest(item) != expected:
                     raise ReleaseError("非活动发行在清理前发生变化")
@@ -168,10 +193,18 @@ def _install(source: Path) -> str:
             if _runtime_digest(staging) != source_digest:
                 raise ReleaseError("暂存发行内容核验失败")
             os.replace(staging, target)
+            created_target = True
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
 
+    try:
+        runtime_environment.prepare(target)
+    except BaseException:
+        if created_target and _runtime_digest(target) == source_digest and {item.name for item in target.iterdir()} == set(RUNTIME):
+            shutil.rmtree(target)
+        raise
+    installed_digest = _installed_digest(target)
     link = entry.parent / f".pennix.{os.getpid()}.tmp"
     link.symlink_to(target / "pennix")
     previous = entry.readlink() if entry.is_symlink() else None
@@ -180,7 +213,7 @@ def _install(source: Path) -> str:
         if entry.resolve(strict=True) != target / "pennix":
             raise ReleaseError("入口切换核验失败")
         record = owned_files.json_bytes({
-            "schema": 1, "version": version, "path": str(target), "digest": source_digest,
+            "schema": 1, "version": version, "path": str(target), "digest": installed_digest,
         })
         owned_files.replace(receipt_path, record, previous_receipt)
     except BaseException:
