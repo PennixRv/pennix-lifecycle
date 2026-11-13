@@ -17,6 +17,8 @@ jobs:
           python-version: "3.x"
       - name: Prepare isolated payload test dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap zsh python3-venv
           command -v bwrap
           # Only the native uv executable is exposed to the clean payload namespace.
           python -m pip install uv==0.13.8

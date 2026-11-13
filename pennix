@@ -4,4 +4,4 @@ runtime="$(dirname "$(readlink -f "$0")")"
 if [[ -x "${runtime}/.runtime/bin/python" ]]; then
   exec "${runtime}/.runtime/bin/python" -B "${runtime}/scripts/pennix.py" "$@"
 fi
-exec /usr/bin/python3 -B "${runtime}/scripts/pennix.py" "$@"
+exec python3 -B "${runtime}/scripts/pennix.py" "$@"
