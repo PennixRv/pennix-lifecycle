@@ -407,7 +407,8 @@
       ],
       "package": {
         "source": "official",
-        "name": "tmux"
+        "name": "tmux",
+        "resolve_dependencies": true
       }
     },
     "tmux-config": {
@@ -565,26 +566,26 @@
       "source": "Arch official poppler package", "owner": "pacman", "scope": "global",
       "probe": "pdftotext", "version_args": ["-v"],
       "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
-      "package": {"source": "official", "name": "poppler", "external_satisfies": true}
+      "package": {"source": "official", "name": "poppler", "external_satisfies": true, "resolve_dependencies": true}
     },
     "tesseract": {
       "delivery": "package", "lock_source": "arch:extra/tesseract",
       "source": "Arch official tesseract package", "owner": "pacman", "scope": "global",
       "probe": "tesseract", "version_args": ["--version"],
       "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
-      "package": {"source": "official", "name": "tesseract", "external_satisfies": true}
+      "package": {"source": "official", "name": "tesseract", "external_satisfies": true, "resolve_dependencies": true}
     },
     "tesseract-eng": {
       "delivery": "package", "lock_source": "arch:extra/tesseract-data-eng",
       "source": "Arch official tesseract-data-eng package", "owner": "pacman", "scope": "global",
       "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
-      "package": {"source": "official", "name": "tesseract-data-eng", "architecture": "any", "identity_only": true, "external_satisfies": true}
+      "package": {"source": "official", "name": "tesseract-data-eng", "architecture": "any", "identity_only": true, "external_satisfies": true, "resolve_dependencies": true}
     },
     "tesseract-chi-sim": {
       "delivery": "package", "lock_source": "arch:extra/tesseract-data-chi_sim",
       "source": "Arch official tesseract-data-chi_sim package", "owner": "pacman", "scope": "global",
       "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
-      "package": {"source": "official", "name": "tesseract-data-chi_sim", "architecture": "any", "identity_only": true, "external_satisfies": true}
+      "package": {"source": "official", "name": "tesseract-data-chi_sim", "architecture": "any", "identity_only": true, "external_satisfies": true, "resolve_dependencies": true}
     },
     "noto-fonts-cjk": {
       "delivery": "package", "lock_source": "arch:extra/noto-fonts-cjk",

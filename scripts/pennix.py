@@ -43,7 +43,7 @@ CATALOG = ROOT / "references" / "catalog.json"
 APPLY_ORDER = [
     "codex-cli", "trellis-cli", "pnpm", "context-mode", "codegraph-cli", "paseo-cli", "trellis-paseo-adapter",
     "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "uv", "tavily-cli",
-    "markitdown", "pandoc", "libreoffice", "poppler", "tesseract", "tesseract-eng", "tesseract-chi-sim", "noto-fonts-cjk",
+    "markitdown", "pandoc", "libreoffice", "poppler", "tesseract-eng", "tesseract-chi-sim", "tesseract", "noto-fonts-cjk",
     "tavily-hikari", "peon-ping", "codex-config", "codex-agents", "pennix-skills-extra",
     "pennix-skills",
     "base-environment",
@@ -862,7 +862,8 @@ def _apply_steps(value: dict[str, Any], args: argparse.Namespace, catalog: dict[
     if relay and relay.get("action") in {"install", "configure", "uninstall"}:
         steps.append({"id": f"paseo-relay:{relay['action']}", "component": "paseo-relay",
                       "action": relay["action"], "target": {}})
-    steps.append({"id": "path-env:apply", "component": "path-env", "action": "apply", "target": {}})
+    if not value['components'].get('base-environment', {}).get('selected'):
+        steps.append({"id": "path-env:apply", "component": "path-env", "action": "apply", "target": {}})
     service = value["components"]["paseo-autostart"]
     paseo_action = value["components"].get("paseo-cli", {}).get("action")
     restart_daemon = bool(service["runtime"].get("running") and (

@@ -131,6 +131,14 @@ class BaseEnvironmentTests(unittest.TestCase):
         self.assertIn('PATH: keep',output.getvalue())
         for key,item in value['components'].items():
             if key not in base.SCOPE:self.assertEqual(item['action'],'keep')
+        steps=pennix._apply_steps(value,args,self.catalog)
+        self.assertNotIn('path-env:apply',[x['id'] for x in steps])
+
+    def test_clean_host_dependencies_and_ocr_provider_follow_native_resolution(self):
+        for key in ['tmux','poppler','tesseract','tesseract-eng','tesseract-chi-sim']:
+            self.assertTrue(self.catalog['components'][key]['package']['resolve_dependencies'])
+        self.assertLess(pennix.APPLY_ORDER.index('tesseract-eng'),pennix.APPLY_ORDER.index('tesseract'))
+        self.assertLess(pennix.APPLY_ORDER.index('tesseract-chi-sim'),pennix.APPLY_ORDER.index('tesseract'))
 
     def test_bootstrap_uv_stays_with_native_owner_without_fabricating_a_lock(self):
         args=pennix.parser().parse_args(['plan','--scope','base'])
