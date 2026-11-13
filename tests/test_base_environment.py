@@ -60,6 +60,15 @@ class BaseEnvironmentTests(unittest.TestCase):
             if 'PENNIX_BASE_' not in l and 'PENNIX_COMPONENT_BASE_ENVIRONMENT' not in l)+'\n')
         self.assertNotIn('base-environment',config_model.selected_components(config_model.load()[0]))
 
+    def test_native_base_failure_uses_cli_error_handler(self):
+        errors = io.StringIO()
+        with patch.object(sys, 'argv', ['pennix', 'check', '--scope', 'base']), \
+             patch.object(pennix, 'cmd_check', side_effect=base.BaseError('native package download failed')), \
+             contextlib.redirect_stderr(errors):
+            self.assertEqual(pennix.main(), 2)
+        self.assertIn('pennix: native package download failed', errors.getvalue())
+        self.assertNotIn('Traceback', errors.getvalue())
+
     def test_apply_repair_uninstall_roundtrip_preserves_external_data(self):
         original = b'# user preference\nalias custom=true\n'
         (self.home/'.bashrc').write_bytes(original)

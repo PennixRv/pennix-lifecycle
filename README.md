@@ -22,7 +22,7 @@ pennix apply
 普通工具安装保持最小默认。显式选择开发基础环境时，使用同一固定发行的公开 bootstrap：
 
 ```sh
-bash /path/to/bootstrap.sh install --release v0.3.4 --profile development --git-name 'Your Name' --git-email 'you@example.org'
+bash /path/to/bootstrap.sh install --release v0.3.6 --profile development --git-name 'Your Name' --git-email 'you@example.org'
 ```
 
 这会生成或合并 `development` profile，展示基础范围计划，再要求确认完整系统升级与应用。Git 白名单身份只绑定在目标机，不带入认证。已有工具可使用：

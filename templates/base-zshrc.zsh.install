@@ -20,6 +20,8 @@ alias cat='bat --paging=never --style=plain'
 typeset -g POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD=true
 source /usr/share/zsh-theme-powerlevel10k/powerlevel10k.zsh-theme
 source "$HOME/.p10k.zsh"
+# P10k 配置会清除旧 POWERLEVEL9K 参数，加载后恢复明确的向导策略。
+typeset -g POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD=true
 if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/p10k.local.zsh" ]]; then
   source "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/p10k.local.zsh"
   (( ! $+functions[p10k] )) || p10k reload
