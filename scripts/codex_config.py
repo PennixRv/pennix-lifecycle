@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 from pathlib import Path
 from collections.abc import Mapping, MutableMapping
 from urllib.parse import urlsplit
@@ -12,10 +13,10 @@ import owned_files as files
 CodexConfigError = files.OwnershipError
 STATE_SCHEMA = 3
 OWNED = {
-    "features.remote_compaction_v2": "PENNIX_CODEX_REMOTE_COMPACTION",
     "features.hooks": "PENNIX_CODEX_HOOKS",
     "features.goals": "PENNIX_CODEX_GOALS",
 }
+RETIRED = {"features.remote_compaction_v2"}
 CHOICES = {
     "model_reasoning_effort": "REASONING",
     "plan_mode_reasoning_effort": "PLAN_REASONING",
@@ -158,7 +159,8 @@ def inspect(path: Path, values: dict) -> dict:
     record = _load_record(path)
     _assert_current(doc, record)
     want = expected(values)
-    return {"state": "current" if all(_get(doc, key) == value for key, value in want.items()) else "pending",
+    retired_owned = record is not None and bool(RETIRED.intersection(record["after"]))
+    return {"state": "current" if not retired_owned and all(_get(doc, key) == value for key, value in want.items()) else "pending",
             "target": str(path), "owned_fields": sorted(record["after"]) if record else [],
             "requested_fields": sorted(want), "scope": "user-defaults; native callers may override"}
 
@@ -174,18 +176,30 @@ def _commit(path, before_raw, after_raw, record_raw, after_record):
         raise
 
 
-def apply(path: Path, values: dict) -> str:
+def apply(path: Path, values: dict, expected_sha256: str | None = None) -> str:
     doc, raw = _read(path)
     record = _load_record(path)
-    _assert_current(doc, record)
     want = expected(values)
+    if expected_sha256 is None:
+        _assert_current(doc, record)
+    else:
+        if raw is None or hashlib.sha256(raw).hexdigest() != expected_sha256:
+            raise CodexConfigError("Codex 配置与已审阅摘要不符，未释放归属")
+        if record is None:
+            raise CodexConfigError("释放归属需要既有可信 Codex 配置记录")
+        for key, value in record["after"].items():
+            actual = _get(doc, key)
+            # Only a released field restored to its first baseline can bypass drift rejection.
+            if actual != value and not (key not in want and actual == record["before"][key]):
+                raise CodexConfigError("Codex 漂移字段未恢复首次基线或仍被选择，未释放归属")
     before = dict(record["before"]) if record else {}
     for key in want:
         if key not in before:
             before[key] = _get(doc, key)
     # Native/default relinquishes a field by restoring its first baseline.
     for key in set(before) - set(want):
-        _set(doc, key, before.pop(key))
+        baseline = before.pop(key)
+        _set(doc, key, None if key in RETIRED else baseline)
     for key, value in want.items():
         _set(doc, key, value)
     after_raw = doc.as_string().encode()
@@ -206,6 +220,6 @@ def uninstall(path: Path) -> str:
     doc, raw = _read(path)
     _assert_current(doc, record)
     for key, value in record["before"].items():
-        _set(doc, key, value)
+        _set(doc, key, None if key in RETIRED else value)
     _commit(path, raw, doc.as_string().encode(), files.read(_state_path(), private=True), None)
     return "changed"

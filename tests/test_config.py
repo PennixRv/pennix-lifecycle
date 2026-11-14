@@ -241,6 +241,75 @@ class ConfigModelTests(unittest.TestCase):
         self.assertEqual(expected["model_providers.custom.auth.command"], str(Path.home() / ".local/bin/pennix"))
         self.assertEqual(expected["model_providers.custom.auth.args"][-2:], ["--secrets-file", str(self.home / ".config/pennix/secrets.toml")])
 
+    def test_reviewed_release_preserves_restored_provider_and_rejects_other_drift(self) -> None:
+        config = self.home / "codex/config.toml"
+        config.parent.mkdir()
+        original = 'model_provider = "OpenAI"\n[model_providers.OpenAI]\nname = "OpenAI"\nbase_url = "https://proxy.example/v1"\ncapabilities.remote_compaction = "v2"\n'
+        config.write_text(original)
+        kconf = config_model._new()
+        kconf.syms["PENNIX_CODEX_PROVIDER_CUSTOM"].set_value("y")
+        kconf.syms["PENNIX_CODEX_PROVIDER_ID"].set_value("cchp")
+        kconf.syms["PENNIX_CODEX_PROVIDER_URL"].set_value("https://proxy.example/v1")
+        codex_config.apply(config, config_model.values(kconf))
+        from tomlkit import parse
+        doc = parse(config.read_text())
+        doc['model_provider'] = 'OpenAI'
+        del doc['model_providers']['cchp']
+        config.write_text(doc.as_string())
+        reviewed_bytes = config.read_bytes()
+        digest = hashlib.sha256(reviewed_bytes).hexdigest()
+        with self.assertRaises(codex_config.CodexConfigError):
+            codex_config.apply(config, config_model.values(kconf), digest)
+        kconf.syms["PENNIX_CODEX_PROVIDER_PRESERVE"].set_value("y")
+        values = config_model.values(kconf)
+        with self.assertRaises(codex_config.CodexConfigError):
+            codex_config.apply(config, values)
+        with self.assertRaises(codex_config.CodexConfigError):
+            codex_config.apply(config, values, '0' * 64)
+        doc['model_provider'] = 'Other'
+        config.write_text(doc.as_string())
+        with self.assertRaises(codex_config.CodexConfigError):
+            codex_config.apply(config, values, hashlib.sha256(config.read_bytes()).hexdigest())
+        doc['model_provider'] = 'OpenAI'
+        doc['features']['goals'] = False
+        config.write_text(doc.as_string())
+        with self.assertRaises(codex_config.CodexConfigError):
+            codex_config.apply(config, values, hashlib.sha256(config.read_bytes()).hexdigest())
+        config.write_bytes(reviewed_bytes)
+        self.assertEqual('changed', codex_config.apply(config, values, digest))
+        self.assertEqual(config.read_bytes(), reviewed_bytes)
+        self.assertEqual('current', codex_config.inspect(config, values)['state'])
+        self.assertNotIn('model_provider', codex_config.inspect(config, values)['owned_fields'])
+        self.assertEqual('no-op', codex_config.apply(config, values))
+
+    def test_reviewed_release_requires_existing_receipt(self) -> None:
+        config = self.home / 'codex/config.toml'
+        config.parent.mkdir()
+        config.write_text('model_provider = "OpenAI"\n')
+        original = config.read_bytes()
+        with self.assertRaises(codex_config.CodexConfigError):
+            codex_config.apply(config, config_model.values(config_model._new()), hashlib.sha256(original).hexdigest())
+        self.assertEqual(original, config.read_bytes())
+
+    def test_retired_feature_migrates_only_owned_values(self) -> None:
+        config = self.home / 'codex/config.toml'
+        config.parent.mkdir()
+        config.write_text('[features]\nremote_compaction_v2 = true\n')
+        values = config_model.values(config_model._new())
+        codex_config.apply(config, values)
+        self.assertIn('remote_compaction_v2', config.read_text())
+        state = self.home / 'state/pennix-lifecycle/codex-config.json'
+        record = json.loads(state.read_text())
+        record['before']['features.remote_compaction_v2'] = True
+        record['after']['features.remote_compaction_v2'] = True
+        state.write_text(json.dumps(record))
+        self.assertEqual('pending', codex_config.inspect(config, values)['state'])
+        codex_config.apply(config, values)
+        self.assertNotIn('remote_compaction_v2', config.read_text())
+        self.assertNotIn('features.remote_compaction_v2', json.loads(state.read_text())['after'])
+        codex_config.uninstall(config)
+        self.assertNotIn('remote_compaction_v2', config.read_text())
+
     def test_codex_provider_rejects_credentials_in_base_url(self) -> None:
         kconf = config_model._new()
         kconf.syms["PENNIX_CODEX_PROVIDER_CUSTOM"].set_value("y")

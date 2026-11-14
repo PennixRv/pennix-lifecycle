@@ -681,10 +681,10 @@ config PENNIX_CODEX_HISTORY_BYTES
 		正整数 bytes；只在启用空间上限时应用。
 
 config PENNIX_CODEX_REMOTE_COMPACTION
-	bool "远程压缩"
+	bool "旧远程压缩开关（仅兼容既有输入）"
 	default y
 	help
-		工作流基础偏好；保留其他未知字段和项目覆盖。
+		当前 Codex 已移除此 feature，不再生成；V2 使用 provider 的 capabilities.remote_compaction。
 
 config PENNIX_CODEX_HOOKS
 	bool "Hooks"

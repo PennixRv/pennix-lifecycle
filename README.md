@@ -156,4 +156,6 @@ Context Mode 通过 `@pennixrv/context-mode` 包、Codex 原生 MCP 和六个 Ho
 
 工具升级成功后只保留当前发行。完整、归属和权限安全的旧安装目录可清除；未知文件、符号链接和漂移会阻断。AGENTS 的正常升级要求归属凭据中的摘要仍匹配；人工审阅的迁移可用 `pennix repair codex-agents --expected-sha256 <完整文件摘要>` 精确确认当前字节，摘要不符不会写入。
 
+已有 Codex 会话绑定 provider ID，切换网关时应保留该身份；由用户直接维护的既有 provider 选择 PRESERVE。若旧受管 provider 字段已人工恢复首次基线，可在审阅完整配置后使用 `pennix repair codex-config --expected-sha256 <完整文件摘要>` 释放不再选择的归属。未知漂移、仍被选择的漂移字段、缺少可信记录或摘要不符仍拒绝。普通 apply/inspect/uninstall 不放宽漂移保护。已移除的 remote_compaction_v2 feature 不再生成，旧 Kconfig 选项仅作兼容输入；原生配置迁移只清除可证明归属的旧 feature，保留 provider 的 capabilities.remote_compaction。
+
 发行 tag 和资产不可覆盖。同版本失败重试只复用摘要完全匹配的已暂存发行；工具卸载保留其他 CLI 仍需的 PATH、共享 linger、用户数据、组件归属及未结事务元数据。`tests/test_release_payload.py` 以实际构建载荷验证隔离 bootstrap、入口恢复和重装；Arch 包、下载使用明确替身，不代表真实新机、跨登录、PAM 或所有外部服务已经实测。

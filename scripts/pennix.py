@@ -666,7 +666,8 @@ def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_
         if operation == "uninstall":
             return codex_config.uninstall(args.codex_home / "config.toml")
         values = config_model.values(args.kconf)
-        return codex_config.apply(args.codex_home / "config.toml", values)
+        return codex_config.apply(args.codex_home / "config.toml", values,
+            expected_sha256=getattr(args, "expected_sha256", None))
     engine_args = _args_for_engine(args, operation)
     if candidate:
         engine_args.candidate = candidate
@@ -1360,8 +1361,8 @@ def cmd_repair(args: argparse.Namespace) -> int:
     active = apply_journal.read()
     if active is not None and (active["command"] != "repair" or active["component"] != args.component):
         raise CliError("存在其他未完成 lifecycle 事务；先从原入口或 recover 核验恢复")
-    if args.expected_sha256 is not None and args.component != "codex-agents" and component.get("delivery") != "client":
-        raise CliError("--expected-sha256 只用于审阅后的 codex-agents 或固定本地客户端升级")
+    if args.expected_sha256 is not None and args.component not in {"codex-agents", "codex-config"} and component.get("delivery") != "client":
+        raise CliError("--expected-sha256 只用于审阅后的 codex-config、codex-agents 或固定本地客户端升级")
     if component.get("delivery") in {"package", "plugin", "client", "collection"}:
         if args.component not in config_model.selected_components(kconf):
             raise CliError(f"组件未在 workflow.config 中选择: {args.component}")
@@ -2185,7 +2186,7 @@ def parser() -> argparse.ArgumentParser:
     repair.add_argument("component")
     repair.add_argument("--config")
     repair.add_argument("--json", action="store_true")
-    repair.add_argument("--expected-sha256", help="仅当 AGENTS.md 与已审阅的完整摘要相符时升级")
+    repair.add_argument("--expected-sha256", help="仅当目标文件与已审阅的完整摘要相符时修复或释放配置归属")
     repair.set_defaults(function=cmd_repair)
 
     update = sub.add_parser("update", help="明确升级一个已选择且受管的组件")
