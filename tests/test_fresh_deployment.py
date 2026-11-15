@@ -94,6 +94,44 @@ class FreshDeploymentTests(unittest.TestCase):
             remote.side_effect = pennix.relay_owner.RelayError('unsafe identity')
             self.assertEqual(pennix._relay_plan(SimpleNamespace(), kconf)['state'], 'blocked')
 
+    def test_fresh_relay_install_reaches_native_owner_then_service(self):
+        config_model.init()
+        kconf, config = config_model.load()
+        args = SimpleNamespace(json=True, kconf=kconf, codex_home=self.root/'codex',
+            config_path=config, component_lock_path=self.root/'components.lock.json',
+            component_lock={'schema':1, 'components':{}})
+        service = {'selected':True, 'action':'install', 'unit_state':'absent',
+            'runtime':{'state':'current', 'running':False}, 'mode':'login',
+            'run':False, 'listen':'127.0.0.1:6767'}
+        value = {'config':str(config), 'connections':{}, 'components':{
+            'paseo-relay':{'selected':True, 'state':'absent', 'action':'install', 'register':True},
+            'paseo-autostart':service}}
+        calls = []
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(pennix, '_plan', return_value=value))
+            stack.enter_context(patch.object(pennix, '_load', return_value=(kconf,config,{'components':{}})))
+            stack.enter_context(patch.object(pennix, '_emit'))
+            stack.enter_context(patch.object(pennix.paseo_service, 'preflight'))
+            stack.enter_context(patch.object(pennix.paseo_service, 'runtime', return_value={'state':'current'}))
+            stack.enter_context(patch.object(pennix.paseo_service, 'observe', return_value={'state':'current'}))
+            stack.enter_context(patch.object(pennix.paseo_service, 'apply',
+                side_effect=lambda *a,**kw: calls.append('service') or 'changed'))
+            stack.enter_context(patch.object(pennix.relay_owner, 'ensure',
+                side_effect=lambda *a,**kw: calls.append('register') or 'added'))
+            stack.enter_context(patch.object(pennix.relay_owner, 'configure_daemon',
+                side_effect=lambda *a,**kw: calls.append('relay-config') or 'changed'))
+            stack.enter_context(patch.object(pennix.path_env, 'apply', return_value='no-op'))
+            package = stack.enter_context(patch.object(pennix, '_run_component'))
+            self.assertEqual(pennix.cmd_apply(args), 0)
+            self.assertIsNone(apply_journal.read())
+            unknown = {'id':'unknown:install', 'component':'unknown', 'action':'install', 'target':{}}
+            with patch.object(pennix, '_apply_steps', return_value=[unknown]):
+                with self.assertRaisesRegex(pennix.CliError, 'journal 步骤没有有效执行路由'):
+                    pennix.cmd_apply(args)
+            self.assertEqual(apply_journal.read()['steps'][0]['status'], 'pending')
+        self.assertEqual(calls, ['register','relay-config','service'])
+        package.assert_not_called()
+
     def test_arch_discovery_uses_only_temporary_db_and_detects_real_changes(self):
         real = self.root/'db'
         (real/'sync').mkdir(parents=True)

@@ -1254,10 +1254,8 @@ def cmd_apply(args: argparse.Namespace) -> int:
                 )
             active, results[component_id] = _journal_mutate(active, step_id, configure_paseo)
             continue
-        if action in {"install", "adopt", "upgrade", "adopt-upgrade"}:
-            component = catalog["components"].get(component_id)
-            if component is None:
-                raise CliError(f"journal 引用未知组件: {component_id}")
+        if action in {"install", "adopt", "upgrade", "adopt-upgrade"} and component_id in catalog["components"]:
+            component = catalog["components"][component_id]
             operation = "upgrade" if action in {"upgrade", "adopt-upgrade"} else "install"
             target = step["target"] or args.component_lock["components"].get(component_id)
             if component_id == "pnpm" and pnpm_migration.needed() and not step["target"]:
