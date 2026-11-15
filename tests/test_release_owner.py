@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import hashlib
 import tarfile
+import subprocess
 from unittest.mock import patch
 
 import sys
@@ -76,6 +77,20 @@ class ReleaseOwnerTests(unittest.TestCase):
         releases, entry = release_owner._locations()
         self.assertEqual(entry.resolve().parent.name, '1.0.1')
         self.assertEqual([p.name for p in releases.iterdir()], ['1.0.1'])
+
+    def test_public_discovery_works_without_authenticated_api_and_freezes_digest(self):
+        url = 'https://github.com/PennixRv/pennix-lifecycle/releases/tag/v1.0.1'
+        def download(address, destination, **_):
+            self.assertEqual(address, 'https://github.com/PennixRv/pennix-lifecycle/releases/download/v1.0.1/pennix-lifecycle-1.0.1.tar.gz.sha256')
+            destination.write_text('a'*64+'  pennix-lifecycle-1.0.1.tar.gz\n')
+        with patch.object(release_owner.candidates, '_json', side_effect=AssertionError('API must not be used')), \
+                patch.object(release_owner.candidates, '_run', return_value=subprocess.CompletedProcess([],0,url,'')) as run, \
+                patch.object(release_owner.owned_files,'download', side_effect=download):
+            target = release_owner.latest()
+            self.assertEqual(target['digest'], 'sha256:'+'a'*64)
+            self.assertIn('https://github.com/PennixRv/pennix-lifecycle/releases/latest', run.call_args.args[0])
+        with patch.object(release_owner.candidates, '_run', return_value=subprocess.CompletedProcess([],0,'https://foreign.invalid/tag/v1.0.1','')):
+            with self.assertRaises(release_owner.ReleaseError): release_owner.latest()
 
     def test_drifted_active_release_blocks_replacement(self):
         first = make_release(self.home / "source-1", "1.0.0")

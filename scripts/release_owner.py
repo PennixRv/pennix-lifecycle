@@ -301,17 +301,24 @@ def uninstall() -> str:
 
 
 def latest() -> dict:
-    value = candidates._json('https://api.github.com/repos/PennixRv/pennix-lifecycle/releases/latest')
-    tag = value.get('tag_name', '')
-    if not isinstance(tag, str) or not tag.startswith('v') or not VERSION_NAME.fullmatch(tag[1:]):
+    result = candidates._run(['curl', '--disable', '--proto', '=https', '--proto-redir', '=https', '--tlsv1.2',
+        '--connect-timeout', '10', '--max-time', '45', '-fsSIL', '-o', '/dev/null', '-w', '%{url_effective}',
+        'https://github.com/PennixRv/pennix-lifecycle/releases/latest'])
+    prefix = 'https://github.com/PennixRv/pennix-lifecycle/releases/tag/'
+    resolved = result.stdout.strip()
+    tag = resolved.removeprefix(prefix)
+    if result.returncode or not resolved.startswith(prefix) or not tag.startswith('v') or not VERSION_NAME.fullmatch(tag[1:]):
         raise ReleaseError('公开发行版本格式无效')
     name = f'pennix-lifecycle-{tag[1:]}.tar.gz'
-    assets = {asset.get('name'): asset for asset in value.get('assets', [])}
     base = f'https://github.com/PennixRv/pennix-lifecycle/releases/download/{tag}/'
-    if any(assets.get(item, {}).get('browser_download_url') != base + item for item in (name, name + '.sha256')):
-        raise ReleaseError('公开发行缺少固定来源的载荷或摘要')
+    with tempfile.TemporaryDirectory(prefix='pennix-tool-query-') as directory:
+        checksum = Path(directory)/'checksum'
+        owned_files.download(base + name + '.sha256', checksum, limit=1024)
+        fields = checksum.read_text().split()
+        if len(fields) != 2 or not re.fullmatch('[0-9a-f]{64}', fields[0]) or fields[1] != name:
+            raise ReleaseError('公开发行摘要格式或资产名称无效')
     return {'version': tag[1:], 'tag': tag, 'url': base + name, 'name': name,
-            'digest': assets[name].get('digest')}
+            'digest': 'sha256:' + fields[0]}
 
 
 def update(target: dict) -> str:
