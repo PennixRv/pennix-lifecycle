@@ -22,6 +22,18 @@
 
 0.3.11 源码、实际载荷及 CI 已通过，但公开回读时未认证 GitHub API 返回限流，尚未进行本机或目标安装。自身更新发现改为沿 bootstrap 已有公开 latest 重定向，严格验证固定仓库与版本，再读取有界 SHA-256 清单；确认前即固定载荷摘要，实际安装再次核对。无需新机准备 gh 认证，也不在失败时将未知版本视作最新。回归要求禁止调用 API、拒绝外站重定向并固定摘要，0.3.11 不覆盖，另发 0.3.12。
 
+## 0.3.21 Paseo 原生禁用基线与 relay 部分完成恢复
+
+目标relay已在远端成功精确登记并取得同身份owner记录，但本地配置被拒绝，原生
+步骤unknown。Paseo首次Skills临时启动实际持久化enabled=false，其余四个relay
+字段缺失；此精确无receipt形态视为尚未配置。true、数字0、含端点的外部配置及
+有归属记录的漂移继续拒绝，撤回保留原生false基线。
+
+原生recover completed对同apply、同配置/锁/身份的relay未知首装或配置，先核验
+原生owner登记记录与当前server-id相同、远端精确登记present，才完成本地原生
+配置；本地receipt与current后置条件都成立才verified。不会在恢复中新增远端
+登记，不凭外部present或只凭配置值释放unknown。其后仍需执行独立service步骤。
+
 ## 0.3.20 relay 首装分发
 
 目标公共阶段20步已verified，relay首装在任何该步骤写入前被通用安装分支误报为

@@ -639,6 +639,30 @@ class ConfigModelTests(unittest.TestCase):
         with mock.patch.object(paseo_service, "unit_path", return_value=unit):
             self.assertEqual(paseo_service.inspect(paseo, home), "current")
 
+    def test_relay_accepts_only_empty_or_native_disabled_baseline(self) -> None:
+        keys = ['daemon.relay.enabled', 'daemon.relay.endpoint', 'daemon.relay.publicEndpoint',
+                'daemon.relay.useTls', 'daemon.relay.publicUseTls']
+        empty = dict.fromkeys(keys, relay_owner._MISSING)
+        for enabled in [relay_owner._MISSING, False, True, 0]:
+            values = {**empty, keys[0]:enabled}
+            with self.subTest(enabled=enabled), \
+                 mock.patch.object(relay_owner, '_daemon_values', return_value=values), \
+                 mock.patch.object(relay_owner, '_daemon_receipt', return_value=(self.home/'receipt', None)):
+                if enabled is False or enabled is relay_owner._MISSING:
+                    self.assertEqual(relay_owner.inspect_daemon(Path('paseo'), self.home, 'relay:1', 'public:2', True, False), 'missing')
+                else:
+                    with self.assertRaises(relay_owner.RelayError):
+                        relay_owner.inspect_daemon(Path('paseo'), self.home, 'relay:1', 'public:2', True, False)
+        values = {**empty, keys[0]:False, keys[1]:'external:443'}
+        with mock.patch.object(relay_owner, '_daemon_values', return_value=values), \
+             mock.patch.object(relay_owner, '_daemon_receipt', return_value=(self.home/'receipt', None)):
+            with self.assertRaises(relay_owner.RelayError):
+                relay_owner.inspect_daemon(Path('paseo'), self.home, 'relay:1', 'public:2', True, False)
+        with mock.patch.object(relay_owner, '_daemon_values', return_value={**empty, keys[0]:False}), \
+             mock.patch.object(relay_owner, '_daemon_receipt', return_value=(self.home/'receipt', {'desired':values})):
+            with self.assertRaises(relay_owner.RelayError):
+                relay_owner.inspect_daemon(Path('paseo'), self.home, 'relay:1', 'public:2', True, False)
+
     def test_relay_daemon_config_restores_partial_write(self) -> None:
         paseo = self.home / "bin/paseo"
         paseo.parent.mkdir()

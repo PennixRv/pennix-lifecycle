@@ -2286,6 +2286,26 @@ def cmd_recover(args: argparse.Namespace) -> int:
         component = catalog["components"].get(step["component"])
         if step["status"] == "verified":
             pass
+        elif (active['command'] == 'apply' and step['component'] == 'paseo-relay'
+                and step['action'] in {'install','configure'} and step['status'] in {'unknown','started'}):
+            paseo_home = Path(config_model.config_value(kconf, 'PENNIX_PASEO_HOME'))
+            paseo = Path(shutil.which('paseo') or Path.home()/'.local/bin/paseo')
+            if config_model.config_value(kconf, 'PENNIX_PASEO_RELAY_REGISTER') == 'y':
+                record = relay_owner._record()
+                if (not record or record['server_id'] != relay_owner._server_id(paseo_home)
+                        or relay_owner.inspect(paseo_home,
+                            nas_ssh=config_model.config_value(kconf, 'PENNIX_RELAY_NAS_SSH'),
+                            router_ssh=config_model.config_value(kconf, 'PENNIX_RELAY_ROUTER_SSH')) != 'present'):
+                    raise CliError('relay 远端登记的同身份归属未证明；保留 unknown')
+            endpoint = config_model.config_value(kconf, 'PENNIX_PASEO_RELAY_ENDPOINT')
+            public_endpoint = config_model.config_value(kconf, 'PENNIX_PASEO_RELAY_PUBLIC_ENDPOINT')
+            tls = bool(kconf.syms['PENNIX_PASEO_RELAY_TLS'].tri_value)
+            public_tls = bool(kconf.syms['PENNIX_PASEO_RELAY_PUBLIC_TLS'].tri_value)
+            relay_owner.configure_daemon(paseo, paseo_home, endpoint, public_endpoint, tls, public_tls)
+            if (not relay_owner.daemon_owned(paseo_home) or relay_owner.inspect_daemon(
+                    paseo, paseo_home, endpoint, public_endpoint, tls, public_tls) != 'current'):
+                raise CliError('relay 本地配置归属或后置条件未证明；保留 unknown')
+            active = apply_journal.verified(active, step['id'], {'recovered':True, 'state':'current'})
         elif step["component"].startswith("connection:"):
             target = step["component"].split(":", 1)[1]
             spec = catalog["configuration_targets"].get(target)

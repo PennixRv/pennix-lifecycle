@@ -132,6 +132,47 @@ class FreshDeploymentTests(unittest.TestCase):
         self.assertEqual(calls, ['register','relay-config','service'])
         package.assert_not_called()
 
+    def test_relay_partial_install_recovery_requires_same_owned_registration_and_local_proof(self):
+        config_model.init()
+        kconf, config = config_model.load()
+        for key,value in {'PENNIX_COMPONENT_PASEO_CLI':'y','PENNIX_PASEO_RELAY':'y',
+                'PENNIX_PASEO_RELAY_REGISTER':'y','PENNIX_PASEO_RELAY_ENDPOINT':'relay.test:443',
+                'PENNIX_PASEO_RELAY_PUBLIC_ENDPOINT':'public.test:443'}.items():
+            kconf.syms[key].set_value(value)
+        config_model.write(kconf, config)
+        home = Path(config_model.config_value(kconf, 'PENNIX_CODEX_HOME'))
+        owned_files.bind_target(home, register=True)
+        os.environ['CODEX_HOME'] = str(home)
+        lock = self.root/'components.lock.json'
+        step = {'id':'paseo-relay:install','component':'paseo-relay','action':'install','target':{}}
+        active = apply_journal.start('apply',None,apply_journal.digest(config),None,[step])
+        active = apply_journal.unknown(active,step['id'])
+        args = SimpleNamespace(resolve='completed',transaction=active['transaction'],step=step['id'],
+            component_lock_path=lock,json=True)
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(pennix,'_load',return_value=(kconf,config,{'components':{}})))
+            stack.enter_context(patch.object(pennix,'_emit'))
+            stack.enter_context(patch.object(pennix.relay_owner,'_server_id',return_value='new-device'))
+            record = stack.enter_context(patch.object(pennix.relay_owner,'_record'))
+            remote = stack.enter_context(patch.object(pennix.relay_owner,'inspect',return_value='present'))
+            configure = stack.enter_context(patch.object(pennix.relay_owner,'configure_daemon'))
+            owned = stack.enter_context(patch.object(pennix.relay_owner,'daemon_owned',return_value=False))
+            stack.enter_context(patch.object(pennix.relay_owner,'inspect_daemon',return_value='current'))
+            for candidate,remote_state in [(None,'present'),({'server_id':'other-device'},'present'),
+                    ({'server_id':'new-device'},'absent')]:
+                record.return_value=candidate;remote.return_value=remote_state
+                with self.assertRaisesRegex(pennix.CliError,'同身份归属未证明'):
+                    pennix.cmd_recover(args)
+                self.assertEqual(apply_journal.read()['steps'][0]['status'],'unknown')
+                configure.assert_not_called()
+            record.return_value={'server_id':'new-device'};remote.return_value='present'
+            with self.assertRaisesRegex(pennix.CliError,'本地配置归属或后置条件未证明'):
+                pennix.cmd_recover(args)
+            self.assertEqual(apply_journal.read()['steps'][0]['status'],'unknown')
+            owned.return_value=True
+            self.assertEqual(pennix.cmd_recover(args),0)
+            self.assertIsNone(apply_journal.read())
+
     def test_arch_discovery_uses_only_temporary_db_and_detects_real_changes(self):
         real = self.root/'db'
         (real/'sync').mkdir(parents=True)

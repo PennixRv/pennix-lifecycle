@@ -296,6 +296,10 @@ def inspect_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoint
     _, receipt = _daemon_receipt(paseo_home)
     if receipt and values == receipt["desired"]:
         return "configuration-required"
+    # Native first start persists enabled=false before any relay endpoint is set.
+    if receipt is None and values.get("daemon.relay.enabled") is False and all(
+            value is _MISSING for key, value in values.items() if key != "daemon.relay.enabled"):
+        return "missing"
     if any(value is not _MISSING for value in values.values()):
         raise RelayError("本地 relay 配置缺少当前归属证据；未修改外部配置")
     return "missing" if all(value is _MISSING for value in values.values()) else "drifted"
