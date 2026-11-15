@@ -39,7 +39,8 @@ def _fetch_remote(alias: str, remote_path: str) -> bytes:
         raise CredentialImportError("SSH alias 只能包含主机别名字符")
     with tempfile.TemporaryDirectory(prefix="pennix-credential-") as directory:
         destination = Path(directory) / "source"
-        batch = f"get ~/{remote_path} {destination}\n"
+        # SFTP starts in the login home; '~' needs an optional server extension.
+        batch = f"get {remote_path} {destination}\n"
         try:
             result = subprocess.run(
                 ["sftp", "-q", "-oBatchMode=yes", "-oStrictHostKeyChecking=yes", "-b", "-", alias],

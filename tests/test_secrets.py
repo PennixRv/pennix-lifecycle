@@ -17,10 +17,31 @@ import pennix
 import config_model
 import os
 import io
+import shlex
+from types import SimpleNamespace
 from contextlib import redirect_stdout
 
 
 class SecretStoreTests(unittest.TestCase):
+    def test_owner_import_uses_sftp_login_home_without_tilde_extension(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            source = home / '.config/windsurf-code-search/config.json'
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b'{"apiKey":"synthetic-private-value"}')
+            def sftp(command, **kwargs):
+                self.assertEqual(command[0], 'sftp')
+                self.assertIn('-oStrictHostKeyChecking=yes', command)
+                operation, remote, destination = shlex.split(kwargs['input'])
+                self.assertEqual(operation, 'get')
+                path = home / remote
+                if not path.is_file():
+                    return SimpleNamespace(returncode=1)
+                Path(destination).write_bytes(path.read_bytes())
+                return SimpleNamespace(returncode=0)
+            with patch.object(credential_import.subprocess, 'run', side_effect=sftp):
+                self.assertEqual(credential_import._fetch_remote('trusted-home', '.config/windsurf-code-search/config.json'), source.read_bytes())
+
     def test_central_transfer_is_selective_and_rejects_bad_envelopes(self):
         good = {"schema": 1, "fields": {"grok": {"api_key": "private-fixture"}}}
         self.assertEqual(credential_import.read_from_lifecycle("home", ["grok.api_key"],
