@@ -73,6 +73,13 @@ pennix secrets check --json
 
 新增的 `PENNIX_COMPONENT_COPILOT_CLI` 默认关闭，旧配置省略时也保持关闭，保留既有外部 Copilot 的两项接入选择。全新设备可显式选择它，通过 AUR 安装 `github-copilot-cli-bin`，随后完成独立原生认证。原生模板检查等待依赖安装，但用户禁用 Hook、外来配置和漂移仍阻断。relay 首装等待 Paseo 原生配置生成独立 server-id 后才登记远端，不复制身份文件。
 
+`PENNIX_TARGET_CCH_TMUX` 是独立、默认关闭的状态栏选择，依赖 tmux 和 CCH 连接。
+连接配置不自动激活状态栏；明确选择后，由 CCH 原生 runtime lifecycle 管理运行副本和
+`~/.tmux.conf` 中的自有段，保留连接秘密和外部内容。首次接管已有原生副本须显式允许
+adopt，计划冻结现场摘要；后续 CCH 包 update/repair 会在同一事务刷新副本。文件或
+可执行权限漂移、未知归属、待恢复事务均阻断，不用重装覆盖。恢复只接受同一 operation
+的原生证明；此入口不即时 source 活动 tmux server。
+
 `workflow.config` 是带格式主版本的 Kconfiglib 配置文件。`config edit` 和无 TTY
 的配置文件路径使用同一个模型；`plan` 只读，`apply` 才改变组件。一次性
 `uninstall <component> --confirm <component>` 不修改配置；要永久取消组件，先在

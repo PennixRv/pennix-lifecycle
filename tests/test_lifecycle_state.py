@@ -403,8 +403,9 @@ class LifecycleStateTests(unittest.TestCase):
         target = {"source": "npm:@getpaseo/cli:latest", "version": "0.14.0", "sha256": "b" * 64}
         active = {"command": "update", "component": "paseo-cli", "config_digest": "config",
                   "lock_digest": "old-lock", "steps": [
-                      {"id": "paseo-cli:upgrade", "status": "verified", "target": target},
-                      {"id": "paseo-daemon:restart", "status": "pending",
+                      {"id": "paseo-cli:upgrade", "component": "paseo-cli", "action": "upgrade",
+                       "status": "verified", "target": target},
+                      {"id": "paseo-daemon:restart", "component": "paseo-daemon", "action": "restart", "status": "pending",
                        "target": {"mode": "login", "was_running": True}},
                   ]}
         args = SimpleNamespace(component="paseo-cli", config=Path("/tmp/workflow.config"),

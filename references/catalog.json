@@ -48,6 +48,15 @@
         "token": "cch.admin_token"
       }
     },
+    "cch-tmux": {
+      "select": "PENNIX_TARGET_CCH_TMUX",
+      "owner": "cch-codex-tmux-status",
+      "component": "cch-status",
+      "command": ["cch-codex-tmux-status", "runtime"],
+      "functional_command": ["cch-codex-tmux-status", "doctor"],
+      "values": {},
+      "secrets": {}
+    },
     "hikari": {
       "select": "PENNIX_TARGET_HIKARI",
       "owner": "pennix-tavily-search",

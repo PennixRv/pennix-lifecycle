@@ -727,6 +727,13 @@ config PENNIX_TARGET_CCH
 	help
 			默认关闭；开启后须提供 URL 等普通数据，并按需填写集中凭据。
 
+config PENNIX_TARGET_CCH_TMUX
+	bool "管理 CCH tmux 状态栏运行副本"
+	default n
+	depends on PENNIX_TARGET_CCH && PENNIX_COMPONENT_TMUX
+	help
+		连接配置完成后由 CCH 原生 owner 安装、更新和撤回运行副本；保留用户区块外内容。
+
 config PENNIX_TARGET_HIKARI
 	bool "配置 Tavily Hikari 连接"
 	default n

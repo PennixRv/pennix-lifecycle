@@ -669,6 +669,8 @@ def _ensure_connection_dependencies(selected: set[str], connections: dict[str, A
             component = catalog["configuration_targets"][target]["component"]
             if component not in selected:
                 raise CliError(f"连接 {target} 依赖未选择: {component}")
+            if target == 'cch-tmux' and ('tmux' not in selected or not connections.get('cch', {}).get('selected')):
+                raise CliError('CCH 状态栏依赖已选择的 tmux 与 CCH 连接')
 
 
 def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_id: str, operation: str, *, repair: bool = False,
@@ -883,7 +885,8 @@ def _apply_steps(value: dict[str, Any], args: argparse.Namespace, catalog: dict[
     for target, item in value.get("connections", {}).items():
         if item.get("action") in {"configure", "unconfigure"}:
             steps.append({"id": f"connection:{target}:{item['action']}", "component": f"connection:{target}",
-                          "action": item["action"], "target": {}})
+                          "action": item["action"], "target": {'expected_sha256': item['fingerprint']}
+                          if target == 'cch-tmux' and item.get('fingerprint') else {}})
     for key in APPLY_ORDER:
         item = value["components"].get(key)
         if item and item.get("native_action") == "unconfigure":
@@ -1025,7 +1028,7 @@ def _finish_observed_paseo_apply(args: argparse.Namespace, value: dict[str, Any]
 def _preflight_pending_owners(args: argparse.Namespace, value: dict, catalog: dict, steps: list[dict]) -> None:
     pending = {name: catalog["configuration_targets"][name] for name, item in value["connections"].items()
                if item.get("state") == "pending-owner" and catalog["configuration_targets"][name].get("host") != "copilot-cli"}
-    for provider in {"cch-status" if name == "cch" else "pennix-skills" for name in pending}:
+    for provider in {"cch-status" if name in {"cch", "cch-tmux"} else "pennix-skills" for name in pending}:
         step = next((item for item in steps if item["component"] == provider
                      and item["action"] in {"install", "upgrade", "adopt", "adopt-upgrade"}), None)
         if step is None:
@@ -1048,17 +1051,22 @@ def _preflight_pending_owners(args: argparse.Namespace, value: dict, catalog: di
                 if result.returncode:
                     raise CliError("CCH owner 候选暂存失败；未执行组件变更")
             for name, spec in pending.items():
-                if ("cch-status" if name == "cch" else "pennix-skills") != provider:
+                if ("cch-status" if name in {"cch", "cch-tmux"} else "pennix-skills") != provider:
                     continue
                 if provider == "cch-status":
-                    command = [str(workspace / "prefix/bin" / spec["command"][0])]
+                    command = [str(workspace / "prefix/bin" / spec["command"][0]), *spec["command"][1:]]
                 elif spec["command"][0] in manifest["commands"]:
                     command = [str(staging / manifest["commands"][spec["command"][0]])]
                 else:
                     command = [item.replace("$HOME/.agents/skills/pennix-skills", str(staging)) for item in spec["command"]]
                 payload = connection_owners._payload(name, spec, args.kconf,
                     Path(config_model.config_value(args.kconf, "PENNIX_SECRETS_FILE")), "configure")
-                connection_owners._run(command, "validate", payload, codex_home=args.codex_home)
+                validated = connection_owners._run(command, "validate", payload, codex_home=args.codex_home)
+                if name == 'cch-tmux':
+                    fingerprint = validated.get('fingerprint')
+                    if not fingerprint:
+                        raise CliError('CCH 状态栏候选未给出现场摘要')
+                    next(item for item in steps if item['component'] == 'connection:cch-tmux')['target'] = {'expected_sha256': fingerprint}
             step["target"] = candidates.lock_entry(candidate)
 
 
@@ -1303,7 +1311,8 @@ def cmd_apply(args: argparse.Namespace) -> int:
                             raise connection_owners.ConnectionError(fresh.get("detail", "安装后 owner 仍不可用"))
                     return connection_owners.apply_target(target_name, catalog["configuration_targets"][target_name], args.kconf,
                         args.codex_home, Path(config_model.config_value(args.kconf, "PENNIX_SECRETS_FILE")), action,
-                        operation_id=f"{active.get('transaction', 'legacy')}:{step_id}")
+                        operation_id=f"{active.get('transaction', 'legacy')}:{step_id}",
+                        expected_sha256=step['target'].get('expected_sha256'))
                 except connection_owners.ConnectionError:
                     raise
                 except secret_store.SecretError as error:
@@ -1374,21 +1383,32 @@ def cmd_apply(args: argparse.Namespace) -> int:
     return 0
 
 
-def _copilot_steps(args, catalog):
-    return [{"id": f"connection:{name}:configure", "component": f"connection:{name}",
-             "action": "configure", "target": {}}
-            for name, spec in catalog.get("configuration_targets", {}).items()
-            if spec.get("host") == "copilot-cli" and spec["component"] == args.component
-            and config_model.config_value(args.kconf, spec["select"]) == "y"]
+def _connection_update_steps(args, catalog):
+    result = []
+    for name, spec in catalog.get('configuration_targets', {}).items():
+        if ((spec.get('host') != 'copilot-cli' and name != 'cch-tmux') or spec['component'] != args.component
+                or config_model.config_value(args.kconf, spec['select']) != 'y'):
+            continue
+        target = {}
+        if name == 'cch-tmux':
+            observed = connection_owners.inspect_target(name, spec, args.codex_home)
+            if observed['state'] in {'blocked', 'drifted', 'external'} or not observed.get('fingerprint'):
+                raise CliError('CCH 状态栏现场不可核验；未更新包')
+            target = {'expected_sha256': observed['fingerprint']}
+        result.append({'id': f'connection:{name}:configure', 'component': f'connection:{name}',
+                       'action': 'configure', 'target': target})
+    return result
 
 
-def _configure_copilot(args, catalog, active, *, repair=False):
-    for step in _copilot_steps(args, catalog):
+def _configure_updated_connections(args, catalog, active, *, repair=False):
+    for step in active['steps']:
+        if not step['component'].startswith('connection:'):
+            continue
         name = step["component"].split(":", 1)[1]
         active, _ = _journal_mutate(active, step["id"], lambda name=name:
             connection_owners.apply_target(name, catalog["configuration_targets"][name], args.kconf,
                 args.codex_home, Path(config_model.config_value(args.kconf, "PENNIX_SECRETS_FILE")), "configure", repair=repair,
-                operation_id=f"{active['transaction']}:{step['id']}"))
+                operation_id=f"{active['transaction']}:{step['id']}", expected_sha256=step['target'].get('expected_sha256')))
     return active
 
 
@@ -1467,7 +1487,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
             if native and config_model.config_value(kconf, native["select"]) == "y":
                 steps.append({"id": f"{args.component}:configure", "component": args.component,
                               "action": "configure", "target": {}})
-            steps.extend(_copilot_steps(args, catalog))
+            steps.extend(_connection_update_steps(args, catalog))
             active = _open_transaction(args, "repair", args.component, steps)
             if apply_journal.step(active, steps[0]["id"])["target"] != candidate_target:
                 raise CliError("修复候选与已记录的精确目标不同")
@@ -1488,7 +1508,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
             lambda: _run_component(args, catalog, args.component, "configure", repair=True))
         result = f"{result}; native {configured}"
     if args.component != "base-environment":
-        active = _configure_copilot(args, catalog, active, repair=True)
+        active = _configure_updated_connections(args, catalog, active, repair=True)
     apply_journal.clear()
     _emit({"operation": "repair", "component": args.component, "status": result}, args.json)
     return 0
@@ -1860,7 +1880,7 @@ def cmd_update(args: argparse.Namespace) -> int:
             lock_digest = apply_journal.digest(args.component_lock_path)
             steps = [{"id": upgrade_step_id, "component": args.component,
                       "action": "upgrade", "target": target}]
-            steps.extend(_copilot_steps(args, catalog))
+            steps.extend(_connection_update_steps(args, catalog))
             if has_restart_step:
                 steps.append({"id": restart_step_id, "component": "paseo-daemon",
                               "action": "restart", "target": {"mode": mode,
@@ -1873,7 +1893,7 @@ def cmd_update(args: argparse.Namespace) -> int:
             _write_lock(args)
             return result
         active, result = _journal_mutate(active, step_id, update_component)
-        active = _configure_copilot(args, catalog, active)
+        active = _configure_updated_connections(args, catalog, active)
         if restart_pending:
             def restart_paseo():
                 current = paseo_service.runtime(paseo, paseo_home, mode, run)
@@ -1952,18 +1972,18 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             if status["state"] in {"drifted", "blocked"}:
                 raise CliError(f"全量卸载预检发现配置漂移: {key}")
             targets.append(key)
-        owned_connections = []
+        owned_connections = {}
         for target, spec in catalog["configuration_targets"].items():
             status = connection_owners.inspect_target(target, spec, args.codex_home, enabled=False,
                 target_home=Path(config_model.config_value(kconf, "PENNIX_COPILOT_HOME")) if spec.get("host") == "copilot-cli" else None)
             if spec.get("host") == "copilot-cli" and status["state"] == "blocked":
                 raise CliError(f"全量卸载无法核验 Copilot 连接归属: {target}")
             if status.get("owned"):
-                if status["state"] not in {"current", "orphaned"}:
+                if status["state"] not in ({"current", "orphaned", "update-required"} if target == 'cch-tmux' else {"current", "orphaned"}):
                     raise CliError(f"全量卸载预检发现连接漂移: {target}")
                 connection_owners.validate_target(target, spec, kconf, args.codex_home,
                     Path(config_model.config_value(kconf, "PENNIX_SECRETS_FILE")), "unconfigure")
-                owned_connections.append(target)
+                owned_connections[target] = status
         relay = snapshot["components"].get("paseo-relay")
         remove_relay = relay_owner.local_owned() or relay_owner.daemon_owned(Path(config_model.config_value(kconf, "PENNIX_PASEO_HOME")))
         if not remove_relay and relay and relay["selected"] and relay["state"] == "blocked":
@@ -2018,7 +2038,8 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         steps.append({"id": "paseo-relay:uninstall", "component": "paseo-relay", "action": "uninstall", "target": {}})
     if args.all:
         steps += [{"id": f"connection:{target}:unconfigure", "component": f"connection:{target}",
-                   "action": "unconfigure", "target": {}} for target in owned_connections]
+                   "action": "unconfigure", "target": {'expected_sha256': owned_connections[target]['fingerprint']}
+                   if target == 'cch-tmux' else {}} for target in owned_connections]
     if args.all and service_state != "absent":
         steps.append({"id": "paseo-autostart:unconfigure", "component": "paseo-autostart", "action": "unconfigure", "target": {}})
     steps += [{"id": f"{key}:unconfigure", "component": key, "action": "unconfigure", "target": {}} for key in native_targets]
@@ -2042,7 +2063,8 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
                 target = key.split(":", 1)[1]
                 return connection_owners.apply_target(target, catalog["configuration_targets"][target],
                     kconf, args.codex_home, Path(config_model.config_value(kconf, "PENNIX_SECRETS_FILE")), "unconfigure",
-                    operation_id=f"{active.get('transaction', 'legacy')}:{step['id']}")
+                    operation_id=f"{active.get('transaction', 'legacy')}:{step['id']}",
+                    expected_sha256=step['target'].get('expected_sha256'))
             if key == "paseo-autostart":
                 return paseo_service.apply("off", paseo, paseo_home, "127.0.0.1:1", False)
             result = _run_component(args, catalog, key, action)
@@ -2235,6 +2257,12 @@ def cmd_recover(args: argparse.Namespace) -> int:
         if step["component"].startswith("connection:") and args.resolve == "restored":
             target = step["component"].split(":", 1)[1]
             spec = catalog["configuration_targets"].get(target, {})
+            if target == 'cch-tmux':
+                evidence = connection_owners._run(connection_owners._command(spec, home), 'restore',
+                    {'target': target, 'operation_id': f"{active['transaction']}:{step['id']}"}, codex_home=home)
+                if evidence.get('effect') in {'none', 'restored'}:
+                    active = apply_journal.rejected(active, step['id'], 'restored')
+                    step = apply_journal.step(active, args.step)
             if spec.get("host") == "copilot-cli":
                 if step["status"] == "verified":
                     raise CliError("已核验步骤不能按失败恢复撤回")
@@ -2259,6 +2287,9 @@ def cmd_recover(args: argparse.Namespace) -> int:
             spec = catalog["configuration_targets"].get(target)
             if spec is None:
                 raise CliError("恢复目标未登记")
+            if target == 'cch-tmux':
+                connection_owners._run(connection_owners._command(spec, home), 'complete',
+                    {'target': target, 'operation_id': f"{active['transaction']}:{step['id']}"}, codex_home=home)
             if spec.get("host") == "copilot-cli" and step["action"] == "configure":
                 native_integrations.copilot.complete(spec["native"],
                     Path(config_model.config_value(kconf, "PENNIX_COPILOT_HOME")),

@@ -105,7 +105,14 @@ def _run(command: list[str], action: str, payload: dict[str, Any] | None = None,
     if result.returncode:
         raise ConnectionError(f"连接 owner {action} 拒绝操作（退出码 {result.returncode}）",
                               effect=value.get("effect", "unknown"))
+    if ((payload or {}).get('target') == 'cch-tmux' and value['state'] != 'blocked'
+            and (action in {'inspect', 'validate'} or 'fingerprint' in value)):
+        fingerprint = value.get('fingerprint')
+        if not isinstance(fingerprint, str) or len(fingerprint) != 64 or any(c not in '0123456789abcdef' for c in fingerprint):
+            raise ConnectionError('连接 owner 现场摘要无效', effect='none' if action == 'validate' else 'unknown')
     allowed = {"state", "owned", "detail", "effect", "protocol_version", "capabilities", "operation_id"}
+    if (payload or {}).get('target') == 'cch-tmux':
+        allowed.add('fingerprint')
     return {key: item for key, item in value.items() if key in allowed}
 
 
@@ -223,7 +230,7 @@ def plan(kconf: Any, catalog: dict[str, Any], codex_home: Path, secrets_path: Pa
                 status.update(state="blocked", detail=str(error))
         if selected:
             action = "keep" if status["state"] == "current" else "configure"
-            if status["state"] in {"blocked", "invalid", "external", "environment-override"} or target == "windsurf" and status["state"] == "drifted":
+            if status["state"] in {"blocked", "invalid", "external", "environment-override"} or target in {"windsurf", "cch-tmux"} and status["state"] == "drifted":
                 action = "blocked"
             if status["state"] == "adoptable" and config_model.config_value(kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") != "y":
                 action = "blocked"
@@ -270,7 +277,7 @@ def validate_target(target: str, spec: dict, kconf: Any, codex_home: Path, secre
 
 
 def apply_target(target: str, spec: dict[str, Any], kconf: Any, codex_home: Path, secrets_path: Path, action: str,
-                  *, operation_id: str | None = None, repair: bool = False) -> str:
+                  *, operation_id: str | None = None, repair: bool = False, expected_sha256: str | None = None) -> str:
     if action == "keep":
         return "no-op"
     if spec.get("host") == "copilot-cli":
@@ -285,6 +292,10 @@ def apply_target(target: str, spec: dict[str, Any], kconf: Any, codex_home: Path
     payload = _payload(target, spec, kconf, secrets_path, action)
     if operation_id is not None:
         payload["operation_id"] = operation_id
+    if target == 'cch-tmux':
+        if expected_sha256 is None:
+            raise ConnectionError('CCH 状态栏缺少已审阅现场摘要', effect='none')
+        payload['expected_sha256'] = expected_sha256
     _run(command, "validate", payload, codex_home=codex_home)
     if target == "siyuan" and action == "unconfigure":
         native_integrations.unconfigure("siyuan", codex_home)

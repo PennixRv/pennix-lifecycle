@@ -319,7 +319,7 @@ class CopilotIntegrationTests(unittest.TestCase):
         self.assertEqual(connection_owners.apply_target("copilot-context-mode", spec, config, self.codex.parent,
                                                        self.root / "absent-secrets", "configure"), "changed")
         from types import SimpleNamespace
-        steps = pennix._copilot_steps(SimpleNamespace(kconf=config, component="context-mode"), catalog)
+        steps = pennix._connection_update_steps(SimpleNamespace(kconf=config, component="context-mode"), catalog)
         self.assertEqual(steps[0]["component"], "connection:copilot-context-mode")
         status = connection_owners.plan(config, catalog, self.codex.parent, self.root / "absent-secrets")
         self.assertEqual(status["copilot-context-mode"]["action"], "keep")
