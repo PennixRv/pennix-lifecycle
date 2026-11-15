@@ -99,6 +99,64 @@ class CopilotIntegrationTests(unittest.TestCase):
         self.assertFalse((self.home / ".copilot").exists())
         self.assertFalse((self.root / "wrong").exists())
 
+    def path_target(self, home, path, **kwargs):
+        self.assertEqual(home, self.target)
+        self.assertEqual(kwargs["agent"], "copilot-cli")
+        value = copy.deepcopy(self.want)
+        value["mcp"]["env"]["PATH"] = path
+        return value
+
+    def test_receipted_path_stays_stable_but_template_and_real_drift_do_not(self):
+        self.desired_patch.stop()
+        local_bin = self.home / ".local/bin"
+        local_bin.mkdir(parents=True)
+        native_path = f"{local_bin}:{os.environ['PATH']}"
+        with patch.object(copilot.context, "target", side_effect=self.path_target):
+            with patch.dict(os.environ, {"PATH": native_path}):
+                self.assertEqual(copilot.apply("context-mode", self.target), "changed")
+            receipt = copilot.read("context-mode", self.target)
+            calls = list(self.calls)
+            for path in ("/usr/bin", "/missing", f"/usr/bin:{local_bin}"):
+                with self.subTest(path=path), patch.dict(os.environ, {"PATH": path}):
+                    self.assertEqual(copilot.inspect("context-mode", self.target)["state"], "current")
+                    self.assertEqual(copilot.validate("context-mode", self.target, "configure")["state"], "current")
+                    self.assertEqual(copilot.apply("context-mode", self.target), "no-op")
+            self.assertEqual(self.calls, calls)
+            self.assertEqual(copilot.read("context-mode", self.target), receipt)
+            self.want["files"][str(self.target / "skills/ctx-stats/SKILL.md")] += "\nnew template"
+            self.assertEqual(copilot.inspect("context-mode", self.target)["state"], "update-required")
+            self.assertEqual(copilot.apply("context-mode", self.target), "changed")
+            self.assertEqual(copilot.read("context-mode", self.target)["desired"]["mcp"]["env"]["PATH"],
+                             receipt["desired"]["mcp"]["env"]["PATH"])
+            value = json.loads(self.mcp.read_text())
+            value["mcpServers"]["context-mode"]["command"] = "/user/edit"
+            self.mcp.write_text(json.dumps(value))
+            self.assertEqual(copilot.inspect("context-mode", self.target)["state"], "drifted")
+            with self.assertRaises(copilot.Error):
+                copilot.apply("context-mode", self.target)
+
+    def test_missing_path_migration_requires_native_environment_and_recovers_failure(self):
+        copilot.apply("context-mode", self.target)
+        receipt = copilot.read("context-mode", self.target)
+        self.desired_patch.stop()
+        local_bin = self.home / ".local/bin"
+        local_bin.mkdir(parents=True)
+        native_path = f"{local_bin}:{os.environ['PATH']}"
+        with patch.object(copilot.context, "target", side_effect=self.path_target):
+            with patch.dict(os.environ, {"PATH": "/usr/bin"}):
+                with self.assertRaisesRegex(copilot.Error, "原生环境"):
+                    copilot.apply("context-mode", self.target)
+            with patch.dict(os.environ, {"PATH": native_path}):
+                self.fail_after_mcp = True
+                with self.assertRaises(copilot.Error):
+                    copilot.apply("context-mode", self.target, operation_id="path:configure")
+                self.assertEqual(copilot.recover("context-mode", self.target, operation_id="path:configure"), "restored")
+                self.assertEqual(copilot.read("context-mode", self.target), receipt)
+                self.fail_after_mcp = False
+                self.assertEqual(copilot.apply("context-mode", self.target), "changed")
+                saved = copilot.read("context-mode", self.target)["desired"]["mcp"]["env"]["PATH"]
+                self.assertEqual(saved, copilot.context.configured_path(self.target))
+
     def test_codegraph_native_no_init_separate_receipt_and_target(self):
         copilot.apply("codegraph", self.target)
         copilot.apply("context-mode", self.target)

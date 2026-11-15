@@ -199,6 +199,46 @@ class NativeIntegrationTests(unittest.TestCase):
             native_integrations.apply("context-mode", self.codex, repair=True)
         self.assertEqual(before, (self.codex / "config.toml").read_bytes())
 
+    def test_user_context_forwarding_is_dynamic_and_narrow(self):
+        expected = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_CONFIG_HOME",
+                    "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
+        environment = {key: f"/fixture/{key}" for key in expected}
+        environment["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/fixture/bus"
+        environment["PRIVATE_TEST_TOKEN"] = "never-forward-this"
+        with patch.dict(os.environ, environment):
+            present = context_mode_integration.target(self.codex)
+        with patch.dict(os.environ):
+            for key in environment:
+                os.environ.pop(key, None)
+            absent = context_mode_integration.target(self.codex)
+        self.assertEqual(present, absent)
+        self.assertEqual(present["mcp"]["env_vars"], expected)
+        self.assertEqual(present["mcp"]["env"], {"CODEX_HOME": str(self.codex)})
+        self.assertNotIn("never-forward-this", json.dumps(present))
+
+    def test_forwarding_migration_and_failed_write_preserve_existing_owners(self):
+        desired = native_integrations._desired("context-mode", self.codex, enabled=True, configure=True)
+        desired["mcp"].pop("env_vars")
+        native_integrations._context_apply(self.codex, desired, None)
+        receipt = native_integrations._read_receipt("context-mode")
+        before_config = native_integrations._toml(self.codex / "config.toml")
+        before_hooks = (self.codex / "hooks.json").read_bytes()
+        self.assertEqual("update-required", native_integrations.inspect("context-mode", self.codex, enabled=True)["state"])
+        with patch.object(native_integrations, "_write_receipt", side_effect=OSError("write failed")):
+            with self.assertRaisesRegex(context_mode_integration.ContextModeError, "已撤回"):
+                native_integrations.apply("context-mode", self.codex)
+        self.assertEqual(before_config, native_integrations._toml(self.codex / "config.toml"))
+        self.assertEqual(before_hooks, (self.codex / "hooks.json").read_bytes())
+        self.assertEqual(receipt, native_integrations._read_receipt("context-mode"))
+        self.assertEqual("changed", native_integrations.apply("context-mode", self.codex))
+        self.assertEqual("no-op", native_integrations.apply("context-mode", self.codex))
+        current = native_integrations._read_receipt("context-mode")
+        self.assertEqual(current["mcp"]["env"]["PATH"], receipt["mcp"]["env"]["PATH"])
+        self.assertEqual(current["mcp"]["env_vars"], context_mode_integration.CODEX_ENV_VARS)
+        config = native_integrations._toml(self.codex / "config.toml")
+        self.assertEqual(config["mcp_servers"]["other"], {"command": "other"})
+        self.assertEqual(before_hooks, (self.codex / "hooks.json").read_bytes())
+
     def test_new_hooks_file_is_removed_on_uninstall(self):
         native_integrations.apply("context-mode", self.codex)
         native_integrations.unconfigure("context-mode", self.codex)

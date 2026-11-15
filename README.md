@@ -146,7 +146,9 @@ apply 不复活已停止实例。自启配置、daemon 健康和版本分别核�
 
 Paseo 官方 Skills 使用已验证的 CLI/client/server 0.15.3 公开 SDK。首装自动调用原生安装接口，覆盖 `.agents/skills`、`.claude/skills` 及原生自有的旧 `.codex/skills`；原本停止的 daemon 仅为该动作临时启动，并按同一实例停止。新 CLI 候选先在隔离前缀暂存、检查公开接口，再改变用户安装。安装或启停结果未知时保留已提交字段与事务，不恢复旧前台启动造成潜在双实例。远端 relay 登记和本地 daemon relay 配置分别记归属；register=n 仅表示不访问远端，不表示本地配置已撤回。
 
-Context Mode 通过 `@pennixrv/context-mode` 包、Codex 原生 MCP 和六个 Hook 接入；不叠加 plugin，也不改写用户 AGENTS。旧 FastCtx 的撤回由旧安装的原生入口完成，新配置格式 5 不接受旧组件键或旧格式。
+Context Mode 通过 `@pennixrv/context-mode` 包、Codex 原生 MCP 和四个 Hook 接入；不叠加 plugin，也不改写用户 AGENTS。旧 FastCtx 的撤回由旧安装的原生入口完成，新配置格式 5 不接受旧组件键或旧格式。
+
+Codex Context Mode MCP 通过原生 `env_vars` 动态继承两个 user bus 变量及标准 XDG 用户目录变量，未设置时保持缺省；不转发任意秘密，也不固化主机的 UID 或总线地址。CODEX_HOME 与 PATH 继续显式绑定受管目标。Codex 和 Copilot 的已有受管 Context Mode 接入均沿用回执中的 PATH，不因检查进程环境不同而提示配置更新；首次配置及缺少 PATH 的旧回执迁移须从已核验的原生环境执行。执行器的 shell、TTY、工作目录和预加载隔离仍遵守 Context Mode 合同，不能据 doctor 通过就认为它与交互式终端完全等价。
 
 本地 Hikari wrapper、官方 `tvly`、OpenPeon 运行文件和 AoE/OpenPeon 的精确 Codex Hook 由各自登记合同管理。所有 NAS/其他主机的服务端均为外部依赖，不安装或升级。Hikari 只取得固定上游客户端，并由 Lifecycle 生成本地 wrapper，不执行上游 installer 或 fork 源码；OpenPeon 只更新有限运行文件，保留音效包、偏好和运行数据。CCH 使用经过摘要校验的私有 GitHub Release npm 包，需要现有 `gh` 认证。
 

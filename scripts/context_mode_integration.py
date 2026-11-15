@@ -25,6 +25,8 @@ class ContextModeError(RuntimeError):
 EVENTS = {"SessionStart": "session_start", "UserPromptSubmit": "user_prompt_submit",
           "PreToolUse": "pre_tool_use", "PostToolUse": "post_tool_use"}
 SKILLS = {"ctx-doctor", "ctx-stats", "ctx-upgrade"}
+CODEX_ENV_VARS = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_CONFIG_HOME",
+                  "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]
 
 
 def _require(condition, message="context-mode v2 只读计划不符合已支持合同"):
@@ -148,6 +150,8 @@ def target(home: Path, path=None, *, agent="codex", parser=parse_plan):
             # Codex filters its MCP child environment. Preserve the selected native
             # home explicitly; otherwise a custom CODEX_HOME falls back to HOME/.codex.
             desired["mcp"]["env"] = {"CODEX_HOME" if agent == "codex" else "COPILOT_HOME": str(home)}
+            if agent == "codex":
+                desired["mcp"]["env_vars"] = list(CODEX_ENV_VARS)
             if path is not None:
                 desired["mcp"]["env"]["PATH"] = validate_path(path)
             return desired

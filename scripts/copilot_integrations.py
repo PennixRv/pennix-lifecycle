@@ -115,7 +115,11 @@ def desired(key, home):
         require(shutil.which("codegraph") is not None, "CodeGraph owner 不可用")
         return {"mcp": {"type": "stdio", "command": "codegraph", "args": ["serve", "--mcp"],
                         "tools": ["*"], "deferTools": "never"}, "files": {}}
-    value = context.target(home, context.configured_path(home), agent=HOST, parser=parse_plan)
+    record = read(key, home)
+    path = record["desired"]["mcp"].get("env", {}).get("PATH") if record else None
+    if path is None:
+        path = context.configured_path(home)
+    value = context.target(home, path, agent=HOST, parser=parse_plan)
     return value
 
 
