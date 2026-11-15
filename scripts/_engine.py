@@ -509,6 +509,12 @@ def _plugin_status(component: dict[str, Any], codex_home: Path) -> tuple[str, st
         return "blocked", None
     snapshot = _plugin_snapshot(component, codex_home)
     if snapshot is None:
+        try:
+            owned_files.safe_path(codex_home)
+        except owned_files.OwnershipError:
+            return "blocked", None
+        if not codex_home.exists():
+            return "missing", None
         codex = shutil.which("codex")
         if not codex:
             return "missing", None
@@ -1000,6 +1006,8 @@ def _plugin_operation(component_id: str, component: dict[str, Any], codex_home: 
                    if isinstance(target, dict) else plugin["marketplace"])
     if not isinstance(marketplace.get("ref"), str):
         raise BootstrapError("Codex plugin requires a locked marketplace commit")
+    if state == "missing":
+        owned_files.ensure_parent(codex_home / "config.toml")
     _prepare_plugin_marketplace(codex, codex_home, {**marketplace, "managed_plugin": plugin["id"]})
     result = subprocess.run([codex, "plugin", "marketplace", "add", marketplace["source"], "--ref", marketplace["ref"], "--json"], check=False, env=env)
     if result.returncode:
