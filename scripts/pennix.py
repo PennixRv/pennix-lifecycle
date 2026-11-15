@@ -704,6 +704,12 @@ def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_
     if candidate:
         engine_args.candidate = candidate
         engine_args.explicit_update = operation == "upgrade"
+        if component.get('package', {}).get('source') == 'aur':
+            active = apply_journal.read()
+            identity = {'home': str(Path.home()), 'codex_home': str(args.codex_home),
+                        'state_root': str(owned_files.state_root())}
+            engine_args.arch_dependencies_allowed = bool(active and active['identity'] == identity
+                and any(step['id'] == 'system-upgrade' and step['status'] == 'verified' for step in active['steps']))
     if component_id == "pnpm" and operation in {"install", "upgrade"} and pnpm_migration.needed():
         if candidate is None:
             raise CliError("pnpm 来源迁移缺少同事务的精确官方候选")
@@ -2331,10 +2337,10 @@ def cmd_recover(args: argparse.Namespace) -> int:
         elif component and step["action"] in {"install", "upgrade", "adopt", "adopt-upgrade"} and step["target"]:
             component["_lock_target"] = step["target"]
             args.kconf, args.codex_home = kconf, home
-            if (step["action"] == "install" and component.get("package", {}).get("source") == "official"
+            if (step["action"] == "install" and component.get("package", {}).get("source") in {"official", "aur"}
                     and owner_engine.package_absent(component)):
                 if not any(item["id"] == "system-upgrade" and item["status"] == "verified" for item in active["steps"]):
-                    raise CliError("缺失的官方包恢复须有同次完整系统升级证据；保留 unknown")
+                    raise CliError("缺失的 Arch 包恢复须有同次完整系统升级证据；保留 unknown")
                 with tempfile.TemporaryDirectory(prefix="pennix-recover-arch-") as directory:
                     candidate = candidates.resolve(component, Path(directory), step["target"])
                     _run_component(args, catalog, step["component"], "install", candidate=candidate)

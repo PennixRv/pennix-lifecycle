@@ -10,6 +10,31 @@ import apply_journal
 
 
 class ApplyJournalTests(unittest.TestCase):
+    def test_system_replan_preserves_frozen_preflight_targets_for_the_same_step(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(apply_journal.owned_files, 'state_root', return_value=Path(directory)):
+            steps=[{'id':'system-upgrade','component':'system','action':'upgrade','target':{}},
+                   {'id':'paseo:install','component':'paseo','action':'install','target':{'version':'0.15.4','sha256':'a'*64}},
+                   {'id':'connection:cch-tmux:configure','component':'connection:cch-tmux','action':'configure','target':{'expected_sha256':'b'*64}}]
+            value=apply_journal.start('apply',None,'c'*64,None,steps)
+            value=apply_journal.verified(value,'system-upgrade')
+            fresh=[{**s,'target':{}} for s in steps[1:]]
+            updated=apply_journal.replan(value,fresh)
+            for original in steps[1:]:
+                self.assertEqual(apply_journal.step(updated,original['id'])['target'],original['target'])
+            before=apply_journal.path().read_bytes()
+            with self.assertRaises(apply_journal.JournalError):
+                apply_journal.replan(updated,[{**fresh[0],'component':'unrelated'}])
+            self.assertEqual(apply_journal.path().read_bytes(),before)
+
+    def test_replan_cannot_overwrite_a_new_unknown_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(apply_journal.owned_files, 'state_root', return_value=Path(directory)):
+            step={'id':'example:install','component':'example','action':'install','target':{}}
+            value=apply_journal.start('apply',None,'c'*64,None,[step])
+            apply_journal.unknown(value,step['id'])
+            before=apply_journal.path().read_bytes()
+            with self.assertRaises(apply_journal.owned_files.OwnershipError):apply_journal.replan(value,[step])
+            self.assertEqual(apply_journal.path().read_bytes(),before)
+
     def test_steps_are_durable_and_unknown_state_is_not_complete(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
                 "HOME": directory, "XDG_STATE_HOME": str(Path(directory) / "state")}):

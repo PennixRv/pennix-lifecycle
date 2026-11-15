@@ -89,6 +89,11 @@ adopt，计划冻结现场摘要；后续 CCH 包 update/repair 会在同一事�
 
 `package.extras` 是 uv extra 名称数组，`package.with` 只接受 `name==version` 固定需求，`package.imports` 映射所需模块和发行包名。安装、升级与恢复都从同一 catalog 生成参数；状态检查核对 uv receipt、入口归属、实际导入及固定版本。`package.identity_only=true` 仅用于无可执行入口的官方系统包；`external_satisfies=true` 仅允许已核验的外部官方依赖保持原归属。`resolve_dependencies=true` 允许 Pandoc、LibreOffice 和字体在已确认完整系统升级的边界内，使用 pacman 对固定签名本地包作原生依赖预览和安装；共享间接依赖由 pacman 管理，不伪造单独 Lifecycle 归属，也不在回退时递归删除。普通 npm/uv 包和有原生配置的组件不能使用这些系统包策略。新增组件还须登记 APPLY_ORDER、候选解析器和 Kconfig/defconfig，现有闭合集合测试负责发现遗漏。
 
+固定 AUR 候选只在同目标、同事务已核验完整系统升级时，通过原生 `makepkg --syncdeps`
+补齐声明的依赖。普通 repair 或单组件 update 没有该边界时不自动补依赖。缺失 AUR
+包的首装中断可用 `recover --resolve completed` 沿冻结候选续接，须保有同次完整升级
+证据，并在实际安装、精确身份及归属验证后才能核验步骤；包缺失本身不释放 unknown。
+
 用户 Skill 集合保留 `pennix-skills` 和 `pennix-skills-extra` 层级，统一安装到
 `$HOME/.agents/skills`，同一用户的宿主配置共用这份内容；CODEX_HOME 继续管理
 配置与认证，不选择集合版本。旧 CODEX_HOME/skills 集合由 `pennix repair <collection>`

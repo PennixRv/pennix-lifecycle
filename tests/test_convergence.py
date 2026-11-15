@@ -153,11 +153,19 @@ class ConvergenceTests(unittest.TestCase):
         self.assertEqual(owned_files.read_json(self.receipt_path), self.receipt)
 
     def test_recover_missing_official_package_uses_frozen_target_and_upgrade_gate(self):
+        self._recover_missing_arch_package('official')
+
+    def test_recover_missing_aur_package_uses_frozen_target_and_upgrade_gate(self):
+        self._recover_missing_arch_package('aur')
+
+    def _recover_missing_arch_package(self, source):
         config, lock = self.root/'workflow.config', self.root/'components.lock.json'
         config.write_text('same input')
-        sources = {'example': 'arch:extra/example'}
-        component = {'delivery': 'package', 'package': {'source': 'official', 'name': 'example'}}
+        sources = {'example': 'arch:extra/example' if source == 'official' else 'aur:example'}
+        component = {'delivery': 'package', 'package': {'source': source, 'name': 'example'}}
         target = {'source': sources['example'], 'version': '2.0-1', 'sha256': 'a'*64}
+        if source == 'aur':
+            target['ref'] = 'b'*40
         component_lock.write(lock, {'schema': 1, 'components': {}}, sources)
         for upgraded, absent in [(False, True), (True, False), (True, True)]:
             with self.subTest(upgraded=upgraded, absent=absent), patch.dict(os.environ,

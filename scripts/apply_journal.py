@@ -127,10 +127,19 @@ def replan(value: dict, steps: list[dict]) -> dict:
         raise JournalError("不能替换存在未知副作用的计划")
     verified_steps = [step for step in value["steps"] if step["status"] == "verified"]
     verified_ids = {step["id"] for step in verified_steps}
-    updated = {**value, "steps": verified_steps + [
-        {**step, "status": "pending", "observed": None}
-        for step in steps if step["id"] not in verified_ids]}
-    _write(updated, owned_files.read(path(), private=True))
+    pending = {step['id']: step for step in value['steps'] if step['status'] == 'pending'}
+    remaining = []
+    for step in steps:
+        if step['id'] in verified_ids:
+            continue
+        previous = pending.get(step['id'])
+        if previous and previous['target'] and not step['target']:
+            if any(previous[key] != step[key] for key in ['component', 'action']):
+                raise JournalError('重规划不能将冻结目标交给其他步骤')
+            step = {**step, 'target': previous['target']}
+        remaining.append({**step, 'status': 'pending', 'observed': None})
+    updated = {**value, "steps": verified_steps + remaining}
+    _write(updated, owned_files.json_bytes(value))
     return updated
 
 

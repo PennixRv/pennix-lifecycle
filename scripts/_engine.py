@@ -1095,14 +1095,17 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
                 package_file = Path(candidate["path"])
             elif metadata.get("source") == "aur":
                 source_tree = Path(candidate["path"])
+                build_command = ["makepkg", "--cleanbuild", "--force", "--noconfirm"]
+                if getattr(args, 'arch_dependencies_allowed', False):
+                    build_command.append('--syncdeps')
                 build = subprocess.run(
-                    ["makepkg", "--cleanbuild", "--force", "--noconfirm"], cwd=source_tree,
+                    build_command, cwd=source_tree,
                     env={**os.environ, "BUILDDIR": str(source_tree), "PKGDEST": str(source_tree),
                          "SRCDEST": str(source_tree / "sources")},
                     capture_output=True, text=True, timeout=1800, check=False,
                 )
                 if build.returncode:
-                    raise BootstrapError(f"fixed AUR candidate build failed: {key}")
+                    raise BootstrapError(f"fixed AUR candidate build failed: {key} (makepkg exit {build.returncode})")
                 artifacts = sorted(source_tree.glob(f"{metadata['name']}-*.pkg.tar.*"))
                 if len(artifacts) != 1:
                     raise BootstrapError(f"fixed AUR candidate did not produce one package: {key}")
