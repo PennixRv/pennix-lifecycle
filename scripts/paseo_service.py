@@ -292,8 +292,8 @@ def skills(paseo: Path, home: Path, action: str, *, environment: dict | None = N
 
 
 def preflight_candidate(candidate: dict) -> None:
-    if candidate.get("version") != "0.15.3" or not isinstance(candidate.get("path"), str):
-        raise PaseoServiceError("Paseo 候选没有经过验证的 0.15.3 原生 Skills 合同")
+    if candidate.get("version") not in {"0.15.3", "0.15.4"} or not isinstance(candidate.get("path"), str):
+        raise PaseoServiceError("Paseo 候选没有经过验证的 0.15.3 / 0.15.4 原生 Skills 合同")
     npm = shutil.which("npm")
     if not npm:
         raise PaseoServiceError("Paseo 候选预检需要 npm")
@@ -307,7 +307,7 @@ def preflight_candidate(candidate: dict) -> None:
             result = subprocess.run([npm, "install", "--global", "--prefix", directory, "--ignore-scripts",
                 "--include=optional", "--cache", str(root / "npm-cache"), "--registry", "https://registry.npmjs.org/",
                 candidate["path"]], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=180, check=False)
+                timeout=600, check=False)
             if result.returncode:
                 raise PaseoServiceError("Paseo 候选依赖暂存失败；未修改用户安装")
             skills(root / "bin/paseo", root / "paseo", "probe", environment=environment)

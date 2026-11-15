@@ -22,7 +22,7 @@ try {
     if (parent === root) throw new Error();
     root = parent;
   }
-  if (metadata.version !== '0.15.3') throw new Error();
+  if (!['0.15.3', '0.15.4'].includes(metadata.version)) throw new Error();
   const require = createRequire(join(root, 'package.json'));
   const clientEntry = require.resolve('@getpaseo/client/node');
   const serverEntry = require.resolve('@getpaseo/server/daemon-control');

@@ -175,12 +175,13 @@ class AuditRegressions(unittest.TestCase):
     def test_paseo_candidate_preflight_is_isolated_and_rejects_unverified_sdk(self):
         with patch.object(paseo_service.subprocess, "run") as run:
             with self.assertRaisesRegex(paseo_service.PaseoServiceError, "0.15.3"):
-                paseo_service.preflight_candidate({"version": "0.15.4", "path": "/synthetic.tgz"})
+                paseo_service.preflight_candidate({"version": "0.15.5", "path": "/synthetic.tgz"})
             run.assert_not_called()
         with patch.object(paseo_service.shutil, "which", return_value="/usr/bin/npm"), \
              patch.object(paseo_service.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run, \
              patch.object(paseo_service, "skills", return_value={"state": "compatible"}) as probe:
-            paseo_service.preflight_candidate({"version": "0.15.3", "path": "/synthetic.tgz"})
+            for version in ["0.15.3", "0.15.4"]:
+                paseo_service.preflight_candidate({"version": version, "path": "/synthetic.tgz"})
             environment = run.call_args.kwargs["env"]
             self.assertNotEqual(environment["HOME"], str(self.root))
             self.assertTrue(environment["CODEX_HOME"].startswith(environment["HOME"] + "/"))
