@@ -1114,15 +1114,16 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
                 )
                 if build.returncode:
                     raise BootstrapError(f"fixed AUR candidate build failed: {key} (makepkg exit {build.returncode})")
-                artifacts = sorted(source_tree.glob(f"{metadata['name']}-*.pkg.tar.*"))
+                artifacts = []
+                for artifact in sorted(source_tree.glob(f"{metadata['name']}-*.pkg.tar.*")):
+                    if artifact.is_symlink() or not artifact.is_file() or artifact.name.endswith('.sig'):
+                        continue
+                    identity = subprocess.run(["pacman", "-Qp", str(artifact)], capture_output=True,
+                                              text=True, timeout=30, check=False)
+                    if identity.returncode == 0 and identity.stdout.split() == [metadata['name'], expected]:
+                        artifacts.append(artifact)
                 if len(artifacts) != 1:
-                    raise BootstrapError(f"fixed AUR candidate did not produce one package: {key}")
-                identity = subprocess.run(["pacman", "-Qp", str(artifacts[0])], capture_output=True,
-                                          text=True, timeout=30, check=False)
-                fields = identity.stdout.split()
-                if (identity.returncode or len(fields) != 2 or fields[0] != metadata["name"]
-                        or fields[1] != expected):
-                    raise BootstrapError(f"fixed AUR package identity mismatch: {key}")
+                    raise BootstrapError(f"fixed AUR candidate did not produce one matching package identity: {key}")
                 installer = "pacman"
                 package_file = artifacts[0]
         asset = metadata.get("asset")

@@ -12,6 +12,42 @@ import pennix
 
 
 class AurDependencyTests(unittest.TestCase):
+    def test_native_identity_selects_the_main_package_among_debug_outputs(self):
+        self._select_artifact('debug',True)
+
+    def test_duplicate_or_wrong_native_identity_never_reaches_install(self):
+        for variant in ['duplicate','wrong-version']:
+            with self.subTest(variant=variant):self._select_artifact(variant,False)
+
+    def _select_artifact(self,variant,success):
+        with tempfile.TemporaryDirectory() as directory:
+            tree=Path(directory);main=tree/'example-1.0-1-x86_64.pkg.tar.zst';main.touch()
+            (tree/'example-debug-1.0-1-x86_64.pkg.tar.zst').touch()
+            (tree/(main.name+'.sig')).touch()
+            if variant=='duplicate':(tree/'example-1.0-1-x86_64.pkg.tar.xz').touch()
+            component={'delivery':'package','package':{'source':'aur','name':'example'},'_lock_target':{'version':'1.0-1'}}
+            args=SimpleNamespace(codex_home=tree/'codex',candidate={'path':str(tree)})
+            commands=[]
+            def run(command,**kwargs):
+                commands.append(command)
+                name='example-debug' if 'example-debug-' in command[-1] else 'example'
+                version='1.1-1' if variant=='wrong-version' else '1.0-1'
+                return SimpleNamespace(returncode=0,stdout=f'{name} {version}\n')
+            with patch.object(engine.host,'detect_host',return_value={'supported':True,'installers':{'aur':'yay'}}), \
+                    patch.object(engine,'probe_component',side_effect=[('missing',None),('match','1.0'),('match','1.0')]), \
+                    patch.object(engine,'package_owned',return_value=False), \
+                    patch.object(engine,'_write_package_receipt') as receipt, \
+                    patch.object(engine.subprocess,'run',side_effect=run):
+                if success:
+                    self.assertEqual(engine.component_operation(args,{},'example',component,'install'),'changed')
+                    self.assertEqual(commands[-1],['sudo','pacman','-U','--needed','--noconfirm',str(main)])
+                    self.assertFalse(any(command[-1].endswith('.sig') for command in commands))
+                    receipt.assert_called_once()
+                else:
+                    with self.assertRaises(engine.BootstrapError):engine.component_operation(args,{},'example',component,'install')
+                    self.assertFalse(any(command[0]=='sudo' for command in commands))
+                    receipt.assert_not_called()
+
     def test_cli_passes_dependency_permission_only_from_same_target_verified_upgrade(self):
         args = SimpleNamespace(codex_home=Path('/tmp/aur-codex'))
         component = {'delivery':'package','package':{'source':'aur'}}
