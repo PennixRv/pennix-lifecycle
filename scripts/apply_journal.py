@@ -35,7 +35,7 @@ def _validate(value: object) -> dict:
     if set(value) != (fields if value.get("schema") == 1 else fields | {"transaction", "identity"}):
         raise JournalError("生命周期 journal 格式无效")
     if (type(value["schema"]) is not int or value["schema"] not in {1, SCHEMA}
-            or not isinstance(value["command"], str) or value["command"] not in {"apply", "update", "reconcile", "repair", "uninstall"}
+            or not isinstance(value["command"], str) or value["command"] not in {"apply", "update", "update-all", "reconcile", "repair", "uninstall"}
             or (value["component"] is not None and not isinstance(value["component"], str))
             or not isinstance(value["config_digest"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["config_digest"])
             or (value["lock_digest"] is not None and (not isinstance(value["lock_digest"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["lock_digest"])))

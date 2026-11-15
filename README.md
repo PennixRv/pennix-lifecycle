@@ -61,6 +61,18 @@ pennix secrets edit
 pennix secrets import-ssh --alias office-wsl-via-nas --service codex
 ```
 
+来源已使用 Lifecycle 中央库时，选择精确字段，由可信 SSH 子进程私有管道传送：
+
+```sh
+pennix secrets check --json
+pennix secrets import-ssh --alias home-wsl-via-nas --field codex.api_key --field grok.api_key --field grok.tavily_api_key
+pennix secrets check --json
+```
+
+中央库仍是私有明文 TOML。`check` 只返回当前配置所需字段及缺失项，包括保留的 Codex provider 已使用本工具 auth.command 的情况。`--field` 与旧 `--service` 来源互斥；接收端核验版本、精确字段集合、重复键、上限和配置未变后一次合并，不覆盖不同的非空值。失败保留原值。源端 `secrets export --private-stdout --field …` 仅供原生受控子进程使用，拒绝终端；**不得把该命令的输出交给 Agent、日志或任务记录**。SSH 使用已有信任，不自动接受主机密钥。OAuth、SSH 私钥、会话、数据库及 Paseo 身份不经此入口复制。
+
+新增的 `PENNIX_COMPONENT_COPILOT_CLI` 默认关闭，旧配置省略时也保持关闭，保留既有外部 Copilot 的两项接入选择。全新设备可显式选择它，通过 AUR 安装 `github-copilot-cli-bin`，随后完成独立原生认证。原生模板检查等待依赖安装，但用户禁用 Hook、外来配置和漂移仍阻断。relay 首装等待 Paseo 原生配置生成独立 server-id 后才登记远端，不复制身份文件。
+
 `workflow.config` 是带格式主版本的 Kconfiglib 配置文件。`config edit` 和无 TTY
 的配置文件路径使用同一个模型；`plan` 只读，`apply` 才改变组件。一次性
 `uninstall <component> --confirm <component>` 不修改配置；要永久取消组件，先在
@@ -156,7 +168,11 @@ Codex Context Mode MCP 通过原生 `env_vars` 动态继承两个 user bus 变�
 
 `check` 将本地安装/配置结果与功能请求分开输出。`PENNIX_FUNCTIONAL_CHECKS` 默认关闭；明确开启后才运行已选连接的原生功能入口，Windsurf 仅使用临时合成项目。失败、超时或没有入口均不能通过，不回显响应正文。SiYuan 的实际 MCP 会话连接仍由宿主原生工具核验，不能用本地 receipt 代替。
 
-工具升级成功后只保留当前发行。完整、归属和权限安全的旧安装目录可清除；未知文件、符号链接和漂移会阻断。AGENTS 的正常升级要求归属凭据中的摘要仍匹配；人工审阅的迁移可用 `pennix repair codex-agents --expected-sha256 <完整文件摘要>` 精确确认当前字节，摘要不符不会写入。
+日常维护先运行只读 `pennix updates --json`，分别查看实际安装、锁定身份、登记来源候选、配置接入与重启影响，以及全部 Arch 系统包的可更新清单。Arch 查询复用官方 checkupdates 的临时数据库原则，使用 pacman-conf、fakeroot 和 pacman，核对真实同步库及已安装包前后不变；不写真实同步库。缺少能力或来源查询失败显示 blocked/unknown，不当作最新。固定集合仍跟踪 catalog 中的固定提交；允许保持外部归属的官方依赖单独标记 external。
+
+需要更新时使用 `pennix update --all`，在真实终端统一审阅并确认。原生执行复用单一 journal 冻结候选、配置、锁、中央秘密摘要和 catalog，确认期间变化即停止。官方包必须处于完整系统升级边界内；清单包含非工作流包。实际系统包集合超出清单、配置漂移或副作用 unknown 时保留事务并停止，不自动接管或盲目重放。仅对同一事务已证实完成的系统升级，可用 `pennix update --all --review-system-changes` 展示额外实际差异并明确重新接受，原审阅仍保留；该入口不释放 unknown。已证实步骤续跑时跳过。`pennix update <component>` 保持原有单组件行为；`reconcile` 仍负责接受可证明的同源外部更新。
+
+工具本身使用 `pennix tool update` 从固定公开发行发现、审阅和升级；核验固定版本载荷、公开 SHA-256、布局和身份后切换。切换结束后须在**新进程**重新运行 `pennix updates --json`；旧进程不继续执行内存中的组件 catalog，不后台自动更新。工具升级成功后只保留当前发行。完整、归属和权限安全的旧安装目录可清除；未知文件、符号链接和漂移会阻断。AGENTS 的正常升级要求归属凭据中的摘要仍匹配；人工审阅的迁移可用 `pennix repair codex-agents --expected-sha256 <完整文件摘要>` 精确确认当前字节，摘要不符不会写入。
 
 已有 Codex 会话绑定 provider ID，切换网关时应保留该身份；由用户直接维护的既有 provider 选择 PRESERVE。若旧受管 provider 字段已人工恢复首次基线，可在审阅完整配置后使用 `pennix repair codex-config --expected-sha256 <完整文件摘要>` 释放不再选择的归属。未知漂移、仍被选择的漂移字段、缺少可信记录或摘要不符仍拒绝。普通 apply/inspect/uninstall 不放宽漂移保护。已移除的 remote_compaction_v2 feature 不再生成，旧 Kconfig 选项仅作兼容输入；原生配置迁移只清除可证明归属的旧 feature，保留 provider 的 capabilities.remote_compaction。
 

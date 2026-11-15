@@ -404,6 +404,7 @@ def _resolve_aur(component: dict, workspace: Path, target: dict | None = None) -
 
 RESOLVERS = {
     "codex-cli": _resolve_aur,
+    "copilot-cli": _resolve_aur,
     "trellis-cli": resolve_npm,
     "trellis-paseo-adapter": resolve_npm,
     "pnpm": resolve_arch,

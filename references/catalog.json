@@ -135,6 +135,21 @@
         "name": "openai-codex-bin"
       }
     },
+    "copilot-cli": {
+      "delivery": "package",
+      "lock_source": "aur:github-copilot-cli-bin",
+      "source": "AUR github-copilot-cli-bin package",
+      "owner": "copilot-cli",
+      "scope": "global",
+      "verify_key": "copilot --version",
+      "actions": {"install": "managed", "configure": "not-applicable", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
+      "project_init": "not-applicable",
+      "conflicts": [],
+      "replaces": [],
+      "probe": "copilot",
+      "version_args": ["--version"],
+      "package": {"source": "aur", "name": "github-copilot-cli-bin"}
+    },
     "trellis-cli": {
       "delivery": "package",
       "lock_source": "npm:@pennixrv/trellis:latest",

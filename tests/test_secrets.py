@@ -4,6 +4,7 @@ import json
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import sys
@@ -12,9 +13,99 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import credential_import
 import secret_store
+import pennix
+import config_model
+import os
+import io
+from contextlib import redirect_stdout
 
 
 class SecretStoreTests(unittest.TestCase):
+    def test_central_transfer_is_selective_and_rejects_bad_envelopes(self):
+        good = {"schema": 1, "fields": {"grok": {"api_key": "private-fixture"}}}
+        self.assertEqual(credential_import.read_from_lifecycle("home", ["grok.api_key"],
+                         fetch=lambda *_: json.dumps(good).encode()), good["fields"])
+        bad = [b'{"schema":1,"schema":1,"fields":{}}', b'[]', b'private-fixture',
+               json.dumps({**good, "fields": {"grok": {"api_key": "private-fixture", "tavily_api_key": "extra"}}}).encode(),
+               json.dumps({"schema": 1, "fields": {}}).encode(), b'x' * (credential_import.LIMIT + 1)]
+        for raw in bad:
+            with self.subTest(size=len(raw)), self.assertRaises(credential_import.CredentialImportError) as failure:
+                credential_import.read_from_lifecycle("home", ["grok.api_key"], fetch=lambda *_: raw)
+            self.assertNotIn("private-fixture", str(failure.exception))
+        with self.assertRaises(credential_import.CredentialImportError):
+            credential_import.read_from_lifecycle("-oProxyCommand=bad", ["grok.api_key"])
+
+    def test_selected_requirements_check_and_config_change_are_redacted(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"HOME": directory,
+                "XDG_CONFIG_HOME": directory + '/config', "XDG_STATE_HOME": directory + '/state'}):
+            cfg = config_model.init()
+            kconf, _ = config_model.load()
+            for name, value in {"PENNIX_COMPONENT_PENNIX_SKILLS": "y", "PENNIX_TARGET_GROK": "y",
+                                "PENNIX_TARGET_GROK_TAVILY": "y"}.items():
+                kconf.syms[name].set_value(value)
+            config_model.write(kconf, cfg)
+            kconf, _ = config_model.load()
+            path = Path(config_model.config_value(kconf, 'PENNIX_SECRETS_FILE'))
+            secret_store.update(path, {"grok": {"api_key": "private-fixture"}})
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(pennix.main(['secrets', 'check', '--json']), 2)
+            self.assertIn('grok.tavily_api_key', output.getvalue())
+            self.assertNotIn('private-fixture', output.getvalue())
+            before = path.read_bytes()
+            def changed(*_):
+                cfg.write_bytes(cfg.read_bytes() + b'\n# changed\n')
+                return {"grok": {"tavily_api_key": "new"}}
+            with patch.object(credential_import, 'read_from_lifecycle', side_effect=changed):
+                args = pennix.parser().parse_args(['secrets', 'import-ssh', '--alias', 'home', '--field', 'grok.tavily_api_key'])
+                with self.assertRaises(pennix.CliError):
+                    pennix.cmd_secrets_import_ssh(args)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_partial_source_failure_preserves_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'secrets.toml'
+            secret_store.update(path, {"codex": {"api_key": "keep"}})
+            before = path.read_bytes()
+            def fetch(_alias, source):
+                if source == '.codex/auth.json':
+                    return b'{"OPENAI_API_KEY":"keep"}'
+                raise credential_import.CredentialImportError('unavailable')
+            with self.assertRaises(credential_import.CredentialImportError):
+                credential_import.import_from_ssh(path, 'home', ['codex', 'grok'], fetch=fetch)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_preserved_codex_native_auth_is_a_central_requirement(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'HOME':directory,
+                'XDG_CONFIG_HOME':directory+'/config'}):
+            cfg = config_model.init()
+            kconf, _ = config_model.load()
+            kconf.syms['PENNIX_COMPONENT_CODEX_CONFIG'].set_value('y')
+            kconf.syms['PENNIX_CODEX_PROVIDER_PRESERVE'].set_value('y')
+            home = Path(config_model.config_value(kconf, 'PENNIX_CODEX_HOME'))
+            home.mkdir()
+            path = config_model.config_value(kconf, 'PENNIX_SECRETS_FILE')
+            (home/'config.toml').write_text('model_provider="existing"\n[model_providers.existing.auth]\ncommand='+
+                json.dumps(str(Path(directory)/'.local/bin/pennix'))+'\nargs='+
+                json.dumps(['secrets','codex-token','--secrets-file',path])+'\n')
+            self.assertIn('codex.api_key', credential_import.required_fields(kconf, {'configuration_targets':{}}))
+
+    def test_private_export_rejects_terminal_and_timeout_kills_ssh_group(self):
+        args = pennix.parser().parse_args(['secrets','export','--field','codex.api_key','--private-stdout'])
+        with patch.object(sys.stdout, 'isatty', return_value=True), self.assertRaises(pennix.CliError):
+            pennix.cmd_secrets_export(args)
+        real_popen = credential_import.subprocess.Popen
+        children = []
+        def process(*_, **kwargs):
+            child = real_popen([sys.executable,'-c','import time;time.sleep(30)'], **kwargs)
+            children.append(child)
+            return child
+        with patch.object(credential_import.subprocess,'Popen',side_effect=process), \
+                patch.object(credential_import.time,'monotonic',side_effect=[0,61]), \
+                self.assertRaises(credential_import.CredentialImportError):
+            credential_import._fetch_lifecycle('home',['codex.api_key'])
+        self.assertIsNotNone(children[0].poll())
+
     def test_first_secret_write_rejects_non_private_existing_parent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory) / "shared"

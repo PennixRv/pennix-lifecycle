@@ -163,11 +163,20 @@ def plan(kconf: Any, catalog: dict[str, Any], codex_home: Path, secrets_path: Pa
         if spec.get("host") == "copilot-cli":
             home = Path(config_model.config_value(kconf, "PENNIX_COPILOT_HOME"))
             status = inspect_target(target, spec, codex_home, target_home=home, enabled=selected)
+            if selected and {spec["component"], "copilot-cli"} & (installing or set()):
+                # 仅无归属且没有外来配置的首装可延迟模板检查。
+                try:
+                    baseline = native_integrations.copilot.inspect(spec["native"], home, enabled=False)
+                    if baseline["state"] == "absent":
+                        native_integrations.copilot.policy(home)
+                        status = {**baseline, "state": "pending-owner", "detail": "依赖安装后核验 Copilot 原生模板"}
+                except (native_integrations.NativeIntegrationError, OSError) as error:
+                    status = {"state": "blocked", "owned": False, "detail": str(error)}
             action = ("keep" if status["state"] == "current" else "configure") if selected else (
                 "unconfigure" if status.get("owned") else "keep")
             if status["state"] in {"blocked", "drifted", "external"}:
                 action = "blocked" if selected or status.get("owned") else "keep"
-            if action in {"configure", "unconfigure"}:
+            if action in {"configure", "unconfigure"} and status["state"] != "pending-owner":
                 try:
                     validate_target(target, spec, kconf, codex_home, secrets_path, action)
                 except (ConnectionError, native_integrations.NativeIntegrationError, OSError) as error:

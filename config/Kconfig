@@ -72,6 +72,12 @@ config PENNIX_COMPONENT_TRELLIS_CLI
 	help
 		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
+config PENNIX_COMPONENT_COPILOT_CLI
+	bool "GitHub Copilot CLI（AUR）"
+	default n
+	help
+		安装 github-copilot-cli-bin；原生认证须在本机单独完成。
+
 config PENNIX_COMPONENT_PNPM
 	bool "pnpm"
 	default y
@@ -82,7 +88,7 @@ config PENNIX_COMPONENT_CONTEXT_MODE
 	bool "Context Mode 程序"
 	default y if PENNIX_COMPONENT_CODEX_CLI && PENNIX_CODEX_HOOKS
 	help
-		一并管理 npm 程序、MCP 和六类 Hook；保留用户索引与会话数据。
+		一并管理 npm 程序、MCP 和四类 Hook；保留用户索引与会话数据。
 
 config PENNIX_CONTEXT_MODE_CODEX
 	bool "Codex 的 Context Mode MCP 与 Hooks"

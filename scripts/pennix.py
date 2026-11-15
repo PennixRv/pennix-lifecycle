@@ -36,12 +36,13 @@ import pnpm_migration
 import owned_files
 import secret_store
 import native_integrations
+import update_inventory
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "references" / "catalog.json"
 APPLY_ORDER = [
-    "codex-cli", "trellis-cli", "pnpm", "context-mode", "codegraph-cli", "paseo-cli", "trellis-paseo-adapter",
+    "codex-cli", "copilot-cli", "trellis-cli", "pnpm", "context-mode", "codegraph-cli", "paseo-cli", "trellis-paseo-adapter",
     "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "uv", "tavily-cli",
     "markitdown", "pandoc", "libreoffice", "poppler", "tesseract-eng", "tesseract-chi-sim", "tesseract", "noto-fonts-cjk",
     "tavily-hikari", "peon-ping", "codex-config", "codex-agents", "pennix-skills-extra",
@@ -124,6 +125,12 @@ def _verify_inputs(args: argparse.Namespace) -> None:
         raise CliError("确认后 workflow.config 已变化；未执行旧计划")
     if hasattr(args, "component_lock_snapshot") and owned_files.read(args.component_lock_path, private=True) != args.component_lock_snapshot:
         raise CliError("确认后 components.lock.json 已变化；未执行旧计划")
+    if hasattr(args, 'update_review'):
+        review = args.update_review
+        secret_path = Path(config_model.config_value(args.kconf, 'PENNIX_SECRETS_FILE'))
+        if (apply_journal.digest(secret_path) != review['secrets_digest']
+                or apply_journal.digest(CATALOG) != review['catalog_digest']):
+            raise CliError('秘密输入或 catalog 与统一审阅不一致；保留事务，不继续执行')
 
 
 def _write_lock(args: argparse.Namespace) -> None:
@@ -255,6 +262,14 @@ def _relay_plan(args: argparse.Namespace, kconf: config_model.StrictKconfig) -> 
                 "detail": "本地 daemon relay 已核验；不访问远端登记表" if state == "current"
                 else "仅配置本地 daemon relay，不访问远端登记表",
             }
+        owned_files.safe_path(paseo_home)
+        identity = paseo_home / "server-id"
+        if (not identity.exists() and not identity.is_symlink()
+                and (not paseo_home.exists() or paseo_home.is_dir() and not any(paseo_home.iterdir()))
+                and "paseo-cli" in config_model.selected_components(kconf)
+                and not relay_owner.local_owned()):
+            return {"selected": True, "register": True, "action": "install", "state": "pending-identity",
+                    "detail": "等待原生 Paseo 配置生成独立身份，再精确登记 relay"}
         state = relay_owner.inspect(paseo_home, nas_ssh=nas_ssh, router_ssh=router_ssh)
         return {
             "selected": True,
@@ -489,6 +504,17 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
                 action = "blocked"
                 status["detail"] = "lock 不代表归属；plugin 需要独立可信 receipt 和专用接管确认"
         components[component_id] = {**status, "selected": component_id in selected, "action": action}
+    for key, target in getattr(args, 'update_targets', {}).items():
+        item = components[key]
+        locked = args.component_lock['components'].get(key, {})
+        if candidates.matches(locked, target):
+            continue
+        if not item['selected'] or item['action'] not in {'keep', 'system-refresh'} or not locked:
+            raise CliError(f'{key} 不能从当前归属/漂移状态统一更新；先核验原生 repair/reconcile')
+        item.update(action='upgrade', candidate_target=target)
+        native = catalog['components'][key].get('native_config')
+        if item.get('native_action') == 'keep' and native and config_model.config_value(kconf, native['select']) == 'y':
+            item['native_action'] = 'configure'
     if getattr(args, "scope", None) == "base":
         components["paseo-autostart"] = {"selected": False, "action": "keep", "state": "outside-scope",
             "unit_state": "absent", "mode": "off", "run": False, "listen": "", "runtime": {"running": False}}
@@ -576,6 +602,10 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
         )
     except connection_owners.ConnectionError as error:
         raise CliError(str(error)) from error
+    for key, spec in catalog.get('configuration_targets', {}).items():
+        if (connections[key].get('selected') and connections[key]['action'] == 'keep'
+                and components[spec['component']]['action'] == 'upgrade'):
+            connections[key]['action'] = 'configure'
     arch_components = [key for key, item in components.items()
                        if item.get("selected") and catalog["components"].get(key, {}).get("package", {}).get("source") in {"official", "aur"}]
     return {"config": str(path), "codex_home": str(args.codex_home), "components": components, "connections": connections,
@@ -813,9 +843,12 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 def _apply_steps(value: dict[str, Any], args: argparse.Namespace, catalog: dict[str, Any]) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
+    if hasattr(args, 'update_review'):
+        steps.append({'id': 'update-review', 'component': 'update-review', 'action': 'review', 'target': args.update_review})
     side_effects = value.get("side_effects", {})
     if side_effects.get("system_upgrade"):
-        steps.append({"id": "system-upgrade", "component": "system", "action": "upgrade", "target": {}})
+        steps.append({"id": "system-upgrade", "component": "system", "action": "upgrade",
+                      "target": getattr(args, 'update_review', {}).get('system', {})})
     if any(value["components"].get(key, {}).get("action") in {"install", "adopt", "upgrade", "adopt-upgrade"}
            and value["components"].get(key, {}).get("selected")
            and catalog["components"].get(key, {}).get("package", {}).get("source") == "aur"
@@ -836,7 +869,8 @@ def _apply_steps(value: dict[str, Any], args: argparse.Namespace, catalog: dict[
         if item.get("selected") and item.get("plugin_adoption"):
             steps.append({"id": f"{key}:adopt-plugin", "component": key,
                           "action": "adopt-plugin", "target": item["plugin_adoption"]})
-        if key == "paseo-cli" and value["components"]["paseo-autostart"].get("selected"):
+        if key == "paseo-cli" and (value["components"]["paseo-autostart"].get("selected")
+                or value["components"].get("paseo-relay", {}).get("state") == "pending-identity"):
             steps.append({"id": "paseo-config:configure", "component": "paseo-config",
                           "action": "configure", "target": {
                               "listen": value["components"]["paseo-autostart"]["listen"],
@@ -892,7 +926,7 @@ def _journal_for_apply(args: argparse.Namespace, value: dict[str, Any], steps: l
     if config_digest is None:
         raise CliError("workflow.config 在 apply 前消失")
     if active is not None:
-        if active["command"] != "apply" or active["component"] is not None:
+        if active["command"] != ('update-all' if getattr(args, 'all', False) else 'apply') or active["component"] is not None:
             raise CliError("存在未完成的单组件更新 journal；请使用相同的 update 入口恢复")
         if active["config_digest"] != config_digest:
             raise CliError("workflow.config 已改变；未完成 apply 保留现场，不能猜测续跑")
@@ -905,7 +939,7 @@ def _journal_for_apply(args: argparse.Namespace, value: dict[str, Any], steps: l
             return active, True
     if not create:
         return None, False
-    return _start_transaction(args, "apply", None, steps), False
+    return _start_transaction(args, 'update-all' if getattr(args, 'all', False) else 'apply', None, steps), False
 
 
 def _journal_mutate(value: dict, step_id: str, action):
@@ -990,7 +1024,7 @@ def _finish_observed_paseo_apply(args: argparse.Namespace, value: dict[str, Any]
 
 def _preflight_pending_owners(args: argparse.Namespace, value: dict, catalog: dict, steps: list[dict]) -> None:
     pending = {name: catalog["configuration_targets"][name] for name, item in value["connections"].items()
-               if item.get("state") == "pending-owner"}
+               if item.get("state") == "pending-owner" and catalog["configuration_targets"][name].get("host") != "copilot-cli"}
     for provider in {"cch-status" if name == "cch" else "pennix-skills" for name in pending}:
         step = next((item for item in steps if item["component"] == provider
                      and item["action"] in {"install", "upgrade", "adopt", "adopt-upgrade"}), None)
@@ -1132,8 +1166,10 @@ def cmd_apply(args: argparse.Namespace) -> int:
             paseo_step["target"] = candidate_target
     plugin_adoptions = {key: item["plugin_adoption"] for key, item in value["components"].items()
                         if item.get("selected") and item.get("plugin_adoption")}
-    if active is None and value.get("side_effects", {}).get("system_upgrade"):
+    if active is None and (value.get("side_effects", {}).get("system_upgrade") or getattr(args, 'all', False)):
         _emit(value, args.json)
+        if hasattr(args, 'update_review'):
+            _emit({'unified_review': args.update_review, 'updates': args.update_inventory}, args.json)
         if (not sys.stdin.isatty() or not sys.stdout.isatty()
                 or input("确认完整系统升级及本次 apply？输入 yes 继续: ").strip() != "yes"):
             return 1
@@ -1146,6 +1182,8 @@ def cmd_apply(args: argparse.Namespace) -> int:
             return 1
     if active is None:
         _verify_inputs(args)
+        if getattr(args, 'all', False):
+            _verify_update_candidates(args, catalog)
         if hasattr(args, "config_snapshot") and _plan(args) != value:
             raise CliError("确认期间资源或归属已变化；请重新计划")
         active, _ = _journal_for_apply(args, value, steps, create=True)
@@ -1164,6 +1202,9 @@ def cmd_apply(args: argparse.Namespace) -> int:
             return "changed"
         active, results["system-upgrade"] = _journal_mutate(active, "system-upgrade", system_upgrade)
     if system_step is not None:
+        if system_step['target']:
+            update_inventory.verify_system(system_step['target']['installed'], system_step['target']['upgrades'],
+                accepted=getattr(args, 'update_review', {}).get('reviewed_after_upgrade'))
         value = _plan(args)
         _, _, catalog = _load(args)
         relay = value["components"].get("paseo-relay")
@@ -1176,6 +1217,9 @@ def cmd_apply(args: argparse.Namespace) -> int:
         _verify_inputs(args)
         step_id, component_id, action = step["id"], step["component"], step["action"]
         if step["status"] == "verified" or step_id == "system-upgrade":
+            continue
+        if step_id == 'update-review':
+            active = apply_journal.verified(active, step_id, {'inputs': 'bound'})
             continue
         if action == "prepare" and component_id == "aur-helper":
             active, results["aur-helper"] = _journal_mutate(
@@ -1568,7 +1612,105 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _updates(args):
+    value = _plan(args)
+    kconf, _, catalog = _load(args)
+    report = update_inventory.inspect(catalog, config_model.selected_components(kconf),
+        args.component_lock['components'], value,
+        system_upgrade=config_model.config_value(kconf, 'PENNIX_SYSTEM_UPGRADE') == 'y')
+    return report, value, catalog
+
+
+def cmd_updates(args):
+    report, _, _ = _updates(args)
+    _emit(report, args.json)
+    return 2 if report['system']['state'] != 'current' or any(
+        item['state'] == 'unknown' for item in report['components'].values()) else 0
+
+
+def _verify_update_candidates(args, catalog):
+    review = args.update_review
+    system = update_inventory.arch()
+    if system['state'] != 'current' or any(system[key] != review['system'][key] for key in ('installed', 'upgrades')):
+        raise CliError('确认期间完整系统升级清单改变；未开始事务，请重新审阅')
+    for key, available in review['available'].items():
+        current = update_inventory.available(catalog['components'][key], args.component_lock['components'].get(key), system)
+        if current != available:
+            raise CliError(f'{key} 来源候选在确认期间改变；请重新审阅')
+
+
+def cmd_update_all(args):
+    active = apply_journal.read()
+    if active is not None:
+        if active['command'] != 'update-all':
+            raise CliError('存在其他未完成事务；先使用原入口恢复')
+        review = next((step['target'] for step in active['steps'] if step['id'] == 'update-review'), None)
+        if not review:
+            raise CliError('统一更新缺少冻结审阅；保留现场')
+        args.update_targets = review['targets']
+        args.update_review = review
+        args.update_inventory = {'state': 'resume-frozen-journal'}
+        if args.review_system_changes:
+            system_step = next((step for step in active['steps'] if step['id'] == 'system-upgrade'), None)
+            if not system_step or system_step['status'] != 'verified':
+                raise CliError('只有已证明完成的系统升级可重审；不释放 unknown')
+            args.kconf, _, _ = _load(args)
+            _verify_inputs(args)
+            actual = update_inventory.installed_arch()
+            expected = dict(review['system']['installed'])
+            expected.update({item['name']:item['available'] for item in review['system']['upgrades']})
+            _emit({'system_after_upgrade': {key: {'reviewed':expected.get(key), 'actual':actual.get(key)}
+                for key in sorted(expected.keys() | actual.keys()) if expected.get(key) != actual.get(key)}}, args.json)
+            if not sys.stdin.isatty() or not sys.stdout.isatty() or input('确认接受已完成系统升级的实际差异？输入 yes: ').strip() != 'yes':
+                return 1
+            _verify_inputs(args)
+            if update_inventory.installed_arch() != actual:
+                raise CliError('系统包在重审期间改变；未接受')
+            review = {**review, 'reviewed_after_upgrade':actual}
+            apply_journal.set_target(active, 'update-review', review)
+            args.update_review = review
+        return cmd_apply(args)
+    if args.review_system_changes:
+        raise CliError('没有可重审的统一更新事务')
+    report, value, catalog = _updates(args)
+    _emit(report, args.json)
+    if report['system']['state'] != 'current':
+        raise CliError('完整 Arch 影响尚不可核验；未执行统一更新')
+    unknown = [key for key, item in report['components'].items() if item['state'] in {'unknown', 'unmanaged'}]
+    if unknown:
+        raise CliError('先核验来源、归属和 reconcile：' + ', '.join(unknown))
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise CliError('统一更新必须在真实终端审阅并确认；清单为只读，未执行变更')
+    targets = {}
+    for key, item in report['components'].items():
+        if item['state'] != 'update':
+            continue
+        component = catalog['components'][key]
+        if component.get('package', {}).get('source') == 'official':
+            if not report['system_upgrade_enabled']:
+                raise CliError('官方包更新必须选择完整系统升级；拒绝部分升级')
+            continue
+        with tempfile.TemporaryDirectory(prefix='pennix-update-freeze-') as directory:
+            candidate = candidates.resolve(component, Path(directory), item['available'])
+            targets[key] = candidates.lock_entry(candidate)
+    args.update_targets = targets
+    args.update_inventory = report
+    args.update_review = {'targets': targets,
+        'available': {key: item['available'] for key, item in report['components'].items() if item['available'] is not None},
+        'system': report['system'], 'catalog_digest': apply_journal.digest(CATALOG),
+        'secrets_digest': apply_journal.digest(Path(config_model.config_value(args.kconf, 'PENNIX_SECRETS_FILE')))}
+    return cmd_apply(args)
+
+
 def cmd_update(args: argparse.Namespace) -> int:
+    if getattr(args, 'all', False):
+        if args.component or args.version:
+            raise CliError('--all 不接受 component 或 --version')
+        return cmd_update_all(args)
+    if not args.component:
+        raise CliError('必须指定组件或 --all')
+    if getattr(args, 'review_system_changes', False):
+        raise CliError('--review-system-changes 仅用于 --all 的已完成系统升级重审')
     kconf, config_path, catalog = _load(args)
     args.kconf = kconf
     args.codex_home = Path(os.path.expanduser(config_model.config_value(kconf, "PENNIX_CODEX_HOME")))
@@ -1962,13 +2104,52 @@ def cmd_secrets_codex_token(args: argparse.Namespace) -> int:
 
 
 def cmd_secrets_import_ssh(args: argparse.Namespace) -> int:
-    kconf, _ = config_model.load(args.config)
+    kconf, config_path = config_model.load(args.config)
+    before = kconf.snapshot
     path = Path(config_model.config_value(kconf, "PENNIX_SECRETS_FILE"))
     try:
-        updated = credential_import.import_from_ssh(path, args.alias, args.service)
+        if args.field:
+            if args.service:
+                raise CliError("--field 与 --service 不能混用")
+            values = credential_import.read_from_lifecycle(args.alias, args.field)
+        elif args.service:
+            values = credential_import.read_from_ssh(args.alias, args.service)
+        else:
+            raise CliError("必须选择中央库 --field 或原生 owner --service")
+        if owned_files.read(config_path, private=True) != before:
+            raise CliError("配置在凭据传输期间改变；未写入秘密")
+        updated = secret_store.update(path, values)
     except credential_import.CredentialImportError as error:
         raise CliError(str(error)) from error
     _emit({"operation": "secrets-import-ssh", "updated": sorted(updated)}, args.json)
+    return 0
+
+
+def cmd_secrets_check(args: argparse.Namespace) -> int:
+    kconf, _ = config_model.load(args.config)
+    catalog = owner_engine.load_catalog(CATALOG)
+    required = credential_import.required_fields(kconf, catalog)
+    path = Path(config_model.config_value(kconf, "PENNIX_SECRETS_FILE"))
+    if not required and not path.exists() and not path.is_symlink():
+        _emit({'state': 'current', 'required': [], 'missing': []}, args.json)
+        return 0
+    try:
+        values = secret_store.load(path)
+    except secret_store.SecretError as error:
+        _emit({"state": "blocked", "required": required, "detail": str(error)}, args.json)
+        return 2
+    missing = [name for name in required if not values.get(name.split('.')[0], {}).get(name.split('.')[1])
+               or any(c in values[name.split('.')[0]][name.split('.')[1]] for c in '\r\n')]
+    _emit({"state": "current" if not missing else "blocked", "required": required, "missing": missing}, args.json)
+    return 2 if missing else 0
+
+
+def cmd_secrets_export(args: argparse.Namespace) -> int:
+    if not args.private_stdout or sys.stdout.isatty():
+        raise CliError("私有导出仅允许显式 --private-stdout 的机器管道；不得打印到终端或 Agent 输出")
+    kconf, _ = config_model.load(args.config)
+    values = secret_store.select(Path(config_model.config_value(kconf, "PENNIX_SECRETS_FILE")), args.field)
+    sys.stdout.write(json.dumps({"schema": 1, "fields": values}) + '\n')
     return 0
 
 
@@ -2003,6 +2184,19 @@ def cmd_cache(args: argparse.Namespace) -> int:
 def cmd_tool(args: argparse.Namespace) -> int:
     if args.tool_command == "install":
         result = release_owner._install(ROOT)
+    elif args.tool_command == 'update':
+        target = release_owner.latest()
+        current = release_owner._version(ROOT)
+        _emit({'installed': current, 'available': target, 'next': '切换后以新进程运行 pennix updates --json'}, args.json)
+        if target['version'] == current:
+            return 0
+        if tuple(map(int, target['version'].split('.'))) < tuple(map(int, current.split('.'))):
+            raise CliError('latest 比当前工具更旧；拒绝隐式降级')
+        if not sys.stdin.isatty() or not sys.stdout.isatty() or input('确认升级 Lifecycle 工具？输入 yes: ').strip() != 'yes':
+            return 1
+        if release_owner.latest() != target:
+            raise CliError('确认期间公开发行改变；请重新审阅')
+        result = release_owner.update(target)
     else:
         if not args.yes:
             raise CliError("工具自身卸载需要显式 --yes")
@@ -2190,11 +2384,17 @@ def parser() -> argparse.ArgumentParser:
     repair.set_defaults(function=cmd_repair)
 
     update = sub.add_parser("update", help="明确升级一个已选择且受管的组件")
-    update.add_argument("component")
+    update.add_argument("component", nargs='?')
+    update.add_argument('--all', action='store_true', help='统一审阅并在同一 native journal 更新所选组件')
+    update.add_argument('--review-system-changes', action='store_true', help='重审同一 --all 事务中已证实系统升级的额外变化；不释放 unknown')
     update.add_argument("--version", help="指定 npm 组件的精确版本；默认仍跟踪登记通道")
     update.add_argument("--config")
     update.add_argument("--json", action="store_true")
     update.set_defaults(function=cmd_update)
+    updates = sub.add_parser('updates', help='只读查询安装、锁、登记来源候选及完整系统升级影响')
+    updates.add_argument('--config')
+    updates.add_argument('--json', action='store_true')
+    updates.set_defaults(function=cmd_updates)
 
     reconcile = sub.add_parser("reconcile", help="显式接受已核验的精确外部更新；不安装或降级")
     reconcile.add_argument("component")
@@ -2207,6 +2407,9 @@ def parser() -> argparse.ArgumentParser:
     install_tool = tool_sub.add_parser("install", help="安装当前已核验发行包")
     install_tool.add_argument("--json", action="store_true")
     install_tool.set_defaults(function=cmd_tool)
+    update_tool = tool_sub.add_parser('update', help='从固定公开发行更新自身；切换后必须重新审阅组件')
+    update_tool.add_argument('--json', action='store_true')
+    update_tool.set_defaults(function=cmd_tool)
     uninstall_tool = tool_sub.add_parser("uninstall", help="卸载生命周期工具自身")
     uninstall_tool.add_argument("--yes", action="store_true")
     uninstall_tool.add_argument("--json", action="store_true")
@@ -2231,10 +2434,20 @@ def parser() -> argparse.ArgumentParser:
     secret_token.set_defaults(function=cmd_secrets_codex_token)
     secret_import = secrets_sub.add_parser("import-ssh", help="从既有 SSH 别名读取已登记凭据文件")
     secret_import.add_argument("--alias", required=True)
-    secret_import.add_argument("--service", action="append", required=True, choices=sorted(credential_import.SOURCES))
+    secret_import.add_argument("--service", action="append", choices=sorted(credential_import.SOURCES))
+    secret_import.add_argument("--field", action="append", help="从来源 Lifecycle 中央库选择 table.field")
     secret_import.add_argument("--config")
     secret_import.add_argument("--json", action="store_true")
     secret_import.set_defaults(function=cmd_secrets_import_ssh)
+    secret_check = secrets_sub.add_parser("check", help="仅检查所选配置需要的字段，不返回值")
+    secret_check.add_argument("--config")
+    secret_check.add_argument("--json", action="store_true")
+    secret_check.set_defaults(function=cmd_secrets_check)
+    secret_export = secrets_sub.add_parser("export", help="仅供可信 SSH 子进程私有管道，不得捕获到 Agent 上下文")
+    secret_export.add_argument("--config")
+    secret_export.add_argument("--field", action="append", required=True)
+    secret_export.add_argument("--private-stdout", action="store_true")
+    secret_export.set_defaults(function=cmd_secrets_export)
 
     cache = sub.add_parser("cache", help="管理工具自有缓存")
     cache_sub = cache.add_subparsers(dest="cache_command", required=True)
@@ -2252,14 +2465,14 @@ def main(argv: list[str] | None = None) -> int:
         args = parser().parse_args(argv)
         mutating = (
             args.command in {"apply", "repair", "update", "reconcile", "uninstall", "tool"}
-            or args.command == "secrets" and args.secrets_command != "codex-token"
+            or args.command == "secrets" and args.secrets_command in {"edit", "import-ssh"}
             or args.command == "recover" and args.resolve is not None
             or (args.command == "config" and args.config_command in {"init", "edit"})
             or (args.command == "cache" and args.cache_command == "clean" and args.yes)
         )
         if mutating:
             with owned_files.locked():
-                if args.command in {"apply", "repair", "update", "reconcile", "uninstall"} or args.command == "tool" and args.tool_command == "install":
+                if args.command in {"apply", "repair", "update", "reconcile", "uninstall"} or args.command == "tool" and args.tool_command in {"install", "update"}:
                     current_host = owner_engine.host.detect_host()
                     if not current_host["supported"]:
                         raise CliError(str(current_host["reason"]))
@@ -2267,7 +2480,7 @@ def main(argv: list[str] | None = None) -> int:
                     raise CliError("存在未完成 lifecycle 事务；先从原入口或 recover 恢复")
                 return args.function(args)
         return args.function(args)
-    except (CliError, base_environment.BaseError, candidates.CandidateError, apply_journal.JournalError, connection_owners.ConnectionError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, relay_owner.RelayError, release_owner.ReleaseError, skill_collections.CollectionError, owner_engine.local_clients.ClientError, secret_store.SecretError, owned_files.OwnershipError, native_integrations.NativeIntegrationError, native_integrations.hook_integrations.HookError, OSError) as error:
+    except (CliError, update_inventory.UpdateError, base_environment.BaseError, candidates.CandidateError, apply_journal.JournalError, connection_owners.ConnectionError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, relay_owner.RelayError, release_owner.ReleaseError, skill_collections.CollectionError, owner_engine.local_clients.ClientError, secret_store.SecretError, owned_files.OwnershipError, native_integrations.NativeIntegrationError, native_integrations.hook_integrations.HookError, OSError) as error:
         print(f"pennix: {error}", file=sys.stderr)
         try:
             active = apply_journal.read()

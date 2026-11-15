@@ -97,3 +97,24 @@ def get(path: Path, table: str, field: str) -> str:
         raise SecretError(f"缺少必填秘密字段: [{table}] {field}")
     return value
 
+
+def field_names(fields) -> list[str]:
+    allowed = {f"{table}.{key}" for table, keys in FIELDS.items() for key in keys}
+    if (not isinstance(fields, (list, tuple)) or not fields
+            or any(not isinstance(field, str) or field not in allowed for field in fields)):
+        raise SecretError("必须选择已登记的秘密字段")
+    return sorted(set(fields))
+
+
+def select(path: Path, fields: list[str]) -> dict[str, dict[str, str]]:
+    names = field_names(fields)
+    values = load(path)
+    result = {}
+    for name in names:
+        table_name, key = name.split(".")
+        value = values.get(table_name, {}).get(key, "")
+        if not value or "\n" in value or "\r" in value:
+            raise SecretError(f"缺少必填秘密字段: {name}")
+        result.setdefault(table_name, {})[key] = value
+    return result
+

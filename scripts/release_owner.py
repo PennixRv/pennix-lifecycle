@@ -11,6 +11,7 @@ import re
 
 import owned_files
 import runtime_environment
+import candidates
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -297,4 +298,36 @@ def install(source: Path) -> str:
 def uninstall() -> str:
     with owned_files.locked():
         return _uninstall()
+
+
+def latest() -> dict:
+    value = candidates._json('https://api.github.com/repos/PennixRv/pennix-lifecycle/releases/latest')
+    tag = value.get('tag_name', '')
+    if not isinstance(tag, str) or not tag.startswith('v') or not VERSION_NAME.fullmatch(tag[1:]):
+        raise ReleaseError('公开发行版本格式无效')
+    name = f'pennix-lifecycle-{tag[1:]}.tar.gz'
+    assets = {asset.get('name'): asset for asset in value.get('assets', [])}
+    base = f'https://github.com/PennixRv/pennix-lifecycle/releases/download/{tag}/'
+    if any(assets.get(item, {}).get('browser_download_url') != base + item for item in (name, name + '.sha256')):
+        raise ReleaseError('公开发行缺少固定来源的载荷或摘要')
+    return {'version': tag[1:], 'tag': tag, 'url': base + name, 'name': name,
+            'digest': assets[name].get('digest')}
+
+
+def update(target: dict) -> str:
+    # 调用方已持有 Lifecycle 锁；切换后禁止沿用旧进程 catalog。
+    with tempfile.TemporaryDirectory(prefix='pennix-tool-update-') as directory:
+        root = Path(directory)
+        archive = root / target['name']
+        checksum = root / 'checksum'
+        owned_files.download(target['url'], archive)
+        owned_files.download(target['url'] + '.sha256', checksum, limit=1024)
+        fields = checksum.read_text().split()
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        if (fields != [digest, target['name']] or target['digest'] and target['digest'] != 'sha256:' + digest):
+            raise ReleaseError('公开发行载荷摘要不一致')
+        source = owned_files.extract(archive, root / 'unpacked')
+        if source.name != 'pennix-lifecycle' or _version(source) != target['version']:
+            raise ReleaseError('公开载荷身份与已审阅发行不一致')
+        return _install(source)
 

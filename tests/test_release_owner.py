@@ -2,6 +2,9 @@ from pathlib import Path
 import os
 import tempfile
 import unittest
+import hashlib
+import tarfile
+from unittest.mock import patch
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -53,6 +56,26 @@ class ReleaseOwnerTests(unittest.TestCase):
         self.assertEqual(release_owner.uninstall(), "uninstalled")
         self.assertFalse(entry.exists())
         self.assertFalse(releases.exists())
+
+    def test_public_update_checks_archive_then_uses_existing_atomic_switch(self):
+        release_owner.install(make_release(self.home/'old', '1.0.0'))
+        source = make_release(self.home/'new', '1.0.1')
+        archive = self.home/'payload.tar.gz'
+        with tarfile.open(archive, 'w:gz') as out:
+            out.add(source, arcname='pennix-lifecycle')
+        raw = archive.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        name = 'pennix-lifecycle-1.0.1.tar.gz'
+        target = {'version':'1.0.1','name':name,'url':'https://github.com/PennixRv/pennix-lifecycle/releases/download/v1.0.1/'+name,
+                  'digest':'sha256:'+digest}
+        def download(url, destination, **_):
+            destination.write_bytes((digest+'  '+name+'\n').encode() if url.endswith('.sha256') else raw)
+        with patch.object(release_owner.owned_files, 'download', side_effect=download):
+            self.assertEqual(release_owner.update(target), 'installed 1.0.1')
+            self.assertEqual(release_owner.update(target), 'current 1.0.1')
+        releases, entry = release_owner._locations()
+        self.assertEqual(entry.resolve().parent.name, '1.0.1')
+        self.assertEqual([p.name for p in releases.iterdir()], ['1.0.1'])
 
     def test_drifted_active_release_blocks_replacement(self):
         first = make_release(self.home / "source-1", "1.0.0")

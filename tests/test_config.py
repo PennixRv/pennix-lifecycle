@@ -140,7 +140,7 @@ class ConfigModelTests(unittest.TestCase):
         catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
         dynamic = {key: value for key, value in catalog["components"].items()
                    if value["delivery"] in {"package", "plugin", "client", "collection"}}
-        self.assertEqual(len(dynamic), 25)
+        self.assertEqual(len(dynamic), 26)
         self.assertEqual(len({value["lock_source"] for value in dynamic.values()}), len(dynamic))
         for component in catalog["components"].values():
             if component.get("delivery") == "static" and "template" in component:
