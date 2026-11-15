@@ -134,7 +134,7 @@ def load_catalog(path: Path) -> dict[str, Any]:
 
 def normalize_version(raw: str) -> str | None:
     matches = VERSION_RE.findall(raw.replace("_", ""))
-    return matches[-1] if matches else None
+    return matches[0] if matches else None
 
 
 def _prefix(component: dict[str, Any]) -> Path | None:
@@ -161,7 +161,7 @@ def _command(component: dict[str, Any]) -> str | None:
     return shutil.which(probe)
 
 
-def _version(component: dict[str, Any], command: str) -> str | None:
+def _version(component: dict[str, Any], command: str, *, legacy: bool = False) -> str | None:
     if component.get("package", {}).get("identity_only"):
         return package_identity(component)["version"]
     try:
@@ -173,7 +173,11 @@ def _version(component: dict[str, Any], command: str) -> str | None:
         return None
     if result.returncode:
         return None
-    return normalize_version((result.stdout or result.stderr).strip())
+    raw = (result.stdout or result.stderr).strip()
+    if legacy:
+        matches = VERSION_RE.findall(raw.replace('_', ''))
+        return matches[-1] if matches else None
+    return normalize_version(raw)
 
 
 def _target_version(component: dict[str, Any]) -> str | None:
@@ -896,8 +900,6 @@ def reconcile_candidate(component_id: str, component: dict[str, Any], codex_home
     if receipt is None:
         raise BootstrapError("reconcile requires an existing managed package receipt")
     old_version = old.get("version", "")
-    if receipt["version"] not in {old_version, old_version.split(":", 1)[-1].rsplit("-", 1)[0]}:
-        raise BootstrapError("package reconcile old receipt and lock disagree")
     if (package["source"] == "aur" and old["source"] != f"aur:{package['name']}"
             or package["source"] == "official" and old["source"].split("/")[-1] != package["name"]):
         raise BootstrapError("package reconcile source contract differs")
@@ -907,6 +909,13 @@ def reconcile_candidate(component_id: str, component: dict[str, Any], codex_home
     observed = _version(component, identity["command"])
     if not observed:
         raise BootstrapError("package reconcile version probe failed")
+    old_base = old_version.split(':', 1)[-1].rsplit('-', 1)[0]
+    if receipt['version'] not in {old_version, old_base}:
+        # 仅修复已复现的 Pandoc/Lua 误读；旧锁、当前包及程序上游版本必须相同。
+        if not (component_id == 'pandoc' and package['source'] == 'official' and package['name'] == 'pandoc-cli'
+                and observed == old_base == identity['version'].split(':', 1)[-1].rsplit('-', 1)[0]
+                and receipt['version'] == _version(component, identity['command'], legacy=True)):
+            raise BootstrapError('package reconcile old receipt and lock disagree')
     target = {"source": old["source"], "version": identity["version"]}
     return target, {**identity, "probe_version": observed}, receipt
 

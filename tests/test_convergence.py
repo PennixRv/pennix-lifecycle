@@ -51,6 +51,28 @@ class ConvergenceTests(unittest.TestCase):
             with self.assertRaises(engine.BootstrapError):
                 engine.reconcile_candidate("example", self.component, self.root, self.old)
 
+    def test_pandoc_legacy_lua_receipt_needs_same_upstream_and_real_package_owner(self):
+        raw = 'pandoc 3.11\nFeatures: +server +lua\nScripting engine: Lua 5.4\n'
+        component = {'delivery':'package','lock_source':'arch:extra/pandoc-cli',
+                     'package':{'source':'official','name':'pandoc-cli'},'version_args':['--version']}
+        old = {'source':component['lock_source'],'version':'3.11-73'}
+        identity = {'manager':'pacman','name':'pandoc-cli','version':'3.11-76','command':'/usr/bin/pandoc'}
+        receipt = {'schema':1,'component':'pandoc','source':'official','name':'pandoc-cli','version':'5.4'}
+        self.assertEqual(engine.normalize_version(raw), '3.11')
+        with patch.object(engine,'_package_receipt',return_value=receipt), \
+                patch.object(engine,'package_identity',return_value=identity), \
+                patch.object(engine.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=raw,stderr='')):
+            target, actual, _ = engine.reconcile_candidate('pandoc',component,self.root,old)
+            self.assertEqual(target['version'],'3.11-76')
+            self.assertEqual(actual['probe_version'],'3.11')
+            for bad in ['5.3', 'untrusted']:
+                with patch.object(engine,'_package_receipt',return_value={**receipt,'version':bad}), self.assertRaises(engine.BootstrapError):
+                    engine.reconcile_candidate('pandoc',component,self.root,old)
+            with self.assertRaises(engine.BootstrapError):
+                engine.reconcile_candidate('pandoc',component,self.root,{**old,'version':'3.10-73'})
+            with patch.object(engine,'package_identity',return_value={**identity,'version':'3.12-1'}), self.assertRaises(engine.BootstrapError):
+                engine.reconcile_candidate('pandoc',component,self.root,old)
+
     def test_package_diagnostics_preserve_old_management_when_native_package_changed(self):
         component = {**self.component, "_lock_target": self.old, "native_config": {"owner": "example"}}
         with patch.object(engine, "package_identity", return_value=self.identity):
