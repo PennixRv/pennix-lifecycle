@@ -97,7 +97,8 @@ def _validate(kconf: StrictKconfig, raw: str) -> None:
         raise ConfigError("配置语法无效: " + kconf.diagnostics[0])
     assignments = _parse_assignments(raw, kconf)
     for symbol in kconf.unique_defined_syms:
-        if (symbol.name.startswith("PENNIX_COMPONENT_") and symbol.visibility and symbol.name not in assignments
+        if (symbol.name.startswith("PENNIX_COMPONENT_") and symbol.visibility and symbol.str_value != "n"
+                and symbol.name not in assignments
                 and symbol.name not in {"PENNIX_COMPONENT_BASE_ENVIRONMENT", "PENNIX_COMPONENT_COPILOT_CLI"}):
             raise ConfigError(f"组件选择缺失，需核对新配置项: {symbol.name}")
     for name, value in assignments.items():

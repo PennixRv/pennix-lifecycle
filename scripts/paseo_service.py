@@ -20,7 +20,6 @@ class PaseoServiceError(RuntimeError):
 
 
 LISTEN = re.compile(r"^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+):[1-9][0-9]{0,4}$")
-OFFICIAL_SKILLS = ("paseo", "paseo-advisor", "paseo-committee", "paseo-handoff", "paseo-help", "paseo-plugin")
 
 
 def unit_path() -> Path:
@@ -277,6 +276,14 @@ def configure(paseo: Path, home: Path, listen: str) -> str:
 
 
 def skills(paseo: Path, home: Path, action: str, *, environment: dict | None = None) -> dict:
+    return _sdk(paseo, home, action, environment=environment)
+
+
+def inspect_delegations(paseo: Path, home: Path) -> dict:
+    return _sdk(paseo, home, "inspect")
+
+
+def _sdk(paseo: Path, home: Path, action: str, *, environment: dict | None = None) -> dict:
     node = shutil.which("node", path=(environment or os.environ).get("PATH"))
     if not node:
         raise PaseoServiceError("Paseo Skills 需要 Node.js")
@@ -284,16 +291,17 @@ def skills(paseo: Path, home: Path, action: str, *, environment: dict | None = N
         result = subprocess.run([node, str(Path(__file__).with_name("paseo-skills.mjs")), action, str(paseo), str(home)],
                                 capture_output=True, text=True, timeout=150, check=False, env=environment)
         value = json.loads(result.stdout)
-        if result.returncode or value.get("state") not in {"compatible", "current"}:
+        expected = {"probe": "compatible", "inspect": "inspected", "install": "current", "status": "current"}
+        if result.returncode or not isinstance(value, dict) or value.get("state") != expected.get(action):
             raise ValueError()
         return value
     except (OSError, ValueError, TypeError, subprocess.TimeoutExpired) as error:
-        raise PaseoServiceError("Paseo 官方 Skills 原生安装或核验未完成；保留现场") from error
+        raise PaseoServiceError(f"Paseo 原生 SDK {action} 未完成；保留现场") from error
 
 
 def preflight_candidate(candidate: dict) -> None:
-    if candidate.get("version") not in {"0.15.3", "0.15.4"} or not isinstance(candidate.get("path"), str):
-        raise PaseoServiceError("Paseo 候选没有经过验证的 0.15.3 / 0.15.4 原生 Skills 合同")
+    if not isinstance(candidate.get("version"), str) or not candidate["version"] or not isinstance(candidate.get("path"), str):
+        raise PaseoServiceError("Paseo 候选缺少版本或载荷身份")
     npm = shutil.which("npm")
     if not npm:
         raise PaseoServiceError("Paseo 候选预检需要 npm")
@@ -310,17 +318,19 @@ def preflight_candidate(candidate: dict) -> None:
                 timeout=600, check=False)
             if result.returncode:
                 raise PaseoServiceError("Paseo 候选依赖暂存失败；未修改用户安装")
-            skills(root / "bin/paseo", root / "paseo", "probe", environment=environment)
+            observed = skills(root / "bin/paseo", root / "paseo", "probe", environment=environment)
+            if observed.get("version") != candidate["version"]:
+                raise PaseoServiceError("Paseo 候选 SDK 与已冻结载荷身份不一致")
         except (OSError, subprocess.TimeoutExpired) as error:
             raise PaseoServiceError("Paseo 候选原生接口预检未完成；未修改用户安装") from error
 
 
-def _managed_skills() -> list[str]:
+def _managed_skills(expected: list[str]) -> list[str]:
     root = Path.home() / ".agents" / "skills"
     if root.is_symlink() or not root.is_dir():
         return []
     managed = []
-    for name in OFFICIAL_SKILLS:
+    for name in expected:
         skill = root / name
         manifest = skill / ".paseo-managed-files.json"
         if skill.is_symlink() or not skill.is_dir() or manifest.is_symlink() or not manifest.is_file():
@@ -353,22 +363,27 @@ def observe(paseo: Path, home: Path, listen: str, cli_version: str | None, runti
         "state": "unknown",
         "listen": {"state": "unknown", "expected": listen},
         "skills_selection": {"state": "unknown", "expected": {"mode": "all"}},
-        "skills_sync": {"state": "unknown", "managed_skills": _managed_skills(),
-                        "expected": list(OFFICIAL_SKILLS)},
+        "skills_sync": {"state": "unknown", "managed_skills": [], "expected": []},
         "versions": {"cli": cli_version, "daemon": runtime_state.get("daemon_version"), "state": "unknown"},
         "restart_required": False,
     }
     try:
         set_listen, actual_listen = _config_get(paseo, home, "daemon.listen")
         set_selection, actual_selection = _config_get(paseo, home, "agents.skills.selection")
-    except (OSError, PaseoServiceError, subprocess.TimeoutExpired):
+        expected = skills(paseo, home, "probe").get("available")
+        if (not isinstance(expected, list) or not expected or len(set(expected)) != len(expected)
+                or any(not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name) for name in expected)):
+            raise PaseoServiceError("Paseo 原生 Skills 清单无效")
+        result["skills_sync"]["expected"] = expected
+        result["skills_sync"]["managed_skills"] = _managed_skills(expected)
+    except (OSError, TypeError, PaseoServiceError, subprocess.TimeoutExpired):
         return result
     result["listen"]["state"] = "current" if set_listen and actual_listen == listen else "mismatch"
     result["skills_selection"]["state"] = (
         "current" if set_selection and actual_selection == {"mode": "all"} else "mismatch"
     )
     synced = set(result["skills_sync"]["managed_skills"])
-    if synced == set(OFFICIAL_SKILLS):
+    if synced == set(expected):
         result["skills_sync"]["state"] = "current"
     elif not synced:
         result["skills_sync"]["state"] = "not-installed"
@@ -378,15 +393,22 @@ def observe(paseo: Path, home: Path, listen: str, cli_version: str | None, runti
     if not runtime_state.get("running") and runtime_state.get("state") != "unknown":
         result["versions"]["state"] = "not_run"
     elif cli_version and daemon_version:
-        result["versions"]["state"] = "current" if cli_version == daemon_version else "mismatch"
+        if cli_version == daemon_version:
+            result["versions"]["state"] = "current"
+        else:
+            try:
+                skills(paseo, home, "status")
+                result["versions"]["state"] = "compatible"
+            except PaseoServiceError:
+                result["versions"]["state"] = "incompatible"
     result["restart_required"] = bool(runtime_state.get("running")) and (
         result["listen"]["state"] != "current"
         or result["skills_selection"]["state"] != "current"
         or result["skills_sync"]["state"] == "incomplete"
-        or result["versions"]["state"] == "mismatch"
+        or result["versions"]["state"] == "incompatible"
     )
     if (result["listen"]["state"] == "current" and result["skills_selection"]["state"] == "current"
-            and result["skills_sync"]["state"] == "current" and result["versions"]["state"] in {"current", "not_run"}
+            and result["skills_sync"]["state"] == "current" and result["versions"]["state"] in {"current", "compatible", "not_run"}
             and runtime_state.get("state") == "current"):
         result["state"] = "current"
     else:

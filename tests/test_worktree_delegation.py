@@ -28,51 +28,35 @@ class WorktreeDelegationTests(unittest.TestCase):
                 pennix._delegation_preflight(args, "trellis-paseo-adapter", "install")
         pennix._delegation_preflight(args, "pnpm", "upgrade")
 
-    def test_idle_or_unknown_delegation_blocks_shared_replacement(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(pennix.shutil, "which", return_value="/native/paseo"), patch.object(pennix.config_model, "config_value", return_value=directory):
+    def test_cli_owned_sdk_allows_multiple_ordinary_agents_without_optional_adapter(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(pennix.shutil, "which", side_effect=lambda name: "/native/paseo" if name == "paseo" else None) as which, \
+             patch.object(pennix.config_model, "config_value", return_value=directory), \
+             patch.object(pennix.subprocess, "run", return_value=subprocess.CompletedProcess(
+                 [], 0, json.dumps({"pid": 123, "serverId": "daemon"}), "")):
+            observed = {"identity": {"pid": 123, "server_id": "daemon", "home": directory},
+                        "agents_scanned": 1201, "delegations_open": False}
             args = argparse.Namespace(kconf=None)
-            status = subprocess.CompletedProcess([], 0, json.dumps({"pid": 123}), "")
-            for raw in [json.dumps([{"status": "idle", "labels": {"trellis.attempt": "attempt"}}]), "invalid"]:
-                with patch.object(pennix.subprocess, "run", side_effect=[status, subprocess.CompletedProcess([], 0, raw, "")]), self.assertRaises(pennix.CliError):
-                    pennix._delegation_preflight(args, "codegraph-cli", "upgrade")
-            closed = subprocess.CompletedProcess([], 0, json.dumps([{"status": "closed", "labels": {"trellis.attempt": "attempt"}}]), "")
-            with patch.object(pennix.subprocess, "run", side_effect=[status, closed]):
+            with patch.object(pennix.paseo_service, "inspect_delegations", return_value=observed) as inspect:
                 pennix._delegation_preflight(args, "codegraph-cli", "upgrade")
-
-    def test_real_cli_projection_requires_sdk_labels_and_same_daemon(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(pennix.shutil, "which", side_effect=lambda name: "/native/" + name), patch.object(pennix.config_model, "config_value", return_value=directory):
-            args = argparse.Namespace(kconf=None)
-            status = subprocess.CompletedProcess([], 0, json.dumps({"pid": 123, "serverId": "daemon"}), "")
-            listing = subprocess.CompletedProcess([], 0, json.dumps([{"id": "node", "status": "idle", "cwd": "~/worktree"}]), "")
-            observation = {"identity": {"pid": 123, "server_id": "daemon", "home": directory}, "agents": [{"id": "node", "status": "idle", "labels": {"trellis.attempt": "attempt"}}]}
-            def receipt():
-                return subprocess.CompletedProcess([], 0, json.dumps({"version": 1, "operation": "inspect", "ok": True, "observations": observation}), "")
-            with patch.object(pennix.subprocess, "run", side_effect=[status, listing, receipt()]) as native:
+                inspect.assert_called_once_with(Path("/native/paseo"), Path(directory))
+                self.assertNotIn(unittest.mock.call("trellis-paseo-adapter"), which.call_args_list)
+                observed["delegations_open"] = True
                 with self.assertRaisesRegex(pennix.CliError, "未关闭"):
                     pennix._delegation_preflight(args, "codegraph-cli", "upgrade")
-                sent = json.loads(native.call_args.kwargs["input"])
-                self.assertEqual(sent["operation"], "inspect")
-                self.assertEqual(sent["daemon_selector"], {"home": directory})
-            observation["agents"][0]["status"] = "closed"
-            with patch.object(pennix.subprocess, "run", side_effect=[status, listing, receipt()]):
-                pennix._delegation_preflight(args, "codegraph-cli", "upgrade")
-            observation["identity"]["pid"] = 456
-            with patch.object(pennix.subprocess, "run", side_effect=[status, listing, receipt()]), self.assertRaisesRegex(pennix.CliError, "不可核验"):
-                pennix._delegation_preflight(args, "codegraph-cli", "upgrade")
-            observation["identity"]["pid"] = 123
-            observation["agents"] = []
-            with patch.object(pennix.subprocess, "run", side_effect=[status, listing, receipt()]), self.assertRaisesRegex(pennix.CliError, "不可核验"):
-                pennix._delegation_preflight(args, "codegraph-cli", "upgrade")
-
-    def test_missing_adapter_is_conservative_but_allows_caller_only_bootstrap(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(pennix.shutil, "which", side_effect=lambda name: "/native/paseo" if name == "paseo" else None), patch.object(pennix.config_model, "config_value", return_value=directory), patch.dict(pennix.os.environ, {"PASEO_AGENT_ID": "caller"}):
-            args = argparse.Namespace(kconf=None)
-            status = subprocess.CompletedProcess([], 0, json.dumps({"pid": 123}), "")
-            def listing(agent):
-                return subprocess.CompletedProcess([], 0, json.dumps([{"id": agent, "status": "idle"}]), "")
-            with patch.object(pennix.subprocess, "run", side_effect=[status, listing("other")]), self.assertRaisesRegex(pennix.CliError, "不可核验"):
-                pennix._delegation_preflight(args, "codegraph-cli", "upgrade")
-            with patch.object(pennix.subprocess, "run", side_effect=[status, listing("caller")]):
+                observed["delegations_open"] = False
+                for key, invalid in [("pid", 456), ("server_id", "other"), ("home", "/other")]:
+                    original = observed["identity"][key]
+                    observed["identity"][key] = invalid
+                    with self.subTest(key=key), self.assertRaisesRegex(pennix.CliError, "不可核验"):
+                        pennix._delegation_preflight(args, "codegraph-cli", "upgrade")
+                    observed["identity"][key] = original
+                observed.pop("delegations_open")
+                with self.assertRaisesRegex(pennix.CliError, "不可核验"):
+                    pennix._delegation_preflight(args, "codegraph-cli", "upgrade")
+            with patch.object(pennix.paseo_service, "inspect_delegations",
+                              side_effect=pennix.paseo_service.PaseoServiceError("SDK unavailable")), \
+                 self.assertRaisesRegex(pennix.CliError, "不可核验"):
                 pennix._delegation_preflight(args, "codegraph-cli", "upgrade")
 
 

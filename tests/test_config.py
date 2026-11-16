@@ -24,6 +24,8 @@ import relay_owner
 import paseo_service
 import secret_store
 
+PASEO_SKILL_NAMES = ["paseo", "paseo-advisor", "future-native-skill"]
+
 
 class ConfigModelTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -59,6 +61,20 @@ class ConfigModelTests(unittest.TestCase):
         ), encoding="utf-8")
         with self.assertRaises(config_model.ConfigError):
             config_model.load()
+
+    def test_omitted_disabled_components_remain_disabled_without_rewriting_input(self) -> None:
+        path = config_model.init()
+        loaded, _ = config_model.load()
+        omitted = {symbol.name for symbol in loaded.unique_defined_syms
+                   if symbol.name.startswith("PENNIX_COMPONENT_")
+                   and symbol.visibility and symbol.str_value == "n"}
+        self.assertIn("PENNIX_COMPONENT_TRELLIS_PASEO_ADAPTER", omitted)
+        raw = "\n".join(line for line in path.read_text().splitlines()
+                        if not any(f"CONFIG_{name}" in line for name in omitted)) + "\n"
+        path.write_text(raw)
+        loaded, _ = config_model.load()
+        self.assertTrue(all(loaded.syms[name].str_value == "n" for name in omitted))
+        self.assertEqual(path.read_text(), raw)
 
     def test_wsl_defconfig_is_a_portable_complete_input(self) -> None:
         path = config_model.init(
@@ -447,9 +463,9 @@ class ConfigModelTests(unittest.TestCase):
             with self.assertRaisesRegex(paseo_service.PaseoServiceError, "systemd user manager"):
                 paseo_service.preflight(self.home / ".paseo", "127.0.0.1:6767", "login", True)
 
-    def test_paseo_observe_requires_selection_sync_and_matching_daemon_version(self) -> None:
+    def test_paseo_observe_accepts_different_versions_only_after_native_status_proof(self) -> None:
         skills = self.home / ".agents" / "skills"
-        for name in paseo_service.OFFICIAL_SKILLS:
+        for name in PASEO_SKILL_NAMES:
             directory = skills / name
             directory.mkdir(parents=True, exist_ok=True)
             content = f"{name}\n".encode()
@@ -460,19 +476,21 @@ class ConfigModelTests(unittest.TestCase):
                 }}), encoding="utf-8")
         paseo = self.home / "bin/paseo"
         home = self.home / "paseo"
-        with mock.patch.object(paseo_service, "_config_get", side_effect=[
+        with mock.patch.object(paseo_service, "skills", return_value={"available": PASEO_SKILL_NAMES}) as sdk, mock.patch.object(paseo_service, "_config_get", side_effect=[
                 (True, "127.0.0.1:6767"), (True, {"mode": "all"})]):
             result = paseo_service.observe(
-                paseo, home, "127.0.0.1:6767", "0.14.0",
+                paseo, home, "127.0.0.1:6767", "0.16.0",
                 {"state": "current", "running": True, "daemon_version": "0.14.0"})
         self.assertEqual(result["state"], "current")
         self.assertEqual(result["skills_sync"]["state"], "current")
-        self.assertEqual(result["skills_sync"]["managed_skills"], list(paseo_service.OFFICIAL_SKILLS))
+        self.assertEqual(result["skills_sync"]["managed_skills"], PASEO_SKILL_NAMES)
         self.assertFalse(result["restart_required"])
+        self.assertEqual(result["versions"]["state"], "compatible")
+        self.assertEqual([call.args[2] for call in sdk.call_args_list], ["probe", "status"])
 
     def test_paseo_observe_detects_changed_managed_skill_files(self) -> None:
         skills = self.home / ".agents" / "skills"
-        for name in paseo_service.OFFICIAL_SKILLS:
+        for name in PASEO_SKILL_NAMES:
             directory = skills / name
             directory.mkdir(parents=True, exist_ok=True)
             content = f"{name}\n".encode()
@@ -484,7 +502,7 @@ class ConfigModelTests(unittest.TestCase):
         (skills / "paseo-advisor" / "SKILL.md").write_text("changed\n", encoding="utf-8")
         paseo = self.home / "bin/paseo"
         home = self.home / "paseo"
-        with mock.patch.object(paseo_service, "_config_get", side_effect=[
+        with mock.patch.object(paseo_service, "skills", return_value={"available": PASEO_SKILL_NAMES}), mock.patch.object(paseo_service, "_config_get", side_effect=[
                 (True, "127.0.0.1:6767"), (True, {"mode": "all"})]):
             result = paseo_service.observe(
                 paseo, home, "127.0.0.1:6767", "0.14.0",
@@ -496,7 +514,7 @@ class ConfigModelTests(unittest.TestCase):
     def test_paseo_observe_does_not_treat_empty_skill_install_as_restart_repairable(self) -> None:
         paseo = self.home / "bin/paseo"
         home = self.home / "paseo"
-        with mock.patch.object(paseo_service, "_config_get", side_effect=[
+        with mock.patch.object(paseo_service, "skills", return_value={"available": PASEO_SKILL_NAMES}), mock.patch.object(paseo_service, "_config_get", side_effect=[
                 (True, "127.0.0.1:6767"), (True, {"mode": "all"})]):
             result = paseo_service.observe(
                 paseo, home, "127.0.0.1:6767", "0.14.0",

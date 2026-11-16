@@ -168,7 +168,9 @@ apply 不复活已停止实例。自启配置、daemon 健康和版本分别核�
 `not_run`，依赖实际运行的操作仍需健康条件。旧前台 unit 仅凭精确 receipt 识别迁移，
 实际承载 daemon 时须活动保护；当前独立 daemon 不为匹配 unit 而重启。
 
-Paseo 官方 Skills 使用已验证的 CLI/client/server 0.15.3 公开 SDK。首装自动调用原生安装接口，覆盖 `.agents/skills`、`.claude/skills` 及原生自有的旧 `.codex/skills`；原本停止的 daemon 仅为该动作临时启动，并按同一实例停止。新 CLI 候选先在隔离前缀暂存、检查公开接口，再改变用户安装。安装或启停结果未知时保留已提交字段与事务，不恢复旧前台启动造成潜在双实例。远端 relay 登记和本地 daemon relay 配置分别记归属；register=n 仅表示不访问远端，不表示本地配置已撤回。
+Paseo 官方 Skills 使用候选 CLI 自带的公开 SDK，按实际导出、方法和操作结果核验，不使用版本白名单，也不要求 CLI、client、server 或 daemon 恰好同版。CLI 候选仍须与冻结载荷身份一致；Skills 清单取自该原生 server 包实际随附的 `dist/server/skills` 载荷，不固定名称数量。CLI 与运行中 daemon 版本不同时，实际 Skills 状态调用成功后才报告兼容。首装自动调用原生安装接口，覆盖 `.agents/skills`、`.claude/skills` 及原生自有的旧 `.codex/skills`；原本停止的 daemon 仅为该动作临时启动，并按同一实例停止。新 CLI 候选先在隔离前缀暂存、检查公开接口，再改变用户安装。安装或启停结果未知时保留已提交字段与事务，不恢复旧前台启动造成潜在双实例。远端 relay 登记和本地 daemon relay 配置分别记归属；register=n 仅表示不访问远端，不表示本地配置已撤回。
+
+共享组件维护预检通过 Paseo CLI 自带公开 SDK 逐页读取原生 agent 标签和状态，返回完整扫描的计数及未关闭委派判定，不依赖可选 Trellis adapter。普通用户会话和历史数量不构成全局阻断；未关闭 Trellis 委派、身份改变、坏页、分页循环及核验失败仍阻断。配置中缺省为 n 的可选组件保持关闭；缺失可能启用新能力的选择仍须核对，不能静默新增安装。
 
 Context Mode 通过 `@pennixrv/context-mode` 包、Codex 原生 MCP 和四个 Hook 接入；不叠加 plugin，也不改写用户 AGENTS。旧 FastCtx 的撤回由旧安装的原生入口完成，新配置格式 5 不接受旧组件键或旧格式。
 

@@ -264,7 +264,8 @@ class ConvergenceTests(unittest.TestCase):
         self.assertEqual(state["state"], "current")
         self.assertFalse(state["running"])
         with patch.object(paseo_service, "_config_get", side_effect=[(True, "127.0.0.1:6767"), (True, {"mode": "all"})]), \
-             patch.object(paseo_service, "_managed_skills", return_value=list(paseo_service.OFFICIAL_SKILLS)):
+             patch.object(paseo_service, "skills", return_value={"available": ["paseo", "future-native-skill"]}), \
+             patch.object(paseo_service, "_managed_skills", return_value=["paseo", "future-native-skill"]):
             observed = paseo_service.observe(paseo, home, "127.0.0.1:6767", "1.0", state)
         self.assertEqual(observed["state"], "current")
         self.assertEqual(observed["versions"]["state"], "not_run")

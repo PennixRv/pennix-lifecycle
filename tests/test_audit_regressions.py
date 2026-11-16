@@ -185,16 +185,19 @@ class AuditRegressions(unittest.TestCase):
         with self.assertRaisesRegex(config_model.ConfigError, "组件选择缺失"):
             config_model.load()
 
-    def test_paseo_candidate_preflight_is_isolated_and_rejects_unverified_sdk(self):
+    def test_paseo_candidate_preflight_is_isolated_and_probes_unfamiliar_versions(self):
         with patch.object(paseo_service.subprocess, "run") as run:
-            with self.assertRaisesRegex(paseo_service.PaseoServiceError, "0.15.3"):
-                paseo_service.preflight_candidate({"version": "0.15.5", "path": "/synthetic.tgz"})
+            with self.assertRaisesRegex(paseo_service.PaseoServiceError, "身份"):
+                paseo_service.preflight_candidate({"version": None, "path": "/synthetic.tgz"})
             run.assert_not_called()
         with patch.object(paseo_service.shutil, "which", return_value="/usr/bin/npm"), \
              patch.object(paseo_service.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run, \
              patch.object(paseo_service, "skills", return_value={"state": "compatible"}) as probe:
-            for version in ["0.15.3", "0.15.4"]:
+            for version in ["0.15.3", "0.15.4", "0.16.0", "1.0.0"]:
+                probe.return_value = {"state": "compatible", "version": version}
                 paseo_service.preflight_candidate({"version": version, "path": "/synthetic.tgz"})
+            with self.assertRaisesRegex(paseo_service.PaseoServiceError, "身份不一致"):
+                paseo_service.preflight_candidate({"version": "wrong", "path": "/synthetic.tgz"})
             environment = run.call_args.kwargs["env"]
             self.assertNotEqual(environment["HOME"], str(self.root))
             self.assertTrue(environment["CODEX_HOME"].startswith(environment["HOME"] + "/"))
