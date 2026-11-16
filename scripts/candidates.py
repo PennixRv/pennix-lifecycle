@@ -127,6 +127,18 @@ def resolve_codegraph(component: dict, workspace: Path, target: dict | None = No
                           "impact": primary["impact"] + "; exact Linux x64 platform bundle and both registry integrities"}, target)
 
 
+def codegraph_previous_main(component: dict, workspace: Path, entry: dict) -> dict:
+    """Prove the old shim without executing a missing bundle's cache fallback."""
+    previous = resolve_npm(component, workspace, {"version": entry["version"]})
+    if previous["sha256"] != entry["sha256"]:
+        bundle_dir = workspace / "bundle"
+        bundle_dir.mkdir()
+        bundle = resolve_codegraph(component, bundle_dir, entry)
+        if bundle["main_sha256"] != previous["sha256"]:
+            raise CandidateError("CodeGraph previous main differs from its combined lock")
+    return {**previous, "previous_lock_sha256": entry["sha256"]}
+
+
 def resolve_pypi(component: dict, workspace: Path, target: dict | None = None) -> dict:
     name = component["package"]["name"]
     metadata = _json(f"https://pypi.org/pypi/{urllib.parse.quote(name, safe='')}/json")

@@ -97,9 +97,11 @@ class LifecycleStateTests(unittest.TestCase):
                                             ("connections", "service", "action", "configure")]:
             current = copy.deepcopy(value)
             current[group][key][field] = changed
-            with patch.object(pennix, "_plan", return_value=current), patch.object(pennix, "_emit"):
+            with patch.object(pennix, "_plan", return_value=current), patch.object(pennix, "_emit"), \
+                 patch.object(pennix.apply_journal, "read", return_value=None):
                 self.assertEqual(pennix.cmd_check(args), 1)
-        with patch.object(pennix, "_plan", return_value=value), patch.object(pennix, "_emit"):
+        with patch.object(pennix, "_plan", return_value=value), patch.object(pennix, "_emit"), \
+             patch.object(pennix.apply_journal, "read", return_value=None):
             self.assertEqual(pennix.cmd_check(args), 0)
 
     def test_paseo_config_is_journaled_after_cli_and_before_service_restart(self):
@@ -316,6 +318,40 @@ class LifecycleStateTests(unittest.TestCase):
             with self.assertRaisesRegex(pennix.CliError, "recover"):
                 pennix._retry_unknown_update(active, "pennix-skills:upgrade", "drifted")
             retry.assert_not_called()
+
+    def test_codegraph_update_requires_previous_main_proof_before_confirmation(self):
+        old = {'source': 'npm:@pennixrv/codegraph:latest', 'version': '1.6.2-pennix.4', 'sha256': 'a' * 64}
+        new = {**old, 'version': '1.6.2-pennix.5', 'sha256': 'b' * 64, 'path': '/fixed/new'}
+        args = pennix.parser().parse_args(['update', 'codegraph-cli', '--version', new['version'], '--json'])
+        args.component_lock = {'components': {'codegraph-cli': old}}
+        args.component_lock_path = Path('/tmp/components.lock')
+        component = {'delivery': 'package', 'package': {'source': 'npm', 'name': '@pennixrv/codegraph', 'prefix': '$HOME/.local'},
+                     'native_config': {'owner': 'codegraph'}}
+        with patch.object(pennix, '_load', return_value=(SimpleNamespace(), Path('/tmp/workflow.config'), {'components': {'codegraph-cli': component}})), \
+             patch.object(config_model, 'selected_components', return_value={'codegraph-cli'}), \
+             patch.object(config_model, 'config_value', return_value='/tmp/codex'), \
+             patch.object(pennix.apply_journal, 'read', return_value=None), \
+             patch.object(pennix, '_component_status', return_value={'state': 'update-required'}), \
+             patch.object(engine, 'probe_component', return_value=('blocked', None)), \
+             patch.object(engine, 'package_owned', return_value=False), \
+             patch.object(engine, 'codegraph_main_owned', return_value=True) as ownership, \
+             patch.object(engine, 'verify_npm_archive') as verify, \
+             patch.object(pennix.candidates, 'resolve', return_value=new) as resolve, \
+             patch.object(pennix.candidates, 'codegraph_previous_main', return_value={**old, 'path': '/fixed/old'}) as previous, \
+             patch.object(pennix.sys.stdin, 'isatty', return_value=True), \
+             patch.object(pennix.sys.stdout, 'isatty', return_value=True), \
+             patch('builtins.input', return_value='no'), patch.object(pennix, '_emit'):
+            self.assertEqual(pennix.cmd_update(args), 1)
+            self.assertEqual(previous.call_args.args[2], old)
+            self.assertEqual(verify.call_args.args[1], Path('/fixed/old'))
+            verify.side_effect = engine.BootstrapError('main files differ')
+            with self.assertRaisesRegex(pennix.CliError, 'main files differ'):
+                pennix.cmd_update(args)
+            ownership.return_value = False
+            resolve.reset_mock()
+            with self.assertRaisesRegex(pennix.CliError, 'blocked'):
+                pennix.cmd_update(args)
+            resolve.assert_not_called()
 
     def test_update_pins_exact_npm_version_and_refuses_retargeting_a_pending_transaction(self):
         version = "0.7.1-beta.0"

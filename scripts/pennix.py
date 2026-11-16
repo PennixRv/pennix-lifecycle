@@ -1803,15 +1803,17 @@ def cmd_update(args: argparse.Namespace) -> int:
         raise CliError(f"组件尚无可信 lock；先通过 apply 初始化或完成 receipt 迁移: {args.component}")
     component["_lock_target"] = entry
     status = _component_status(args, args.component, component)
+    previous_main_needed = False
     if component.get("native_config"):
         try:
             package_state, package_observed = owner_engine.probe_component(component, args.codex_home)
             package_owned = owner_engine.package_owned(args.component, component, package_observed, args.codex_home)
         except owner_engine.BootstrapError as error:
             raise CliError(f"组件状态不允许更新: {error}") from error
-        if package_state not in {"match", "outdated"}:
+        previous_main_needed = package_state == "blocked" and owner_engine.codegraph_main_owned(args.component, component)
+        if package_state not in {"match", "outdated"} and not previous_main_needed:
             raise CliError(f"组件状态不允许更新: {package_state}")
-        if not package_owned:
+        if not package_owned and not previous_main_needed:
             raise CliError("组件没有可信 Lifecycle package receipt")
     else:
         if status["state"] not in {"match", "outdated"}:
@@ -1835,7 +1837,13 @@ def cmd_update(args: argparse.Namespace) -> int:
             candidate = candidates.resolve(component, Path(directory),
                                            active["steps"][0]["target"] if active else
                                            ({"version": version} if version is not None else None))
-        except candidates.CandidateError as error:
+            if previous_main_needed:
+                previous_dir = Path(directory) / "previous-main"
+                previous_dir.mkdir()
+                candidate["previous_main"] = candidates.codegraph_previous_main(component, previous_dir, entry)
+                owner_engine.verify_npm_archive(owner_engine._prefix(component) / "lib/node_modules/@pennixrv/codegraph",
+                                               Path(candidate["previous_main"]["path"]))
+        except (candidates.CandidateError, owner_engine.BootstrapError) as error:
             raise CliError(str(error)) from error
         target = candidates.lock_entry(candidate)
         if args.component == "paseo-cli":

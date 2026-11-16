@@ -893,7 +893,7 @@ def codegraph_main_owned(component_id: str, component: dict) -> bool:
         metadata = json.loads((root / "package.json").read_text())
         command = _command(component)
         return bool(record and metadata.get("name") == record["name"]
-                    and metadata.get("version") == record["version"] == _target_version(component)
+                    and metadata.get("version") == record["version"] == component.get("_lock_target", {}).get("version")
                     and metadata.get("bin", {}).get("codegraph") == "npm-shim.js"
                     and command and Path(command).resolve(strict=True) == root / "npm-shim.js"
                     and root.resolve() == root.absolute() and not (root / "npm-shim.js").is_symlink())
@@ -1097,9 +1097,14 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
     current_host = host.detect_host()
     if not current_host["supported"]:
         raise BootstrapError(str(current_host["reason"]))
-    repair_bundle = bool(getattr(args, "repair", False) and candidate and codegraph_main_owned(key, component))
+    previous_main = candidate.get("previous_main") if candidate else None
+    repair_bundle = bool(candidate and codegraph_main_owned(key, component)
+                         and (getattr(args, "repair", False) or previous_main))
     if repair_bundle:
-        verify_npm_archive(_prefix(component) / "lib/node_modules/@pennixrv/codegraph", Path(candidate["path"]))
+        if previous_main and any(previous_main.get(field) != component["_lock_target"].get(target)
+                                 for field, target in [("version", "version"), ("source", "source"), ("previous_lock_sha256", "sha256")]):
+            raise BootstrapError("CodeGraph previous main proof differs from the installed lock")
+        verify_npm_archive(_prefix(component) / "lib/node_modules/@pennixrv/codegraph", Path((previous_main or candidate)["path"]))
     state, observed = probe_component(component, codex_home)
     owned = repair_bundle or package_owned(key, component, observed, codex_home)
     if operation == "uninstall":

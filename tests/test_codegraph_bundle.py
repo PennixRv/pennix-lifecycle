@@ -99,11 +99,48 @@ class CodeGraphBundleTests(unittest.TestCase):
                 # Restore exactly the synthetic reviewed main bytes, then prove native removal.
                 with tarfile.open(selected['path'], 'r:gz') as tar:
                     (installed / 'npm-shim.js').write_bytes(tar.extractfile('package/npm-shim.js').read())
+                # An older trusted shim may lack its bundle; prove its original
+                # bytes, then install a different fixed version without running it.
+                next_version = '10.0.0-test'
+                next_main = root / 'next-main.tgz'
+                next_main.write_bytes(archive({'package.json': json.dumps({'name': name, 'version': next_version,
+                    'optionalDependencies': {platform_name: next_version}, 'bin': {'codegraph': 'npm-shim.js'}}),
+                    'npm-shim.js': '#!/usr/bin/env node\nconsole.log("10.0.0-test");\n'}))
+                next_platform = root / 'next-platform.tgz'
+                next_platform.write_bytes(archive({'package.json': json.dumps({'name': platform_name, 'version': next_version,
+                    'os': ['linux'], 'cpu': ['x64']}), 'node': '#!/bin/sh\nexit 0\n',
+                    'bin/codegraph': '#!/bin/sh\nexit 0\n', 'lib/dist/bin/codegraph.js': '/* next */\n'}))
+                next_target = {**candidates.lock_entry(selected), 'version': next_version, 'sha256': 'd' * 64}
+                args.candidate = {**next_target, 'path': str(next_main), 'platform_path': str(next_platform),
+                    'previous_main': {**selected, 'previous_lock_sha256': selected['sha256']}}
                 args.repair = False
+                component['_candidate_target'] = next_target
+                (bundle / 'node').unlink()
+                self.assertEqual(engine.component_operation(args, {}, 'codegraph-cli', component, 'upgrade'), 'changed')
+                bundle = engine._codegraph_platform(installed, next_version)
+                engine.verify_npm_archive(bundle, next_platform)
+                component['_lock_target'] = next_target
+                args.candidate = None
                 self.assertEqual(engine.component_operation(args, {}, 'codegraph-cli', component, 'uninstall'), 'changed')
                 self.assertFalse(installed.exists())
                 self.assertFalse(bundle.exists())
                 self.assertFalse((prefix / 'lib/node_modules' / platform_name).exists())
+
+    def test_previous_main_proof_accepts_legacy_or_combined_lock_but_not_another_main(self):
+        previous = {'path': '/fixed/main', 'version': '9', 'source': 'same-source', 'sha256': 'a' * 64}
+        with tempfile.TemporaryDirectory() as directory, patch.object(candidates, 'resolve_npm', return_value=previous):
+            root = Path(directory)
+            legacy = {'source': 'same-source', 'version': '9', 'sha256': previous['sha256']}
+            with patch.object(candidates, 'resolve_codegraph', side_effect=AssertionError('legacy SHA binds the main')):
+                self.assertEqual(candidates.codegraph_previous_main({}, root, legacy)['previous_lock_sha256'], previous['sha256'])
+            for count, main_sha in enumerate([previous['sha256'], 'c' * 64]):
+                other = root / str(count);other.mkdir()
+                with patch.object(candidates, 'resolve_codegraph', return_value={'main_sha256': main_sha}):
+                    if count == 0:
+                        self.assertEqual(candidates.codegraph_previous_main({}, other, {**legacy, 'sha256': 'b' * 64})['sha256'], previous['sha256'])
+                    else:
+                        with self.assertRaisesRegex(candidates.CandidateError, 'differs'):
+                            candidates.codegraph_previous_main({}, other, {**legacy, 'sha256': 'b' * 64})
 
     def test_platform_metadata_and_missing_sri_are_refused(self):
         component = {'lock_source': 'npm:@pennixrv/codegraph:latest', 'package': {'name': '@pennixrv/codegraph'}}
