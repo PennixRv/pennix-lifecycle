@@ -5,9 +5,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
 import shlex
 import shutil
 import subprocess
+import time
 
 import context_mode_integration as context
 import owned_files as files
@@ -132,15 +134,51 @@ def policy(home):
 
 
 def verify_hooks(home):
-    output = run(["context-mode", "doctor", "--agents", HOST, "--json"], home)
-    require(len(output) <= 1024 * 1024, "Context Mode doctor 输出超过核验上限")
+    # Full doctor requires current Skills, so it cannot gate their owned upgrade.
+    policy(home)
+    command = shutil.which("copilot")
+    require(command is not None, "Copilot 原生 owner 不可用")
     try:
-        value = json.loads(output, object_pairs_hook=files.unique_pairs)
-        rows = [a for a in value["agents"] if a["id"] == HOST]
-        checks = [c for a in rows for c in a["checks"] if c["name"] == "hook-enabled"]
-        require(len(rows) == 1 and len(checks) == 1 and checks[0].get("ok") is True,
+        with subprocess.Popen([command, "--server", "--stdio", "--no-auto-update"],
+                env={**os.environ, "COPILOT_HOME": str(home)}, cwd=Path.home(),
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as child:
+            try:
+                body = files.json_bytes({"jsonrpc": "2.0", "id": 1, "method": "hooks.discover", "params": {}})
+                child.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+                child.stdin.flush()
+                deadline, raw = time.monotonic() + 15, b""
+                while True:
+                    wait = deadline - time.monotonic()
+                    require(wait > 0 and select.select([child.stdout], [], [], max(0, wait))[0], "Copilot Hook 原生查询超时")
+                    chunk = os.read(child.stdout.fileno(), 65536)
+                    require(chunk and len(raw) + len(chunk) <= 1024 * 1024, "Copilot Hook 原生响应缺失或超限")
+                    raw += chunk
+                    if b"\r\n\r\n" not in raw:
+                        require(len(raw) <= 8192, "Copilot Hook 协议头超限")
+                        continue
+                    header, output = raw.split(b"\r\n\r\n", 1)
+                    sizes = [line.partition(b":")[2].strip() for line in header.split(b"\r\n")
+                             if line.partition(b":")[0].strip().lower() == b"content-length"]
+                    require(len(sizes) == 1 and sizes[0].isdigit() and int(sizes[0]) <= 1024 * 1024, "Copilot Hook 协议长度无效")
+                    size = int(sizes[0])
+                    if len(output) >= size:
+                        value = json.loads(output[:size], object_pairs_hook=files.unique_pairs)
+                        break
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate(timeout=5)
+        require(isinstance(value, dict) and value.get("jsonrpc") == "2.0" and value.get("id") == 1
+                and "error" not in value and isinstance(value.get("result"), dict)
+                and isinstance(value["result"].get("hooks"), list), "Copilot Hook 原生响应无效")
+        hooks = [h for h in value["result"]["hooks"] if isinstance(h, dict) and h.get("origin") == "user"
+                 and isinstance(h.get("source"), str)
+                 and (home / h["source"]).resolve() == (home / "hooks/context-mode.json").resolve()]
+        require(len(hooks) == 4 and {h.get("hookType") for h in hooks} ==
+                {"sessionStart", "userPromptSubmitted", "preToolUse", "postToolUse"}
+                and all(h.get("enabled") is True for h in hooks),
                 "Copilot 未证明自有 Hooks 已启用；不绕过用户或管理策略")
-    except (ValueError, KeyError, TypeError) as error:
+    except (OSError, ValueError, TypeError, subprocess.TimeoutExpired) as error:
         raise Error("Copilot Hook 原生核验结果未知") from error
 
 

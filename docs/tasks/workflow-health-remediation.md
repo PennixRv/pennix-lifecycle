@@ -11,3 +11,11 @@
 源码验收：完整Python 312项通过（启用真实Paseo隔离入口；仅发行载荷条件跳过），包含真实离线npm shim＋平台包安装、缺包显式修复、主包漂移拒绝和原生卸载；新增非法回执标量／平台元数据负例。Paseo使用真实CLI、临时home和本地监听完成首次／重复安装、停止态恢复及Relay配置往返，不发送模型请求。受管CodeGraph旧版只绑定shim的锁不能自动变成新组合摘要；正式升级到新固定版本后建立组合锁，不放宽旧摘要。
 
 候选工具版本0.3.22，集合固定b82f21882173cc291c62f8cfcdb7d569dc462249；extra及Hikari保持原验收来源。组件包仍由原生候选冻结、npm完整性和锁核验，不在catalog维护第二份动态版本表。真实工具重装复用bootstrap原生uninstall后同一固定发行install，保留配置、秘密及组件记录；同版本无动作不算重装。发行载荷必须从已提交候选构建并经过隔离bootstrap／失败恢复／卸载重装门禁后，才允许打tag发布。
+
+## 本机升级补丁0.3.23
+
+0.3.22正式发行及公开载荷隔离测试通过后，Pennix真实升级Context Mode暴露Copilot预检循环：新版完整doctor先要求旧Skill等于新版模板，Lifecycle因此无法刷新自己持有回执的旧Skill。包升级已verified，连接配置effect=none；原生recover按同一transaction／step证明not-started后结清，未手改状态。
+
+修复只改Copilot Hook可用性查询：通过宿主公开`copilot --server --stdio --no-auto-update`的`hooks.discover`直接读取精确user hook文件的4事件和enabled，避免把模板刷新当作Hook开关预检。保留Lifecycle原有用户策略检查；未知／缺项／禁用／无效帧／超时／超限一律拒绝，查询子进程必定退出，不运行模型、不调用Hook、不重授trust。旧Skill仍须与可信receipt相符，外部漂移不因此放行。补充真实本地Copilot无认证临时home的metadata查询和显式禁用策略负例，另有分段协议／错响应／缺项／foreign事件回归。
+
+0.3.22不可变发行保留；修复后以0.3.23重新走源码、正式载荷、CI发布和部署，最终工具版本以0.3.23为准。
