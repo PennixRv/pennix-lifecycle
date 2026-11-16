@@ -314,6 +314,9 @@ def _apply(key, home, *, repair, operation_id, effect):
     try:
         if key == "codegraph":
             run(["codegraph", "install", "--target", HOST, "--location", "global", "--yes"], home)
+            native_mcp = {k: v for k, v in want["mcp"].items() if k != "env"}
+            if server(key, home) == native_mcp and want["mcp"] != native_mcp:
+                restore_server(key, home, native_mcp, want["mcp"])
         else:
             if old["mcp"] is not None:
                 run(["copilot", "mcp", "remove", key], home)
@@ -426,7 +429,10 @@ def recover(key, home, *, operation_id=None):
     require(rollback is not None, "Copilot 没有未完成配置的恢复快照；保留现场")
     prior = rollback["state"]
     current = server(key, home)
-    require(current in (record["desired"]["mcp"], prior["mcp"], None),
+    # CodeGraph's native writer does not emit the Lifecycle-owned environment guard.
+    native_mcp = {k: v for k, v in record["desired"]["mcp"].items() if k != "env"}
+    require(current in (record["desired"]["mcp"], prior["mcp"], None)
+            or key == "codegraph" and current == native_mcp,
             "Copilot MCP 存在未知改动；不能恢复")
     changes = []
     for p, body in prior["files"].items():

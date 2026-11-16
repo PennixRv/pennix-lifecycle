@@ -38,7 +38,8 @@ class CopilotIntegrationTests(unittest.TestCase):
                      "files": {str(self.target / "hooks/context-mode.json"): '{"version":1}', **{
                          str(self.target / "skills" / n / "SKILL.md"): f"---\nname: {n}\n---\nfixture" for n in copilot.context.SKILLS}}}
         self.desired_patch = patch.object(copilot, "desired", side_effect=lambda key, home: copy.deepcopy(self.want) if key == "context-mode" else {
-            "mcp": {"type": "stdio", "command": "codegraph", "args": ["serve", "--mcp"], "tools": ["*"], "deferTools": "never"}, "files": {}})
+            "mcp": {"type": "stdio", "command": "codegraph", "args": ["serve", "--mcp"], "tools": ["*"], "deferTools": "never",
+                    "env": {"CODEGRAPH_MANAGED": "1"}}, "files": {}})
         self.desired_patch.start()
         self.addCleanup(self.desired_patch.stop)
         self.calls = []
@@ -83,8 +84,28 @@ class CopilotIntegrationTests(unittest.TestCase):
             self.fail(f"unexpected owner call: {args}")
         value = json.loads(self.mcp.read_text())
         value["mcpServers"][key] = copilot.desired(key, home)["mcp"]
+        if key == "codegraph":
+            value["mcpServers"][key].pop("env", None)
         self.mcp.write_text(json.dumps(value))
         return b""
+
+    def test_codegraph_native_intermediate_recovers_without_accepting_foreign_fields(self):
+        with owned_files.locked(), patch.object(copilot, 'restore_server', side_effect=copilot.Error('guard write interrupted')):
+            with self.assertRaises(copilot.Error):
+                copilot.apply('codegraph', self.target, operation_id='guard:configure')
+        native = copilot.server('codegraph', self.target)
+        self.assertNotIn('env', native)
+        value = json.loads(self.mcp.read_text())
+        value['mcpServers']['codegraph']['foreign'] = True
+        self.mcp.write_text(json.dumps(value))
+        with owned_files.locked(), self.assertRaises(copilot.Error):
+            copilot.recover('codegraph', self.target, operation_id='guard:configure')
+        value['mcpServers']['codegraph'] = native
+        self.mcp.write_text(json.dumps(value))
+        with owned_files.locked():
+            self.assertEqual(copilot.recover('codegraph', self.target, operation_id='guard:configure'), 'restored')
+        self.assertIsNone(copilot.server('codegraph', self.target))
+        self.assertEqual(json.loads(self.mcp.read_text())['mcpServers']['github'], {'url': 'https://example.invalid'})
 
     def test_apply_noop_withdraw_isolated_from_codex_and_other_mcp(self):
         self.mcp.chmod(0o640)
