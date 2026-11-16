@@ -1427,19 +1427,12 @@ def cmd_repair(args: argparse.Namespace) -> int:
     kconf, _, catalog = _load(args)
     args.kconf = kconf
     args.codex_home = Path(os.path.expanduser(config_model.config_value(kconf, "PENNIX_CODEX_HOME")))
-    if args.component not in catalog["components"]:
-        raise CliError(f"未知组件: {args.component}")
-    operation = "upgrade"
-    component = catalog["components"][args.component]
-    if args.component not in config_model.selected_components(kconf):
-        raise CliError(f"组件未在 workflow.config 中选择: {args.component}")
     active = apply_journal.read()
     if active is not None and (active["command"] != "repair" or active["component"] != args.component):
         raise CliError("存在其他未完成 lifecycle 事务；先从原入口或 recover 核验恢复")
-    if args.expected_sha256 is not None and args.component not in {"codex-agents", "codex-config", "paseo-relay"} and component.get("delivery") != "client":
-        raise CliError("--expected-sha256 只用于审阅后的配置、relay 当前登记或固定本地客户端升级")
     if args.component == "paseo-relay":
-        if not args.expected_sha256 or config_model.config_value(kconf, "PENNIX_PASEO_RELAY_REGISTER") != "y":
+        if (not args.expected_sha256 or config_model.config_value(kconf, "PENNIX_PASEO_RELAY") != "y"
+                or config_model.config_value(kconf, "PENNIX_PASEO_RELAY_REGISTER") != "y"):
             raise CliError("relay repair 需要已选择远端登记及 plan 中当前登记审阅摘要")
         target = {"review_sha256": args.expected_sha256}
         steps = [{"id": "paseo-relay:adopt-current", "component": "paseo-relay", "action": "adopt-current", "target": target}]
@@ -1453,6 +1446,14 @@ def cmd_repair(args: argparse.Namespace) -> int:
         apply_journal.clear()
         _emit({"operation": "repair", "component": args.component, "status": result}, args.json)
         return 0
+    if args.component not in catalog["components"]:
+        raise CliError(f"未知组件: {args.component}")
+    operation = "upgrade"
+    component = catalog["components"][args.component]
+    if args.component not in config_model.selected_components(kconf):
+        raise CliError(f"组件未在 workflow.config 中选择: {args.component}")
+    if args.expected_sha256 is not None and args.component not in {"codex-agents", "codex-config"} and component.get("delivery") != "client":
+        raise CliError("--expected-sha256 只用于审阅后的配置、relay 当前登记或固定本地客户端升级")
     if component.get("delivery") in {"package", "plugin", "client", "collection"}:
         if args.component not in config_model.selected_components(kconf):
             raise CliError(f"组件未在 workflow.config 中选择: {args.component}")

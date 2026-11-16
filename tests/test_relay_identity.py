@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import owned_files
 import paseo_service
 import relay_owner as relay
+import pennix
 
 
 class RelayIdentityTests(unittest.TestCase):
@@ -29,6 +31,32 @@ class RelayIdentityTests(unittest.TestCase):
         self.public = 'ssh-ed25519 AAAAsynthetic'
         self.target = {'nas_id': 'a'*64, 'router_id': hashlib.sha256(self.public.encode()).hexdigest(),
                        'uid': '0', 'resource': relay.MAP_PATH}
+
+    def test_cli_dispatches_selected_relay_without_a_catalog_package(self):
+        digest = 'b' * 64
+        args = pennix.parser().parse_args(['repair', 'paseo-relay', '--expected-sha256', digest, '--json'])
+        args.config_path = self.root / 'workflow.config'
+        args.component_lock_path = self.root / 'components.lock.json'
+        args.config_path.write_text('fixture config')
+        args.component_lock_path.write_text('{}')
+        values = {'PENNIX_CODEX_HOME': str(self.root / 'codex'), 'PENNIX_PASEO_HOME': str(self.home),
+                  'PENNIX_PASEO_RELAY': 'y', 'PENNIX_PASEO_RELAY_REGISTER': 'y',
+                  'PENNIX_RELAY_NAS_SSH': 'fixture-nas', 'PENNIX_RELAY_ROUTER_SSH': 'fixture-router'}
+        with patch.object(pennix, '_load', return_value=(SimpleNamespace(), args.config_path, {'components': {}})), \
+             patch.object(pennix.config_model, 'config_value', side_effect=lambda k, name: values[name]), \
+             patch.object(relay, 'adopt_current', return_value='adopted-current') as adopt, \
+             patch.object(pennix, '_emit'), owned_files.locked():
+            self.assertEqual(pennix.cmd_repair(args), 0)
+            adopt.assert_called_once_with(self.home, digest, nas_ssh='fixture-nas', router_ssh='fixture-router')
+            self.assertIsNone(pennix.apply_journal.read())
+            for key in ['PENNIX_PASEO_RELAY', 'PENNIX_PASEO_RELAY_REGISTER']:
+                adopt.reset_mock()
+                values[key] = 'n'
+                with self.assertRaisesRegex(pennix.CliError, 'relay repair'):
+                    pennix.cmd_repair(args)
+                adopt.assert_not_called()
+                self.assertIsNone(pennix.apply_journal.read())
+                values[key] = 'y'
 
     def script(self):
         out = f"nas:{self.target['nas_id']}\nrouter:{self.target['router_id']}:0\nidentity\n"
