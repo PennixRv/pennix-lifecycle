@@ -66,19 +66,10 @@ def _edit_hooks(codex_home: Path, previous: dict, desired: dict, *, remove_empty
     if _managed_hooks(document) != previous:
         raise NativeIntegrationError("context-mode Hook 条目已漂移或由其他 owner 管理")
     hooks = context_mode.merge_hooks(document.get("hooks", {}), previous, desired)
-    # An unrelated trusted handler cannot silently move to a different native key.
-    trust = _toml(codex_home / "config.toml").get("hooks", {}).get("state", {})
-    events = {**context_mode.EVENTS, "PreCompact": "pre_compact", "Stop": "stop"}
-    for event, entries in document.get("hooks", {}).items():
-        for index, entry in enumerate(entries):
-            if _marked(entry) or event not in events:
-                continue
-            positions = [i for i, item in enumerate(hooks.get(event, [])) if item == entry]
-            if positions == [index]:
-                continue
-            prefix = f"{codex_home / 'hooks.json'}:{events[event]}:{index}:"
-            if any(key.startswith(prefix) for key in trust):
-                raise NativeIntegrationError("context-mode 操作会移动其他 owner 的 trusted Hook；保留现场")
+    try:
+        hook_integrations.preserve_foreign_trust(codex_home, document.get("hooks", {}), hooks, _marked)
+    except hook_integrations.HookError as error:
+        raise NativeIntegrationError(str(error)) from error
     if dry_run:
         return
     document["hooks"] = hooks
@@ -102,7 +93,7 @@ def _desired(key: str, codex_home: Path, *, enabled: bool, receipt: dict | None 
     if key == "context-mode":
         value.update(_context_target(codex_home, receipt, configure=configure))
     elif key == "codegraph":
-        value["mcp"] = {"command": _command(key), "args": ["serve", "--mcp"]}
+        value["mcp"] = {"command": _command(key), "args": ["serve", "--mcp"], "env": {"CODEGRAPH_MANAGED": "1"}}
     else:
         helper = Path.home() / ".agents/skills/pennix-skills/pennix-siyuan-knowledge/scripts/mcp_headers.py"
         python = shutil.which("python3")
@@ -196,6 +187,10 @@ def inspect(key: str, codex_home: Path, *, enabled: bool) -> dict[str, object]:
     if key not in {"context-mode", "codegraph", "siyuan"}:
         raise NativeIntegrationError(f"未知 native integration: {key}")
     receipt = _read_receipt(key)
+    policy = mcp_policy(key, codex_home) if enabled else None
+    if policy:
+        return {"state": "blocked", "owned": receipt is not None,
+                "detail": policy, "configuration_owned": receipt is not None, "available": False}
     present = _context_present(codex_home) if key == "context-mode" else _server(key, codex_home) is not None
     if receipt is None:
         return {"state": "external" if present else "absent", "owned": False, "detail": "native config has no lifecycle receipt" if present else "not configured"}
@@ -212,6 +207,25 @@ def inspect(key: str, codex_home: Path, *, enabled: bool) -> dict[str, object]:
     desired = _desired(key, codex_home, enabled=True, receipt=receipt)
     return {"state": "current" if receipt["desired_digest"] == _digest(desired) else "update-required",
             "owned": True, "detail": "native owner configuration"}
+
+
+def mcp_policy(key: str, home: Path) -> str | None:
+    server = _server(key, home)
+    if not isinstance(server, dict):
+        return None
+    if server.get("enabled", True) is not True:
+        return "MCP 被用户策略禁用；保留配置，不自动启用"
+    required = {"codegraph": {"codegraph_explore"},
+                "context-mode": {"ctx_execute", "ctx_index", "ctx_search"}}.get(key)
+    allowed, denied = server.get("enabled_tools"), server.get("disabled_tools", [])
+    if (allowed is not None and (not isinstance(allowed, list) or not all(isinstance(x, str) for x in allowed))
+            or not isinstance(denied, list) or not all(isinstance(x, str) for x in denied)):
+        return "MCP 工具过滤策略无效；保留用户字段"
+    if required is None:
+        restricted = allowed is not None or bool(denied)
+    else:
+        restricted = (allowed is not None and not required <= set(allowed)) or bool(required & set(denied))
+    return "MCP 工具过滤限制所需能力；保留用户策略，不宣称可用" if restricted else None
 
 
 def _mcp_add(codex_home: Path, expected: dict) -> None:
@@ -254,7 +268,10 @@ def _mcp_fields(key: str, home: Path) -> dict | None:
     if not isinstance(server, dict):
         raise NativeIntegrationError(f"{key} MCP 不是 table")
     names = ("url", "http_headers_helper") if key == "siyuan" else ("command", "args")
-    return {name: server[name] for name in names if name in server}
+    result = {name: server[name] for name in names if name in server}
+    if key == "codegraph" and "CODEGRAPH_MANAGED" in server.get("env", {}):
+        result["env"] = {"CODEGRAPH_MANAGED": server["env"]["CODEGRAPH_MANAGED"]}
+    return result
 
 
 def can_adopt(key: str, home: Path) -> bool:
@@ -286,6 +303,17 @@ def _mcp_edit(key: str, home: Path, fields: dict | None, expected: dict | None) 
     document = tomlkit.parse(before.decode() if before else "")
     servers = document.setdefault("mcp_servers", tomlkit.table())
     server = servers.setdefault(key, tomlkit.table())
+    if key == "codegraph":
+        environment = server.get("env", {})
+        if not isinstance(environment, dict):
+            raise NativeIntegrationError("CodeGraph env 不是 table")
+        wanted = (fields or {}).get("env", {})
+        if "CODEGRAPH_MANAGED" in wanted:
+            server.setdefault("env", tomlkit.table())["CODEGRAPH_MANAGED"] = wanted["CODEGRAPH_MANAGED"]
+        elif "env" in server:
+            server["env"].pop("CODEGRAPH_MANAGED", None)
+            if not server["env"]:
+                server.pop("env")
     for name in (("url", "http_headers_helper") if key == "siyuan" else ("command", "args")):
         if fields is not None and name in fields:
             server[name] = fields[name]

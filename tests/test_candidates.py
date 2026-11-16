@@ -15,6 +15,41 @@ import candidates
 
 
 class CandidateTests(unittest.TestCase):
+    def test_fresh_trellis_and_old_beta_lock_keep_the_supported_prerelease_channel(self):
+        catalog = json.loads((Path(__file__).resolve().parents[1] / 'references/catalog.json').read_text())
+        component = catalog['components']['trellis-cli']
+        raw = b'fixed trellis candidate'
+        queried = []
+        def metadata(url):
+            queried.append(url)
+            selector = url.rsplit('/', 1)[1]
+            version = '0.7.1' if selector == 'latest' else '0.7.2-beta.19' if selector == '0.7.2-beta.19' else '0.7.2-beta.20'
+            return {'name': '@pennixrv/trellis', 'version': version, 'dist': {
+                'tarball': 'https://registry.npmjs.org/fixed.tgz',
+                'integrity': 'sha512-' + base64.b64encode(hashlib.sha512(raw).digest()).decode()}}
+        with tempfile.TemporaryDirectory() as directory, patch.object(candidates, '_json', side_effect=metadata), \
+                patch.object(candidates.owned_files, 'download', side_effect=lambda url, path: path.write_bytes(raw)):
+            fresh = candidates.resolve_npm(component, Path(directory))
+            old = candidates.resolve_npm(component, Path(directory), {'source': component['lock_source'], 'version': '0.7.2-beta.19'})
+        self.assertEqual(fresh['version'], '0.7.2-beta.20')
+        self.assertEqual(old['version'], '0.7.2-beta.19')
+        self.assertTrue(queried[0].endswith('/beta'))
+        self.assertEqual(component['package']['tag'], catalog['components']['trellis-paseo-adapter']['package']['tag'])
+
+    def test_base_vcs_sources_are_pinned_before_the_reviewed_recipe_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.SRCINFO').write_text('source = ohmyzsh::git+https://example.test/zsh.git#branch=master\nsource_x86_64 = https://example.test/fixed.tar.gz\n')
+            result = subprocess.CompletedProcess([], 0, 'a'*40 + '\trefs/heads/master\n', '')
+            with patch.object(candidates, '_run', return_value=result) as run:
+                frozen = candidates.freeze_aur_sources(root)
+            self.assertEqual(frozen['source'], ['ohmyzsh::git+https://example.test/zsh.git#commit=' + 'a'*40])
+            self.assertEqual(frozen['source_x86_64'], ['https://example.test/fixed.tar.gz'])
+            self.assertEqual(run.call_args.args[0], ['git', 'ls-remote', 'https://example.test/zsh.git', 'refs/heads/master', 'refs/heads/master^{}'])
+            (root / '.SRCINFO').write_text('source = hg+https://example.test/source\n')
+            with self.assertRaises(candidates.CandidateError):
+                candidates.freeze_aur_sources(root)
+
     def test_architecture_independent_candidate_and_locked_recovery_use_any(self):
         component = {"lock_source": "arch:extra/example-data", "package": {"name": "example-data", "architecture": "any"}}
         with tempfile.TemporaryDirectory() as directory, \

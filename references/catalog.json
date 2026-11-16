@@ -89,7 +89,7 @@
       "owner": "grok-search",
       "component": "pennix-skills",
       "command": ["grok-search"],
-      "functional_command": ["grok-search", "fetch", "https://example.com"],
+      "functional_command": ["grok-search", "fetch", "--provider", "tavily", "--deadline", "60", "https://example.com"],
       "values": {
         "base_url": "PENNIX_GROK_TAVILY_URL"
       },
@@ -161,9 +161,9 @@
     },
     "trellis-cli": {
       "delivery": "package",
-      "lock_source": "npm:@pennixrv/trellis:latest",
+      "lock_source": "npm:@pennixrv/trellis:beta",
       "lock_source_aliases": [
-        "npm:@pennixrv/trellis:beta"
+        "npm:@pennixrv/trellis:latest"
       ],
       "source": "native Trellis installation",
       "owner": "trellis",
@@ -186,7 +186,7 @@
         "source": "npm",
         "name": "@pennixrv/trellis",
         "registry": "https://registry.npmjs.org/",
-        "tag": "latest",
+        "tag": "beta",
         "prefix": "$HOME/.local",
         "install_owner": "user"
       }
@@ -723,7 +723,7 @@
         "directory": "pennix-skills",
         "source": {
           "repo": "PennixRv/pennix-skills",
-          "ref": "8aeb426c1284db9954898b5cacaf27f8b390dc7d",
+          "ref": "b82f21882173cc291c62f8cfcdb7d569dc462249",
           "manifest": "collection.json"
         }
       }

@@ -271,6 +271,10 @@ def _relay_plan(args: argparse.Namespace, kconf: config_model.StrictKconfig) -> 
             return {"selected": True, "register": True, "action": "install", "state": "pending-identity",
                     "detail": "等待原生 Paseo 配置生成独立身份，再精确登记 relay"}
         state = relay_owner.inspect(paseo_home, nas_ssh=nas_ssh, router_ssh=router_ssh)
+        if state == "adoption-required":
+            return {"selected": True, "register": True, "action": "blocked", "state": "adoption-required",
+                    "detail": "旧 relay receipt 不证明原远端；须用当前审阅摘要显式 repair，历史远端仍不宣称可证",
+                    "current_registration_review": relay_owner.review(paseo_home, nas_ssh=nas_ssh, router_ssh=router_ssh)}
         return {
             "selected": True,
             "register": True,
@@ -681,7 +685,10 @@ def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_
     component = catalog["components"][component_id]
     owned_files.bind_target(args.codex_home, register=True)
     if component_id == "base-environment":
-        return base_environment.uninstall() if operation == "uninstall" else base_environment.apply(args.kconf, catalog)
+        active = apply_journal.read()
+        target = next((s["target"].get("packages") for s in (active or {}).get("steps", [])
+                       if s["component"] == component_id and s["action"] in {"install", "upgrade"}), None)
+        return base_environment.uninstall() if operation == "uninstall" else base_environment.apply(args.kconf, catalog, package_target=target)
     native = component.get("native_config")
     if native and operation in {"configure", "unconfigure"}:
         if operation == "unconfigure":
@@ -701,6 +708,7 @@ def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_
         return codex_config.apply(args.codex_home / "config.toml", values,
             expected_sha256=getattr(args, "expected_sha256", None))
     engine_args = _args_for_engine(args, operation)
+    engine_args.repair = repair
     if candidate:
         engine_args.candidate = candidate
         engine_args.explicit_update = operation == "upgrade"
@@ -873,7 +881,7 @@ def _apply_steps(value: dict[str, Any], args: argparse.Namespace, catalog: dict[
         action = item.get("action")
         if item.get("selected") and action in {"install", "adopt", "upgrade", "adopt-upgrade"}:
             steps.append({"id": f"{key}:{action}", "component": key, "action": action,
-                          "target": {} if item.get("source_migration") else item.get("candidate_target") or args.component_lock["components"].get(key, {})})
+                          "target": {"packages": item["packages"]} if key == "base-environment" else {} if item.get("source_migration") else item.get("candidate_target") or args.component_lock["components"].get(key, {})})
         if item.get("selected") and item.get("plugin_adoption"):
             steps.append({"id": f"{key}:adopt-plugin", "component": key,
                           "action": "adopt-plugin", "target": item["plugin_adoption"]})
@@ -914,7 +922,6 @@ def _apply_steps(value: dict[str, Any], args: argparse.Namespace, catalog: dict[
     restart_daemon = bool(service["runtime"].get("running") and (
         service.get("paseo_config", {}).get("restart_required")
         or paseo_action in {"install", "upgrade", "adopt-upgrade"}
-        or relay and relay.get("action") in {"configure", "install"}
     ))
     if (service.get("selected") or service.get("unit_state") in {"current", "migration-required"}
             or relay and relay.get("action") in {"install", "configure", "uninstall"}):
@@ -1152,7 +1159,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
                 service.get("paseo_config", {}).get("restart_required")
                 or service["unit_state"] == "migration-required" and service["runtime"].get("active")
                 or value["components"].get("paseo-cli", {}).get("action") in {"install", "upgrade", "adopt-upgrade"}
-                or relay and relay.get("action") in {"configure", "install"}
+                or relay and relay["selected"] and relay["action"] != "keep"
             ))
             if restart_needed:
                 paseo_service.assert_no_active_work(paseo, paseo_home)
@@ -1429,8 +1436,23 @@ def cmd_repair(args: argparse.Namespace) -> int:
     active = apply_journal.read()
     if active is not None and (active["command"] != "repair" or active["component"] != args.component):
         raise CliError("存在其他未完成 lifecycle 事务；先从原入口或 recover 核验恢复")
-    if args.expected_sha256 is not None and args.component not in {"codex-agents", "codex-config"} and component.get("delivery") != "client":
-        raise CliError("--expected-sha256 只用于审阅后的 codex-config、codex-agents 或固定本地客户端升级")
+    if args.expected_sha256 is not None and args.component not in {"codex-agents", "codex-config", "paseo-relay"} and component.get("delivery") != "client":
+        raise CliError("--expected-sha256 只用于审阅后的配置、relay 当前登记或固定本地客户端升级")
+    if args.component == "paseo-relay":
+        if not args.expected_sha256 or config_model.config_value(kconf, "PENNIX_PASEO_RELAY_REGISTER") != "y":
+            raise CliError("relay repair 需要已选择远端登记及 plan 中当前登记审阅摘要")
+        target = {"review_sha256": args.expected_sha256}
+        steps = [{"id": "paseo-relay:adopt-current", "component": "paseo-relay", "action": "adopt-current", "target": target}]
+        active = _open_transaction(args, "repair", args.component, steps)
+        if active["steps"][0]["target"] != target:
+            raise CliError("relay 当前登记审阅与同事务不一致")
+        active, result = _journal_mutate(active, steps[0]["id"], lambda: relay_owner.adopt_current(
+            Path(config_model.config_value(kconf, "PENNIX_PASEO_HOME")), args.expected_sha256,
+            nas_ssh=config_model.config_value(kconf, "PENNIX_RELAY_NAS_SSH"),
+            router_ssh=config_model.config_value(kconf, "PENNIX_RELAY_ROUTER_SSH")))
+        apply_journal.clear()
+        _emit({"operation": "repair", "component": args.component, "status": result}, args.json)
+        return 0
     if component.get("delivery") in {"package", "plugin", "client", "collection"}:
         if args.component not in config_model.selected_components(kconf):
             raise CliError(f"组件未在 workflow.config 中选择: {args.component}")
@@ -1451,11 +1473,13 @@ def cmd_repair(args: argparse.Namespace) -> int:
         status = _component_status(args, args.component, component)
         if component.get("native_config"):
             state, observed = owner_engine.probe_component(component, args.codex_home)
-            status = {"state": state, "ownership": "lifecycle" if owner_engine.package_owned(args.component, component, observed, args.codex_home) else "external"}
+            repair_bundle = state == "blocked" and owner_engine.codegraph_main_owned(args.component, component)
+            status = {"state": state, "ownership": "lifecycle" if repair_bundle or owner_engine.package_owned(args.component, component, observed, args.codex_home) else "external",
+                      "repair_bundle": repair_bundle}
         missing_owned = (status["state"] == "missing" and component.get("delivery") == "package"
                          and owner_engine._package_receipt(args.component, component) is not None
                          and owner_engine.package_absent(component))
-        if status["state"] not in {"match", "outdated", "migration-required"} and not missing_owned:
+        if status["state"] not in {"match", "outdated", "migration-required"} and not missing_owned and not status.get("repair_bundle"):
             raise CliError(f"组件状态不允许锁定目标修复: {status['state']} ({status.get('detail', '')})")
         if component.get("delivery") == "package" and status.get("ownership") != "lifecycle" and not missing_owned:
             raise CliError("repair 需要可信 Lifecycle package receipt")
@@ -1496,7 +1520,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
             if apply_journal.step(active, steps[0]["id"])["target"] != candidate_target:
                 raise CliError("修复候选与已记录的精确目标不同")
             def repair_component():
-                result = _run_component(args, catalog, args.component, operation, candidate=candidate)
+                result = _run_component(args, catalog, args.component, operation, candidate=candidate, repair=True)
                 args.component_lock = component_lock.set_entry(args.component_lock, args.component, candidate_target, args.component_lock_sources)
                 _write_lock(args)
                 return result
@@ -2286,6 +2310,17 @@ def cmd_recover(args: argparse.Namespace) -> int:
         component = catalog["components"].get(step["component"])
         if step["status"] == "verified":
             pass
+        elif step["component"] == "paseo-relay" and step["action"] == "adopt-current" and active["command"] == "repair":
+            record = relay_owner._record()
+            paseo_home = Path(config_model.config_value(kconf, "PENNIX_PASEO_HOME"))
+            review = relay_owner.review(paseo_home,
+                nas_ssh=config_model.config_value(kconf, "PENNIX_RELAY_NAS_SSH"),
+                router_ssh=config_model.config_value(kconf, "PENNIX_RELAY_ROUTER_SSH"))
+            if (not record or record["schema"] != 2 or record["server_id"] != review["server_id"]
+                    or record["target"] != review["target"] or review["state"] != "present"
+                    or review["review_sha256"] != step["target"].get("review_sha256")):
+                raise CliError("relay 当前登记接管后置条件不符；保留 unknown")
+            active = apply_journal.verified(active, step["id"], {"recovered": True, "state": "owned-current-registration"})
         elif (active['command'] == 'apply' and step['component'] == 'paseo-relay'
                 and step['action'] in {'install','configure'} and step['status'] in {'unknown','started'}):
             paseo_home = Path(config_model.config_value(kconf, 'PENNIX_PASEO_HOME'))
@@ -2345,10 +2380,15 @@ def cmd_recover(args: argparse.Namespace) -> int:
             _write_lock(args)
             pnpm_migration.finish(component, step["target"])
             active = apply_journal.verified(apply_journal.read(), step["id"], {"recovered": True, "state": "match"})
+        elif step["component"] == "base-environment" and step["action"] == "uninstall":
+            base_environment.uninstall()
+            if base_environment.receipt() is not None:
+                raise CliError("基础撤回 owner 未证明完成")
+            active = apply_journal.verified(active, step["id"], {"recovered": True, "state": "absent"})
         elif step["component"] == "base-environment" and step["action"] in {"install", "upgrade"}:
             if base_environment.receipt() is None:
                 raise CliError("基础环境没有同目标 owner receipt；不能释放 unknown")
-            base_environment.apply(kconf, catalog)
+            base_environment.apply(kconf, catalog, package_target=step["target"].get("packages"))
             if base_environment.inspect(kconf)["state"] != "current":
                 raise CliError("基础环境 owner 未证明完成")
             active = apply_journal.verified(active, step["id"], {"recovered": True, "state": "current"})
@@ -2382,7 +2422,8 @@ def cmd_recover(args: argparse.Namespace) -> int:
                 with tempfile.TemporaryDirectory(prefix="pennix-recover-npm-") as directory:
                     candidate = candidates.resolve(component, Path(directory), step["target"])
                     old = args.component_lock["components"].get(step["component"], {})
-                    owner_engine.recover_npm_receipt(step["component"], component, old, Path(candidate["path"]))
+                    owner_engine.recover_npm_receipt(step["component"], component, old, Path(candidate["path"]),
+                        **({"platform_archive": Path(candidate["platform_path"])} if "platform_path" in candidate else {}))
                 owned = owner_engine.package_owned(step["component"], component, codex_home=home)
             if state not in {"match", "current"} or not owned:
                 raise CliError("组件身份、归属或精确目标未证明；保留 unknown")

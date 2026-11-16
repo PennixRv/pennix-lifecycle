@@ -11,6 +11,7 @@ import pwd
 import re
 import shlex
 import subprocess
+import tempfile
 import urllib.parse
 import urllib.request
 
@@ -18,6 +19,7 @@ import host
 import owned_files as files
 import path_env
 import apply_journal
+import candidates
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCUMENTS = {"markitdown", "pandoc", "libreoffice", "poppler", "tesseract",
@@ -30,9 +32,9 @@ class BaseError(RuntimeError):
     pass
 
 
-def _run(command, **kwargs):
+def _run(command, *, environment=None, **kwargs):
     result = subprocess.run(command, capture_output=True, text=True, check=False,
-                            env={**os.environ, "LC_ALL": "C"}, **kwargs)
+                            env={**os.environ, "LC_ALL": "C", **(environment or {})}, **kwargs)
     if result.returncode:
         raise BaseError(f"原生动作失败: {shlex.join(command[:4])}: {result.stderr[-1200:]}")
     return result.stdout.strip()
@@ -44,7 +46,8 @@ def receipt_path():
 
 def receipt():
     value = files.read_json(receipt_path())
-    if value is not None and (set(value) != {"schema", "target", "files", "native", "version"}
+    if value is not None and (not {"schema", "target", "files", "native", "version"} <= set(value)
+                              or set(value) - {"schema", "target", "files", "native", "version", "uninstall", "packages"}
                               or value["schema"] != 1 or value["target"] != files.target_identity()
                               or not isinstance(value["files"], dict) or not isinstance(value["native"], dict)):
         raise BaseError("基础环境 receipt 无效或属于其他目标")
@@ -61,6 +64,21 @@ def receipt():
                or entry["mode"] & 0o022
                for path, entry in value["files"].items()):
             raise BaseError("基础环境 receipt 包含非法文件或权限")
+        progress = value.get("uninstall")
+        if progress is not None and (not isinstance(progress, dict) or set(progress) != {"files", "native"}
+                or any(not isinstance(progress[k], dict) for k in progress)
+                or not set(progress["files"]) <= set(value["files"])
+                or not set(progress["native"]) <= {"npm-prefix", "shell", "docker-group", "docker-active", "docker-enabled"}
+                or any(status not in {"started", "verified"} for part in progress.values() for status in part.values())):
+            raise BaseError("基础撤回步骤记录无效")
+        packages = value.get("packages", {})
+        if not isinstance(packages, dict) or any(not isinstance(item, dict)
+                or set(item) != {"ref", "recipe_sha256", "sources", "version", "sha256"}
+                or not isinstance(item["ref"], str) or not candidates.SHA.fullmatch(item["ref"])
+                or any(not isinstance(item[k], str) or not re.fullmatch(r"[0-9a-f]{64}", item[k]) for k in ["recipe_sha256", "sha256"])
+                or not isinstance(item["sources"], dict) or not isinstance(item["version"], str)
+                for item in packages.values()):
+            raise BaseError("基础 AUR 载荷记录无效")
     return value
 
 
@@ -166,7 +184,18 @@ def package_plan():
             versions[item["Name"]] = item["Version"]
         if not set(aur) <= set(versions):
             raise BaseError("AUR 候选缺失")
-    return {"official": official, "aur": aur, "versions": versions,
+    frozen = {}
+    for name in aur:
+        component = {"lock_source": "aur:" + name, "package": {"name": name}}
+        with tempfile.TemporaryDirectory(prefix="pennix-base-aur-review-") as directory:
+            ref = candidates._git_head(name, aur=True)
+            candidate = candidates.resolve_aur(component, Path(directory), {"version": versions[name], "ref": ref})
+            checkout = Path(candidate["path"])
+            frozen[name] = {"source": candidate["source"], "version": candidate["version"], "ref": ref,
+                            "recipe_sha256": candidates._digest(checkout / "PKGBUILD"),
+                            "srcinfo_sha256": candidates._digest(checkout / ".SRCINFO"),
+                            "sources": candidates.freeze_aur_sources(checkout), "recipe": (checkout / "PKGBUILD").read_text()}
+    return {"official": official, "aur": aur, "versions": versions, "aur_candidates": frozen,
             "node_replacement": "nodejs" in installed and "nodejs-lts-krypton" in official}
 
 
@@ -227,7 +256,7 @@ def native_ready(state):
             and state["npm_prefix"] == str(Path.home()/'.local'))
 
 
-def _install_packages(plan, catalog):
+def _install_packages(plan, catalog, record):
     if plan["official"]:
         command = ["sudo", "pacman", "-S", "--needed", "--noconfirm"]
         # The approved Node 26 -> 24 replacement is the only planned conflict.
@@ -235,13 +264,48 @@ def _install_packages(plan, catalog):
             command += ["--ask", "4"]
         _run(command + [f"{name}={plan['versions'][name]}" for name in plan["official"]], timeout=1800)
     if plan["aur"]:
-        host.ensure_aur_helper(catalog["aur_helper"])
-        _run(["yay", "-S", "--needed", "--noconfirm", *plan["aur"]], timeout=1800)
         for name in plan["aur"]:
-            observed = _run(["pacman", "-Q", name]).split()[1]
-            # VCS pkgver is computed by makepkg; RPC reports the recipe's last submitted version.
-            if name != "oh-my-zsh-git" and observed != plan["versions"][name]:
-                raise BaseError("AUR 候选在计划后发生变化；保留现场")
+            target = plan.get("aur_candidates", {}).get(name)
+            if not target:
+                raise BaseError("基础 AUR 缺少已冻结配方；未调用 yay 重新选择")
+            component = {"lock_source": "aur:" + name, "package": {"name": name}}
+            with tempfile.TemporaryDirectory(prefix="pennix-base-aur-build-") as directory:
+                selected = candidates.resolve_aur(component, Path(directory), target)
+                checkout = Path(selected["path"])
+                if (candidates._digest(checkout / "PKGBUILD") != target["recipe_sha256"]
+                        or candidates._digest(checkout / ".SRCINFO") != target["srcinfo_sha256"]):
+                    raise BaseError("基础 AUR 固定配方摘要变化")
+                # Only the reviewed source arrays change; checksums and build functions stay intact.
+                body = (checkout / "PKGBUILD").read_text()
+                for key, values in target["sources"].items():
+                    if not re.fullmatch(r"source(?:_[A-Za-z0-9_]+)?", key) or not isinstance(values, list) or not all(isinstance(x, str) for x in values):
+                        raise BaseError("冻结 AUR source 数组无效")
+                    body += "\n" + key + "=(" + " ".join(shlex.quote(x) for x in values) + ")\n"
+                (checkout / "PKGBUILD").write_text(body)
+                environment = {"BUILDDIR": str(checkout), "PKGDEST": str(checkout), "SRCDEST": str(checkout / "sources")}
+                _run(["makepkg", "--cleanbuild", "--force", "--holdver", "--syncdeps", "--noconfirm"], cwd=checkout, environment=environment, timeout=1800)
+                generated = _run(["makepkg", "--printsrcinfo"], cwd=checkout, environment=environment)
+                fields = dict((key.strip(), value.strip()) for line in generated.splitlines() if "=" in line for key, value in [line.split("=", 1)] if key.strip() in {"pkgver", "pkgrel", "epoch"})
+                if not fields.get("pkgver") or not fields.get("pkgrel"):
+                    raise BaseError("构建后 .SRCINFO 版本不完整")
+                version = (fields["epoch"] + ":" if fields.get("epoch") not in {None, "0"} else "") + fields["pkgver"] + "-" + fields["pkgrel"]
+                vcs = any("#commit=" in source for values in target["sources"].values() for source in values)
+                if version != target["version"] and not vcs:
+                    raise BaseError("非 VCS 基础 AUR 构建版本与冻结候选不符")
+                artifacts = []
+                for artifact in checkout.glob(name + "-*.pkg.tar.*"):
+                    if artifact.is_file() and not artifact.is_symlink() and not artifact.name.endswith(".sig"):
+                        if _run(["pacman", "-Qp", str(artifact)]).split() == [name, version]:
+                            artifacts.append(artifact)
+                if len(artifacts) != 1:
+                    raise BaseError("固定基础 AUR 未生成唯一匹配的原生包")
+                artifact = artifacts[0]
+                record.setdefault("packages", {})[name] = {"ref": target["ref"], "recipe_sha256": target["recipe_sha256"],
+                    "sources": target["sources"], "version": version, "sha256": candidates._digest(artifact)}
+                _save(record)
+                _run(["sudo", "pacman", "-U", "--noconfirm", str(artifact)], timeout=1800)
+                if _run(["pacman", "-Q", name]).split() != [name, version]:
+                    raise BaseError("固定基础 AUR 安装后身份不符")
 
 
 def _native_apply():
@@ -262,7 +326,9 @@ def _native_apply():
         _run(["sudo", "chsh", "-s", "/usr/bin/zsh", state["user"]])
 
 
-def apply(kconf, catalog):
+def apply(kconf, catalog, *, package_target=None):
+    if (receipt() or {}).get("uninstall") is not None:
+        raise BaseError("基础撤回尚未完成；使用同事务 recover 续接撤回")
     state = inspect(kconf)
     if state["state"] == "blocked":
         raise BaseError(state.get("detail", "基础预检失败") + ": " + ", ".join(state.get("conflicts", [])))
@@ -275,7 +341,12 @@ def apply(kconf, catalog):
         record = {"schema": 1, "target": files.target_identity(), "files": {},
                   "native": native_state(), "version": (ROOT/'VERSION').read_text().strip()}
         _save(record)
-    _install_packages(state["packages"], catalog)
+    packages = state["packages"]
+    if packages["aur"]:
+        if package_target is None or any(name not in package_target.get("aur_candidates", {}) for name in packages["aur"]):
+            raise BaseError("基础 AUR 缺少同事务已审阅候选；须重新 plan/apply")
+        packages = {**packages, "aur_candidates": package_target["aur_candidates"]}
+    _install_packages(packages, catalog, record)
     for path, output in targets(kconf).items():
         before = files.read(path)
         entry = record["files"].get(str(path))
@@ -304,30 +375,54 @@ def uninstall():
     record = receipt()
     if record is None:
         return "no-op"
+    progress = record.get("uninstall", {"files": {}, "native": {}})
     for value, entry in record["files"].items():
-        if _digest(files.read(Path(value))) != entry["applied"]:
+        original = base64.b64decode(entry["before"], validate=True) if entry["before"] is not None else None
+        expected = {entry["applied"]}
+        if value in progress["files"]:
+            expected = {_digest(original)} if progress["files"][value] == "verified" else expected | {_digest(original)}
+        if _digest(files.read(Path(value))) not in expected:
             raise BaseError(f"配置已由用户修改，未撤回: {value}")
+    record["uninstall"] = progress
+    _save(record)
+
+    def native_step(name, command):
+        if progress["native"].get(name) == "verified":
+            return
+        progress["native"][name] = "started"
+        _save(record)
+        _run(command)
+        progress["native"][name] = "verified"
+        _save(record)
     old = record["native"]
     state = native_state()
     if old["npm_prefix"] and state["npm_prefix"] == str(Path.home()/'.local') and old["npm_prefix"] != state["npm_prefix"]:
-        _run(["npm", "config", "set", "prefix", old["npm_prefix"], "--location=user"])
+        native_step("npm-prefix", ["npm", "config", "set", "prefix", old["npm_prefix"], "--location=user"])
     elif old['npm_prefix'] is None and state['npm_prefix'] == str(Path.home()/'.local'):
-        _run(['npm', 'config', 'delete', 'prefix', '--location=user'])
+        native_step("npm-prefix", ['npm', 'config', 'delete', 'prefix', '--location=user'])
     if state["shell"] == "/usr/bin/zsh" and old["shell"] != state["shell"]:
-        _run(["sudo", "chsh", "-s", old["shell"], state["user"]])
+        native_step("shell", ["sudo", "chsh", "-s", old["shell"], state["user"]])
     # Container data is shared; only reverse Docker settings when the native owner proves no workload.
     containers = subprocess.run(["sudo", "docker", "ps", "-aq"], capture_output=True, text=True)
     images = subprocess.run(["sudo", "docker", "images", "-q"], capture_output=True, text=True)
     if containers.returncode == images.returncode == 0 and not containers.stdout.strip() and not images.stdout.strip():
         if not old["docker_group"] and state["docker_group"]:
-            _run(["sudo", "gpasswd", "-d", state["user"], "docker"])
+            native_step("docker-group", ["sudo", "gpasswd", "-d", state["user"], "docker"])
         if not old["docker_active"]:
-            _run(["sudo", "systemctl", "stop", "docker.service"])
+            native_step("docker-active", ["sudo", "systemctl", "stop", "docker.service"])
         if not old["docker_enabled"]:
-            _run(["sudo", "systemctl", "disable", "docker.service"])
+            native_step("docker-enabled", ["sudo", "systemctl", "disable", "docker.service"])
     for value, entry in reversed(list(record["files"].items())):
         path = Path(value)
         original = base64.b64decode(entry["before"], validate=True) if entry["before"] is not None else None
+        if progress["files"].get(value) == "verified":
+            continue
+        progress["files"][value] = "started"
+        _save(record)
         files.replace(path, original, files.read(path), mode=entry["mode"])
+        if files.read(path) != original:
+            raise BaseError(f"基础撤回后置条件不符: {value}")
+        progress["files"][value] = "verified"
+        _save(record)
     files.replace(receipt_path(), None, files.read(receipt_path(), private=True))
     return "changed; 软件、locale、文档与共享依赖保留；有容器负载时保留 Docker 服务和用户组"

@@ -335,7 +335,16 @@ def functional_checks(catalog: dict[str, Any], connections: dict, codex_home: Pa
                 command = [value.replace("$VERIFY_PROJECT", directory) for value in command]
                 completed = subprocess.run(command, cwd=project, capture_output=True, timeout=300, check=False,
                                            env={**os.environ, "CODEX_HOME": str(codex_home)})
-                result[target] = {"state": "passed" if completed.returncode == 0 else "failed",
+                passed = completed.returncode == 0
+                if target == "grok-tavily" and passed:
+                    try:
+                        output = json.loads(completed.stdout)
+                        passed = (isinstance(output, dict) and not output.get("error")
+                                  and output.get("diagnostics", {}).get("provider") == "tavily"
+                                  and bool(output.get("content", {}).get("text")))
+                    except (ValueError, TypeError, AttributeError):
+                        passed = False
+                result[target] = {"state": "passed" if passed else "failed",
                                   "exit_code": completed.returncode}
             except (ConnectionError, OSError, subprocess.TimeoutExpired):
                 result[target] = {"state": "failed", "detail": "owner 功能核验未完成"}

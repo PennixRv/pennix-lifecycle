@@ -160,3 +160,30 @@ class LocalClientTests(unittest.TestCase):
         value = json.loads((home / "hooks.json").read_text())
         self.assertEqual(value["hooks"]["SessionStart"], [{"hooks": [{"command": "other owner", "type": "command"}]}])
         self.assertEqual(hook_integrations.inspect("peon-ping", home)["state"], "current")
+
+    def test_removing_either_owner_cannot_move_foreign_positional_trust(self):
+        for key, event, native in [('aoe', 'SessionStart', 'session_start'), ('peon-ping', 'Stop', 'stop')]:
+            for owned_first in [True, False]:
+                with self.subTest(key=key, owned_first=owned_first), tempfile.TemporaryDirectory(dir=self.home) as directory:
+                    home = Path(directory)
+                    owned = hook_integrations.desired(key)[event]
+                    external = {"hooks": [{"type": "command", "command": "foreign-handler"}]}
+                    entries = [*owned, external] if owned_first else [external, *owned]
+                    doc = hook_integrations.desired(key)
+                    doc[event] = entries
+                    (home / 'hooks.json').write_text(json.dumps({'hooks': doc}))
+                    hook_integrations.apply(key, home, adopt=True)
+                    position = 1 if owned_first else 0
+                    trust = f"{home / 'hooks.json'}:{native}:{position}:0"
+                    (home / 'config.toml').write_text(f'[hooks.state.{json.dumps(trust)}]\ntrusted_hash = "sha256:{"a"*64}"\n')
+                    before = (home / 'hooks.json').read_bytes(), (home / 'config.toml').read_bytes()
+                    if owned_first:
+                        with self.assertRaisesRegex(hook_integrations.HookError, 'trusted Hook'):
+                            hook_integrations.apply(key, home, remove=True)
+                        self.assertEqual(before, ((home / 'hooks.json').read_bytes(), (home / 'config.toml').read_bytes()))
+                    else:
+                        hook_integrations.apply(key, home, remove=True)
+                        self.assertEqual(json.loads((home / 'hooks.json').read_text())['hooks'][event], [external])
+                        self.assertEqual((home / 'config.toml').read_bytes(), before[1])
+                    # Every fixture has a distinct home, but the same key's receipt is target-bound.
+                    hook_integrations._path(key).unlink(missing_ok=True)

@@ -533,18 +533,35 @@ class NativeIntegrationTests(unittest.TestCase):
         self.assertEqual(native_integrations.unconfigure("codegraph", self.codex), "changed")
         self.assertIn('command = "other"', (self.codex / "config.toml").read_text())
 
+    def test_owned_mcp_policy_is_not_mistaken_for_availability_or_repaired_away(self):
+        native_integrations.apply("codegraph", self.codex)
+        path = self.codex / "config.toml"
+        original = path.read_text()
+        for policy in ['enabled = false', 'enabled_tools = []', 'enabled_tools = ["query"]',
+                       'disabled_tools = ["codegraph_explore"]', 'disabled_tools = "invalid"']:
+            with self.subTest(policy=policy):
+                path.write_text(original.replace('[mcp_servers.codegraph]', '[mcp_servers.codegraph]\n' + policy))
+                before = path.read_bytes()
+                self.assertEqual(native_integrations.inspect("codegraph", self.codex, enabled=True)["state"], "blocked")
+                self.assertEqual(native_integrations.inspect("codegraph", self.codex, enabled=False)["state"], "owned")
+                with self.assertRaises(native_integrations.NativeIntegrationError):
+                    native_integrations.apply("codegraph", self.codex, repair=True)
+                self.assertEqual(path.read_bytes(), before)
+        path.write_text(original)
+        native_integrations.unconfigure("codegraph", self.codex)
+
     def test_codegraph_adoption_repairs_command_and_preserves_extensions(self):
         import tomllib
         path = self.codex / "config.toml"
-        path.write_text(path.read_text() + '\n[mcp_servers.codegraph]\ncommand = "/usr/bin/codegraph"\nargs = ["serve", "--mcp"]\nenabled_tools = ["query"]\n[mcp_servers.codegraph.env]\nDO_NOT_TRACK = "1"\n')
+        path.write_text(path.read_text() + '\n[mcp_servers.codegraph]\ncommand = "/usr/bin/codegraph"\nargs = ["serve", "--mcp"]\nenabled_tools = ["codegraph_explore"]\n[mcp_servers.codegraph.env]\nDO_NOT_TRACK = "1"\n')
         before = tomllib.loads(path.read_text())
         with self.assertRaises(native_integrations.NativeIntegrationError):
             native_integrations.apply("codegraph", self.codex)
         native_integrations.apply("codegraph", self.codex, adopt=True)
         server = tomllib.loads(path.read_text())["mcp_servers"]["codegraph"]
         self.assertEqual(server["command"], str(self.bin / "codegraph"))
-        self.assertEqual(server["enabled_tools"], ["query"])
-        self.assertEqual(server["env"], {"DO_NOT_TRACK": "1"})
+        self.assertEqual(server["enabled_tools"], ["codegraph_explore"])
+        self.assertEqual(server["env"], {"DO_NOT_TRACK": "1", "CODEGRAPH_MANAGED": "1"})
         native_integrations.unconfigure("codegraph", self.codex)
         self.assertEqual(tomllib.loads(path.read_text()), before)
 

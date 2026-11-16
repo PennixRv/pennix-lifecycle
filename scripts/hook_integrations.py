@@ -5,6 +5,7 @@ import copy
 import json
 from pathlib import Path
 import shlex
+import tomllib
 
 import owned_files as files
 
@@ -72,6 +73,29 @@ def inspect(key: str, home: Path, *, enabled: bool = True) -> dict:
             if current == record["hooks"] else "drifted", "owned": True}
 
 
+def preserve_foreign_trust(home: Path, before: dict, after: dict, owned) -> None:
+    raw = files.read(home / "config.toml")
+    try:
+        trust = tomllib.loads(raw.decode() if raw else "").get("hooks", {}).get("state", {})
+    except (UnicodeError, tomllib.TOMLDecodeError) as error:
+        raise HookError("无法核验原生 Hook trust；保留现场") from error
+    if not isinstance(trust, dict):
+        raise HookError("原生 Hook trust 结构无效")
+    events = {"SessionStart": "session_start", "PreToolUse": "pre_tool_use", "PostToolUse": "post_tool_use",
+              "UserPromptSubmit": "user_prompt_submit", "PreCompact": "pre_compact", "Stop": "stop",
+              "PermissionRequest": "permission_request"}
+    for event, entries in before.items():
+        for index, entry in enumerate(entries):
+            if owned(entry) or event not in events:
+                continue
+            positions = [i for i, item in enumerate(after.get(event, [])) if item == entry]
+            if positions == [index]:
+                continue
+            prefix = f"{home / 'hooks.json'}:{events[event]}:{index}:"
+            if any(key.startswith(prefix) for key in trust):
+                raise HookError("操作会移动其他 owner 的 trusted Hook；保留现场")
+
+
 def apply(key: str, home: Path, *, adopt: bool = False, remove: bool = False) -> str:
     record = _receipt(key, home)
     document, current, before = _read(key, home)
@@ -82,6 +106,7 @@ def apply(key: str, home: Path, *, adopt: bool = False, remove: bool = False) ->
     want = {} if remove else desired(key)
     if record is None and current and (not adopt or current != want):
         raise HookError("本地 Hook 需显式接管且必须匹配已核验的原生条目")
+    original_hooks = copy.deepcopy(document.get("hooks", {}))
     hooks = document.setdefault("hooks", {})
     for event in set(current) | set(want):
         remaining = iter(copy.deepcopy(want.get(event, [])))
@@ -100,6 +125,7 @@ def apply(key: str, home: Path, *, adopt: bool = False, remove: bool = False) ->
             hooks.pop(event, None)
     if not hooks:
         document.pop("hooks", None)
+    preserve_foreign_trust(home, original_hooks, hooks, lambda entry: _marked(key, entry))
     after = files.json_bytes(document) if document else None
     receipt_before = files.read(_path(key), private=True)
     receipt_after = None if remove else files.json_bytes({"schema": 1, "home": str(home), "hooks": want})

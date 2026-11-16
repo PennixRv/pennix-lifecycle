@@ -102,6 +102,31 @@ def resolve_npm(component: dict, workspace: Path, target: dict | None = None) ->
                           "impact": f"npm package {name}@{metadata['version']}"}, target)
 
 
+def resolve_codegraph(component: dict, workspace: Path, target: dict | None = None) -> dict:
+    if platform.system() != "Linux" or platform.machine() not in {"x86_64", "amd64"}:
+        raise CandidateError("CodeGraph managed bundle supports Linux x64 only")
+    main_dir, platform_dir = workspace / "main", workspace / "platform"
+    main_dir.mkdir()
+    platform_dir.mkdir()
+    primary = resolve_npm(component, main_dir, {"version": target["version"]} if target else None)
+    name = "@pennixrv/codegraph-linux-x64"
+    platform_component = {**component, "package": {**component["package"], "name": name}}
+    bundle = resolve_npm(platform_component, platform_dir, {"version": primary["version"]})
+    main = _archive_json(Path(primary["path"]), "package/package.json")
+    metadata = _archive_json(Path(bundle["path"]), "package/package.json")
+    if (main.get("name") != component["package"]["name"] or main.get("version") != primary["version"]
+            or not isinstance(main.get("optionalDependencies"), dict)
+            or main["optionalDependencies"].get(name) != primary["version"]
+            or metadata.get("name") != name or metadata.get("version") != primary["version"]
+            or metadata.get("os") != ["linux"] or metadata.get("cpu") != ["x64"]):
+        raise CandidateError("CodeGraph shim/platform package identity differs")
+    identity = {"main": primary["sha256"], "platform": bundle["sha256"], "platform_name": name}
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return _check_target({**primary, "sha256": digest, "platform_path": bundle["path"],
+                          "platform_sha256": bundle["sha256"], "main_sha256": primary["sha256"],
+                          "impact": primary["impact"] + "; exact Linux x64 platform bundle and both registry integrities"}, target)
+
+
 def resolve_pypi(component: dict, workspace: Path, target: dict | None = None) -> dict:
     name = component["package"]["name"]
     metadata = _json(f"https://pypi.org/pypi/{urllib.parse.quote(name, safe='')}/json")
@@ -263,6 +288,44 @@ def resolve_aur(component: dict, workspace: Path, target: dict | None = None) ->
     return _check_target(candidate, target)
 
 
+def freeze_aur_sources(checkout: Path) -> dict:
+    """Bind base VCS sources before confirmation; makepkg never reselects their HEAD."""
+    sources = {}
+    for line in (checkout / ".SRCINFO").read_text().splitlines():
+        if "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if key == "source" or key.startswith("source_"):
+            sources.setdefault(key, []).append(value)
+    frozen = {}
+    for key, values in sources.items():
+        frozen[key] = []
+        for value in values:
+            alias, separator, uri = value.rpartition("::")
+            if not separator:
+                uri, alias = value, ""
+            if uri.startswith("git+"):
+                url, _, fragment = uri[4:].partition("#")
+                if not url.startswith("https://"):
+                    raise CandidateError("base AUR VCS source requires HTTPS")
+                if fragment.startswith("commit=") and SHA.fullmatch(fragment[7:]):
+                    commit = fragment[7:]
+                else:
+                    if fragment and not fragment.startswith(("branch=", "tag=")):
+                        raise CandidateError("unsupported AUR VCS source selector")
+                    ref = "HEAD" if not fragment else ("refs/heads/" if fragment.startswith("branch=") else "refs/tags/") + fragment.split("=", 1)[1]
+                    result = _run(["git", "ls-remote", url, ref, ref + "^{}"])
+                    refs = dict((parts[1], parts[0]) for row in result.stdout.splitlines() if len(parts := row.split()) == 2)
+                    commit = refs.get(ref + "^{}", refs.get(ref, ""))
+                    if result.returncode or not SHA.fullmatch(commit):
+                        raise CandidateError("cannot freeze AUR VCS source")
+                uri = "git+" + url + "#commit=" + commit
+            elif uri.startswith(("git://", "hg+", "svn+", "bzr+", "fossil+")):
+                raise CandidateError("base AUR VCS source type cannot be frozen safely")
+            frozen[key].append((alias + "::" if separator else "") + uri)
+    return frozen
+
+
 def _arch_pkginfo(path: Path) -> tuple[dict, list[str]]:
     result = _run(["bsdtar", "-xOf", str(path), ".PKGINFO"])
     if result.returncode:
@@ -409,7 +472,7 @@ RESOLVERS = {
     "trellis-paseo-adapter": resolve_npm,
     "pnpm": resolve_arch,
     "context-mode": resolve_npm,
-    "codegraph-cli": resolve_npm,
+    "codegraph-cli": resolve_codegraph,
     "paseo-cli": resolve_npm,
     "ponytail-plugin": resolve_plugin,
     "cch-status": resolve_release,

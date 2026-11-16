@@ -41,6 +41,19 @@ class AuditRegressions(unittest.TestCase):
             with self.assertRaises(config_model.ConfigError):
                 config_model.load()
 
+    def test_tavily_specific_probe_never_accepts_direct_fallback_or_error(self):
+        spec = _engine.load_catalog(pennix.CATALOG)
+        command = spec['configuration_targets']['grok-tavily']['functional_command']
+        self.assertEqual(command[2:4], ['--provider', 'tavily'])
+        for provider, error, wanted in [('tavily', None, 'passed'), ('direct', None, 'failed'),
+                                         ('tavily', {'message': 'failed'}, 'failed')]:
+            response = {'diagnostics': {'provider': provider}, 'content': {'text': 'synthetic'}, 'error': error}
+            with self.subTest(provider=provider, error=error), \
+                    patch.object(connection_owners, '_command', return_value=command), \
+                    patch.object(connection_owners.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=json.dumps(response))):
+                result = connection_owners.functional_checks(spec, {'grok-tavily': {'selected': True, 'action': 'keep'}}, self.root / 'codex')
+                self.assertEqual(result['grok-tavily']['state'], wanted)
+
     def test_config_prefix_environment_cannot_change_public_syntax(self):
         with patch.dict(os.environ, {"CONFIG_": "HOSTILE_"}):
             path = config_model.init()

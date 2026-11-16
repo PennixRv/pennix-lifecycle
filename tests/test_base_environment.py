@@ -20,6 +20,7 @@ import owned_files as files
 import path_env
 import pennix
 
+install_base_packages = base._install_packages
 
 class BaseEnvironmentTests(unittest.TestCase):
     def setUp(self):
@@ -97,6 +98,18 @@ class BaseEnvironmentTests(unittest.TestCase):
         with self.assertRaises(base.BaseError):base.uninstall()
         self.assertEqual(target.read_text(),'user changed\n')
 
+    def test_malformed_aur_receipt_is_rejected_without_type_error(self):
+        base.apply(self.kconf, self.catalog)
+        record = base.receipt()
+        valid = {'ref': 'a' * 40, 'recipe_sha256': 'b' * 64, 'sources': {},
+                 'version': '1', 'sha256': 'c' * 64}
+        for key in ('ref', 'recipe_sha256', 'sha256'):
+            with self.subTest(key=key):
+                record['packages'] = {'synthetic': {**valid, key: 12}}
+                base._save(record)
+                with self.assertRaisesRegex(base.BaseError, 'AUR'):
+                    base.receipt()
+
     def test_failed_file_write_keeps_receipt_and_converges_without_reowning(self):
         original = files.replace
         def fail(path,*args,**kwargs):
@@ -113,6 +126,69 @@ class BaseEnvironmentTests(unittest.TestCase):
         (self.home/'.p10k.zsh').symlink_to(target)
         self.assertEqual(base.inspect(self.kconf)['state'],'blocked')
         self.assertEqual(target.read_text(),'keep')
+
+    def test_partial_uninstall_resumes_without_treating_restored_files_as_drift(self):
+        (self.home / '.bashrc').write_bytes(b'# original user data\n')
+        base.apply(self.kconf, self.catalog)
+        replace = files.replace
+        count = 0
+        def fail(path, *args, **kwargs):
+            nonlocal count
+            if str(path) in base.receipt()['files']:
+                count += 1
+                if count == 2:
+                    raise OSError('second restore interrupted')
+            return replace(path, *args, **kwargs)
+        with patch.object(files, 'replace', side_effect=fail), \
+                patch.object(base.subprocess, 'run', return_value=SimpleNamespace(returncode=1, stdout='')):
+            with self.assertRaisesRegex(OSError, 'interrupted'):
+                base.uninstall()
+        record = base.receipt()
+        self.assertEqual(set(record['uninstall']['files'].values()), {'started', 'verified'})
+        with self.assertRaisesRegex(base.BaseError, '撤回尚未完成'):
+            base.apply(self.kconf, self.catalog)
+        restored = next(path for path, state in record['uninstall']['files'].items() if state == 'verified')
+        original = files.read(Path(restored))
+        Path(restored).parent.mkdir(parents=True, exist_ok=True)
+        Path(restored).write_bytes(b'new external edit')
+        with self.assertRaisesRegex(base.BaseError, '用户修改'):
+            base.uninstall()
+        files.replace(Path(restored), original, b'new external edit')
+        with patch.object(base.subprocess, 'run', return_value=SimpleNamespace(returncode=1, stdout='')):
+            base.uninstall()
+        self.assertIsNone(base.receipt())
+        self.assertEqual((self.home / '.bashrc').read_bytes(), b'# original user data\n')
+
+    def test_fixed_base_vcs_build_binds_recipe_source_and_native_artifact(self):
+        base.apply(self.kconf, self.catalog)
+        tree = self.home / 'aur-tree';tree.mkdir()
+        recipe = 'pkgname=oh-my-zsh-git\nsource=(git+https://example.test/zsh.git)\n'
+        (tree / 'PKGBUILD').write_text(recipe)
+        (tree / '.SRCINFO').write_text('pkgver = 1\npkgrel = 1\npkgname = oh-my-zsh-git\n')
+        artifact = tree / 'oh-my-zsh-git-2-1-any.pkg.tar.zst';artifact.write_bytes(b'fixed synthetic package')
+        target = {'source': 'aur:oh-my-zsh-git', 'version': '1-1', 'ref': 'a'*40,
+                  'recipe_sha256': base.candidates._digest(tree / 'PKGBUILD'),
+                  'srcinfo_sha256': base.candidates._digest(tree / '.SRCINFO'),
+                  'sources': {'source': ['git+https://example.test/zsh.git#commit=' + 'b'*40]}, 'recipe': recipe}
+        plan = {'official': [], 'aur': ['oh-my-zsh-git'], 'versions': {'oh-my-zsh-git': '1-1'}, 'aur_candidates': {'oh-my-zsh-git': target}}
+        commands = []
+        def run(command, **kwargs):
+            commands.append(command)
+            if command[0] == 'makepkg' and '--printsrcinfo' not in command:
+                self.assertIn('--holdver', command)
+                self.assertIn('#commit=' + 'b'*40, (tree / 'PKGBUILD').read_text())
+                self.assertEqual(kwargs['environment']['PKGDEST'], str(tree))
+                return ''
+            if command == ['makepkg', '--printsrcinfo']:
+                return 'pkgver = 2\npkgrel = 1\n'
+            return 'oh-my-zsh-git 2-1'
+        with patch.object(base.candidates, 'resolve_aur', return_value={'path': str(tree)}) as resolve, patch.object(base, '_run', side_effect=run):
+            install_base_packages(plan, self.catalog, base.receipt())
+            self.assertEqual(resolve.call_args.args[2], target)
+        record = base.receipt()['packages']['oh-my-zsh-git']
+        self.assertEqual(record['version'], '2-1')
+        self.assertEqual(record['sha256'], hashlib.sha256(artifact.read_bytes()).hexdigest())
+        self.assertFalse(any(cmd[0] == 'yay' for cmd in commands))
 
     def test_no_tty_shell_is_quiet_and_path_preserves_project_and_deduplicates(self):
         base.apply(self.kconf,self.catalog)

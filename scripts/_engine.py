@@ -165,11 +165,15 @@ def _version(component: dict[str, Any], command: str, *, legacy: bool = False) -
     if component.get("package", {}).get("identity_only"):
         return package_identity(component)["version"]
     try:
+        if component.get("package", {}).get("name") == "@pennixrv/codegraph":
+            root = _prefix(component) / "lib/node_modules/@pennixrv/codegraph"
+            _codegraph_platform(root, json.loads((root / "package.json").read_text())["version"])
+        environment = {**os.environ, "CODEGRAPH_MANAGED": "1"} if component.get("package", {}).get("name") == "@pennixrv/codegraph" else None
         result = subprocess.run(
             [command, *[str(item) for item in component.get("version_args", [])]],
-            capture_output=True, text=True, timeout=10, check=False,
+            capture_output=True, text=True, timeout=10, check=False, env=environment,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, BootstrapError, ValueError, KeyError):
         return None
     if result.returncode:
         return None
@@ -715,6 +719,8 @@ def package_identity(component: dict[str, Any]) -> dict[str, str]:
                 raise ValueError("npm package identity differs")
         except (OSError, ValueError, KeyError, TypeError) as error:
             raise BootstrapError(f"cannot verify npm package owner: {package['name']}") from error
+        if package["name"] == "@pennixrv/codegraph":
+            _codegraph_platform(root, actual)
         return {"manager": "npm", "name": metadata["name"], "version": actual, "command": str(Path(command).resolve())}
     result = subprocess.run(["pacman", "-Q", package["name"]], capture_output=True, text=True, timeout=30, check=False)
     parts = result.stdout.strip().split()
@@ -795,7 +801,12 @@ def package_owned(
         return False
     if _command(component) is None and not component.get("package", {}).get("identity_only"):
         return False
-    identity = package_identity(component)
+    try:
+        identity = package_identity(component)
+    except BootstrapError:
+        if component.get("package", {}).get("name") == "@pennixrv/codegraph":
+            return False
+        raise
     if observed is None:
         observed = probe_component(component, codex_home)[1]
     if observed is not None and receipt["version"] == observed:
@@ -854,18 +865,44 @@ def _write_package_receipt(component_id: str, component: dict[str, Any], observe
     owned_files.replace(path, content, before)
 
 
-def recover_npm_receipt(component_id: str, component: dict[str, Any], old: dict, archive: Path) -> None:
-    """Recover a recorded npm upgrade only after verifying the fixed archive on disk."""
-    receipt = _package_receipt(component_id, component)
-    if (component.get("package", {}).get("source") != "npm" or receipt is None
-            or old.get("source") != component.get("lock_source")
-            or receipt["version"] != old.get("version")):
-        raise BootstrapError("npm recovery requires the trusted previous lock and receipt")
-    identity = package_identity(component)
-    expected = _target_version(component)
-    if identity["version"] != expected or probe_component(component)[0] != "match":
-        raise BootstrapError("npm recovery installed identity differs from the recorded target")
-    root = _prefix(component) / "lib/node_modules" / component["package"]["name"]
+def _codegraph_platform(root: Path, version: str) -> Path:
+    name = "@pennixrv/codegraph-linux-x64"
+    # Match Node resolution: package-local dependencies precede global siblings.
+    options = [root / "node_modules" / name, root.parent.parent / name]
+    bundle = next((path for path in options if path.exists() or path.is_symlink()), None)
+    try:
+        if bundle is None or bundle.is_symlink() or bundle.resolve() != bundle.absolute():
+            raise ValueError("missing or redirected platform package")
+        meta = json.loads((bundle / "package.json").read_text())
+        if meta.get("name") != name or meta.get("version") != version or meta.get("os") != ["linux"] or meta.get("cpu") != ["x64"]:
+            raise ValueError("wrong platform identity")
+        for file in [bundle / "bin/codegraph", bundle / "node", bundle / "lib/dist/bin/codegraph.js"]:
+            if not file.is_file() or file.is_symlink() or file.resolve() != file.absolute() or not os.access(file, os.X_OK) and file.name != "codegraph.js":
+                raise ValueError("missing or unsafe platform runtime")
+    except (OSError, ValueError, TypeError) as error:
+        raise BootstrapError("CodeGraph managed platform package is missing, redirected or has the wrong identity; repair through Lifecycle") from error
+    return bundle
+
+
+def codegraph_main_owned(component_id: str, component: dict) -> bool:
+    if component.get("package", {}).get("name") != "@pennixrv/codegraph":
+        return False
+    record = _package_receipt(component_id, component)
+    root = _prefix(component) / "lib/node_modules/@pennixrv/codegraph"
+    try:
+        metadata = json.loads((root / "package.json").read_text())
+        command = _command(component)
+        return bool(record and metadata.get("name") == record["name"]
+                    and metadata.get("version") == record["version"] == _target_version(component)
+                    and metadata.get("bin", {}).get("codegraph") == "npm-shim.js"
+                    and command and Path(command).resolve(strict=True) == root / "npm-shim.js"
+                    and root.resolve() == root.absolute() and not (root / "npm-shim.js").is_symlink())
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def verify_npm_archive(root: Path, archive: Path) -> None:
+    """Compare executable package contents with the already verified registry artifact."""
     seen = set()
     with tarfile.open(archive, "r:gz") as bundle:
         for member in bundle:
@@ -886,6 +923,25 @@ def recover_npm_receipt(component_id: str, component: dict[str, Any], old: dict,
                     raise BootstrapError("npm recovery installed files differ from the fixed archive")
     if "package/package.json" not in seen:
         raise BootstrapError("npm recovery archive has no package identity")
+
+
+def recover_npm_receipt(component_id: str, component: dict[str, Any], old: dict, archive: Path, *, platform_archive: Path | None = None) -> None:
+    """Recover a recorded npm upgrade only after verifying the fixed archive on disk."""
+    receipt = _package_receipt(component_id, component)
+    if (component.get("package", {}).get("source") != "npm" or receipt is None
+            or old.get("source") != component.get("lock_source")
+            or receipt["version"] != old.get("version")):
+        raise BootstrapError("npm recovery requires the trusted previous lock and receipt")
+    identity = package_identity(component)
+    expected = _target_version(component)
+    if identity["version"] != expected or probe_component(component)[0] != "match":
+        raise BootstrapError("npm recovery installed identity differs from the recorded target")
+    root = _prefix(component) / "lib/node_modules" / component["package"]["name"]
+    verify_npm_archive(root, archive)
+    if component["package"]["name"] == "@pennixrv/codegraph":
+        if platform_archive is None:
+            raise BootstrapError("CodeGraph recovery requires the fixed platform archive")
+        verify_npm_archive(_codegraph_platform(root, expected), platform_archive)
     _write_package_receipt(component_id, component, expected)
 
 
@@ -1041,8 +1097,11 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
     current_host = host.detect_host()
     if not current_host["supported"]:
         raise BootstrapError(str(current_host["reason"]))
+    repair_bundle = bool(getattr(args, "repair", False) and candidate and codegraph_main_owned(key, component))
+    if repair_bundle:
+        verify_npm_archive(_prefix(component) / "lib/node_modules/@pennixrv/codegraph", Path(candidate["path"]))
     state, observed = probe_component(component, codex_home)
-    owned = package_owned(key, component, observed, codex_home)
+    owned = repair_bundle or package_owned(key, component, observed, codex_home)
     if operation == "uninstall":
         if state == "missing":
             receipt = _package_receipt(key, component)
@@ -1068,7 +1127,8 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
             raise BootstrapError("official dependency resolution requires the confirmed full system upgrade")
     _ensure_npm_prefix(metadata)
     if state != "missing":
-        package_identity(component)
+        if not repair_bundle:
+            package_identity(component)
         if not owned:
             kconf = getattr(args, "kconf", None)
             adopted = bool(kconf and kconf.syms.get("PENNIX_ADOPT_EXISTING_PACKAGES")
@@ -1145,7 +1205,23 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
                            host.package_install_command(installer, install_name, metadata.get("registry"),
                                                         metadata.get("prefix"), metadata.get("allow_scripts"),
                                                         metadata.get("extras"), metadata.get("with")))
+        if metadata.get("name") == "@pennixrv/codegraph":
+            if not candidate or not candidate.get("platform_path"):
+                raise BootstrapError("CodeGraph requires the verified main and platform candidate")
+            install_command = [arg for arg in install_command if arg != "--include=optional"]
+            install_command += ["--omit=optional"]
         result = subprocess.run(install_command, check=False)
+        if result.returncode == 0 and metadata.get("name") == "@pennixrv/codegraph":
+            root = _prefix(component) / "lib/node_modules" / metadata["name"]
+            # Keep the verified bundle under its owning main package, so npm uninstall
+            # also removes it and never claims an unrelated global platform package.
+            result = subprocess.run(["npm", "install", "--prefix", str(root), "--ignore-scripts",
+                "--no-save", "--package-lock=false", "--include=optional", candidate["platform_path"]], check=False)
+            if result.returncode:
+                raise BootstrapError("fixed CodeGraph platform installation failed; preserve the transaction")
+            bundle = _codegraph_platform(root, expected)
+            verify_npm_archive(root, Path(candidate["path"]))
+            verify_npm_archive(bundle, Path(candidate["platform_path"]))
     if result.returncode:
         raise BootstrapError(f"package install failed: {key}")
     new_state, _ = probe_component(component, codex_home)

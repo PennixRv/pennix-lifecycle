@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import stat
+import shlex
 import subprocess
 import tempfile
 from pathlib import Path
@@ -49,11 +51,25 @@ def _record() -> dict[str, str] | None:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RelayError("relay 归属记录无效") from error
-    if not isinstance(value, dict) or value.get("schema") != 1 or not isinstance(value.get("server_id"), str):
+    if not isinstance(value, dict) or value.get("schema") not in {1, 2} or not isinstance(value.get("server_id"), str):
         raise RelayError("relay 归属记录版本不受支持")
     if not SERVER_ID.fullmatch(value["server_id"]):
         raise RelayError("relay 归属记录身份无效")
-    return {"server_id": value["server_id"]}
+    if value["schema"] == 1:
+        if set(value) != {"schema", "server_id"}:
+            raise RelayError("旧 relay 归属记录字段无效")
+        return value
+    if set(value) != {"schema", "server_id", "target", "adopted_current"} or type(value["adopted_current"]) is not bool:
+        raise RelayError("relay 归属记录字段无效")
+    _validate_target(value["target"])
+    return value
+
+
+def _validate_target(target):
+    if (not isinstance(target, dict) or set(target) != {"nas_id", "router_id", "uid", "resource"}
+            or any(not isinstance(target[k], str) or not re.fullmatch(r"[0-9a-f]{64}", target[k]) for k in ["nas_id", "router_id"])
+            or target["uid"] != "0" or target["resource"] != MAP_PATH):
+        raise RelayError("relay 实际远端身份或资源无效")
 
 
 def local_owned() -> bool:
@@ -109,14 +125,15 @@ def unconfigure_daemon(paseo: Path, paseo_home: Path) -> str:
     return "changed local relay configuration"
 
 
-def _write_record(server_id: str) -> None:
+def _write_record(server_id: str, target: dict, *, adopted=False) -> None:
+    _validate_target(target)
     path = _state_path()
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(name)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump({"schema": 1, "server_id": server_id}, handle)
+            json.dump({"schema": 2, "server_id": server_id, "target": target, "adopted_current": adopted}, handle)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -131,20 +148,44 @@ def _ssh(
     server_id: str,
     nas_ssh: str = "nas",
     router_ssh: str = "home-main-router",
-) -> str:
+    *, expected: dict | None = None,
+) -> str | dict:
     if not SERVER_ID.fullmatch(server_id):
         raise RelayError("server-id 格式不受支持")
     if not SSH_ALIAS.fullmatch(nas_ssh) or not SSH_ALIAS.fullmatch(router_ssh):
         raise RelayError("SSH 目标别名格式不受支持")
+    if expected is not None:
+        _validate_target(expected)
     script = r'''#!/bin/sh
 set -eu
 action=$1
 server_id=$2
+expected_router=$3
 map=/etc/nginx/conf.d/snippets/paseo-relay-allowed-servers.map
+if [ -r /etc/ssh/ssh_host_ed25519_key.pub ]; then
+  public=$(awk 'NR == 1 { print $1 " " $2 }' /etc/ssh/ssh_host_ed25519_key.pub)
+elif command -v dropbearkey >/dev/null 2>&1 && [ -r /etc/dropbear/dropbear_ed25519_host_key ]; then
+  public=$(dropbearkey -y -f /etc/dropbear/dropbear_ed25519_host_key | awk '$1 == "ssh-ed25519" { print $1 " " $2 }')
+else
+  echo no-host-identity >&2; exit 49
+fi
+test -n "$public" || exit 49
+router_id=$(printf '%s' "$public" | sha256sum | cut -d ' ' -f 1)
+uid=$(id -u)
+test "$uid" = 0 || exit 49
+[ "$expected_router" = - ] || test "$expected_router" = "$router_id" || exit 49
+printf 'router:%s:%s\n' "$router_id" "$uid"
+if [ "$action" = identity ]; then echo identity; exit 0; fi
 escaped=$(printf '%s' "$server_id" | sed 's/\./\\./g')
 plain_line="$server_id 1;"
 regex_line="~^${escaped}$ 1;"
-test -f "$map" || { echo missing; exit 43; }
+lock="$map.pennix-lock"
+if ! mkdir "$lock" 2>/dev/null; then
+  echo busy >&2
+  exit 47
+fi
+trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+test -f "$map" && test ! -L "$map" || { echo missing; exit 43; }
 plain_count=$(grep -F -x -- "$plain_line" "$map" | wc -l)
 regex_count=$(grep -F -x -- "$regex_line" "$map" | wc -l)
 count=$((plain_count + regex_count))
@@ -152,11 +193,6 @@ test "$count" -le 1 || { echo duplicate; exit 44; }
 if [ "$action" = inspect ]; then
   [ "$count" -eq 1 ] && echo present || echo absent
   exit 0
-fi
-lock="$map.pennix-lock"
-if ! mkdir "$lock" 2>/dev/null; then
-  echo busy >&2
-  exit 47
 fi
 tmp=$(mktemp "$map.pennix-tmp.XXXXXX")
 backup=$(mktemp "$map.pennix-backup.XXXXXX")
@@ -184,19 +220,37 @@ if ! nginx -t >/dev/null 2>&1 || ! nginx -s reload >/dev/null 2>&1; then
 fi
 [ "$action" = add ] && echo added || echo removed
 '''
+    remote = 'set -eu; test -r /etc/machine-id; nas_id=$(sha256sum /etc/machine-id | cut -d " " -f 1); '
+    if expected is not None:
+        remote += 'test "$nas_id" = ' + shlex.quote(expected["nas_id"]) + '; '
+    remote += 'printf "nas:%s\\n" "$nas_id"; exec ' + shlex.join([
+        "ssh", "-o", "BatchMode=yes", router_ssh, "sh", "-s", "--", action, server_id,
+        expected["router_id"] if expected else "-"])
     result = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", nas_ssh, "ssh", "-o", "BatchMode=yes", router_ssh, "sh", "-s", "--", action, server_id],
+        ["ssh", "-o", "BatchMode=yes", nas_ssh, remote],
         input=script,
         text=True,
         capture_output=True,
         check=False,
         timeout=60,
     )
-    output = result.stdout.strip()
+    lines = result.stdout.strip().splitlines()
+    output = lines[-1] if lines else ""
     if result.returncode:
         if output == "duplicate":
             raise RelayError("远端 relay 登记包含重复身份")
         raise RelayError("远端 NAS/router relay owner 不可用")
+    if len(lines) != 3 or not lines[0].startswith("nas:") or not lines[1].startswith("router:"):
+        raise RelayError("远端 relay 身份回执无效")
+    router = lines[1].split(":")
+    if len(router) != 3:
+        raise RelayError("远端 router 身份回执无效")
+    target = {"nas_id": lines[0][4:], "router_id": router[1], "uid": router[2], "resource": MAP_PATH}
+    _validate_target(target)
+    if expected is not None and target != expected:
+        raise RelayError("relay 实际远端发生变化；未接受替代目标")
+    if action == "identity" and output == "identity":
+        return target
     if output not in {"present", "absent", "added", "removed"}:
         raise RelayError("远端 relay owner 回执无效")
     return output
@@ -208,7 +262,31 @@ def inspect(
     nas_ssh: str = "nas",
     router_ssh: str = "home-main-router",
 ) -> str:
-    return _ssh("inspect", _server_id(paseo_home), nas_ssh, router_ssh)
+    record = _record()
+    if record and record["schema"] == 1:
+        return "adoption-required"
+    server_id = _server_id(paseo_home)
+    if record and record["server_id"] != server_id:
+        raise RelayError("relay 归属身份与当前 Paseo home 不匹配")
+    return _ssh("inspect", server_id, nas_ssh, router_ssh, expected=record["target"] if record else None)
+
+
+def review(paseo_home: Path, *, nas_ssh="nas", router_ssh="home-main-router") -> dict:
+    server_id = _server_id(paseo_home)
+    target = _ssh("identity", server_id, nas_ssh, router_ssh)
+    state = _ssh("inspect", server_id, nas_ssh, router_ssh, expected=target)
+    value = {"server_id": server_id, "target": target, "state": state}
+    return {**value, "review_sha256": hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()}
+
+
+def adopt_current(paseo_home: Path, expected_sha256: str, *, nas_ssh="nas", router_ssh="home-main-router") -> str:
+    record = _record()
+    value = review(paseo_home, nas_ssh=nas_ssh, router_ssh=router_ssh)
+    if (not record or record["schema"] != 1 or record["server_id"] != value["server_id"]
+            or value["state"] != "present" or value["review_sha256"] != expected_sha256):
+        raise RelayError("当前 relay 登记审阅不匹配；未迁移旧归属")
+    _write_record(value["server_id"], value["target"], adopted=True)
+    return "adopted reviewed current registration; historical remote remains unproven"
 
 
 def ensure(
@@ -218,19 +296,23 @@ def ensure(
     router_ssh: str = "home-main-router",
 ) -> str:
     server_id = _server_id(paseo_home)
-    result = _ssh("add", server_id, nas_ssh, router_ssh)
+    record = _record()
+    if record and (record["schema"] != 2 or record["server_id"] != server_id):
+        raise RelayError("relay 既有归属不匹配或未绑定远端；先审阅修复")
+    target = record["target"] if record else _ssh("identity", server_id, nas_ssh, router_ssh)
+    result = _ssh("add", server_id, nas_ssh, router_ssh, expected=target)
     if result == "added":
         try:
-            _write_record(server_id)
+            _write_record(server_id, target)
         except BaseException as error:
             try:
-                _ssh("remove", server_id, nas_ssh, router_ssh)
+                _ssh("remove", server_id, nas_ssh, router_ssh, expected=target)
             except RelayError as rollback:
                 raise RelayError("relay 已登记但本地归属记录写入失败，且撤回也失败") from rollback
             raise RelayError("relay 登记成功但本地归属记录写入失败，已撤回远端登记") from error
         return "owned"
     if result == "present":
-        return "external"
+        return "owned" if record else "external"
     raise RelayError("relay 登记未达到预期状态")
 
 
@@ -243,10 +325,12 @@ def remove(
     record = _record()
     if record is None:
         return "preserved"
+    if record["schema"] != 2:
+        raise RelayError("旧 relay receipt 不证明原远端；拒绝撤回，先审阅当前目标")
     server_id = _server_id(paseo_home)
     if record["server_id"] != server_id:
         raise RelayError("relay 归属身份与当前 Paseo home 不匹配")
-    result = _ssh("remove", server_id, nas_ssh, router_ssh)
+    result = _ssh("remove", server_id, nas_ssh, router_ssh, expected=record["target"])
     if result in {"removed", "absent"}:
         _state_path().unlink(missing_ok=True)
         return "changed" if result == "removed" else "no-op"
@@ -292,6 +376,9 @@ def inspect_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoint
         "daemon.relay.publicUseTls": public_tls,
     }
     if values == expected:
+        live = _live_relay(paseo, paseo_home)
+        if live is not None and live != expected:
+            return "configuration-required"
         return "current"
     _, receipt = _daemon_receipt(paseo_home)
     if receipt and values == receipt["desired"]:
@@ -303,6 +390,24 @@ def inspect_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoint
     if any(value is not _MISSING for value in values.values()):
         raise RelayError("本地 relay 配置缺少当前归属证据；未修改外部配置")
     return "missing" if all(value is _MISSING for value in values.values()) else "drifted"
+
+
+def _live_relay(paseo: Path, home: Path) -> dict | None:
+    result = subprocess.run([str(paseo), "daemon", "status", "--home", str(home), "--json"],
+                            capture_output=True, text=True, check=False, timeout=30)
+    try:
+        value = json.loads(result.stdout)
+        if result.returncode or not isinstance(value, dict) or value.get("home") != str(home) or "pid" not in value:
+            raise ValueError()
+        if value["pid"] is None:
+            return None
+        if (type(value["pid"]) is not int or value["pid"] <= 0 or value.get("localDaemon") != "running"
+                or value.get("connectedDaemon") != "reachable" or not isinstance(value.get("relay"), dict)):
+            raise ValueError()
+        relay = value["relay"]
+        return {"daemon.relay." + key: relay[key] for key in ["enabled", "endpoint", "publicEndpoint", "useTls", "publicUseTls"]}
+    except (ValueError, KeyError, TypeError) as error:
+        raise RelayError("Paseo relay 实际运行态无法核验；保留现场") from error
 
 
 def configure_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoint: str, tls: bool, public_tls: bool) -> str:
@@ -338,8 +443,15 @@ def configure_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoi
     before_receipt = owned_files.read(receipt_path, private=True)
     if receipt and baseline != receipt["desired"]:
         raise RelayError("本地 relay 配置与受管记录不符")
+    live_before = _live_relay(paseo, paseo_home)
+    if live_before is not None:
+        import paseo_service
+        paseo_service.assert_no_active_work(paseo, paseo_home)
+    restart_attempted = False
     try:
         set_value("daemon.relay.enabled", "false", False)
+        if live_before is not None and _live_relay(paseo, paseo_home)["daemon.relay.enabled"] is not False:
+            raise RelayError("Paseo relay 未实际禁用；未继续改 endpoint")
         set_value("daemon.relay.endpoint", endpoint, True)
         set_value("daemon.relay.publicEndpoint", public_endpoint, True)
         set_value("daemon.relay.useTls", "true" if tls else "false", False)
@@ -355,10 +467,17 @@ def configure_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoi
             observed = _daemon_values(paseo, paseo_home)[path]
             if observed is _MISSING or observed != value:
                 raise RelayError(f"Paseo relay 配置回读不一致: {path}")
+        if live_before is not None and _live_relay(paseo, paseo_home) != expected:
+            restart_attempted = True
+            restart_daemon(paseo, paseo_home)
+            if _live_relay(paseo, paseo_home) != expected:
+                raise RelayError("Paseo relay 准备配置在重启后未实际生效")
         set_value("daemon.relay.enabled", "true", False)
         if _daemon_values(paseo, paseo_home)["daemon.relay.enabled"] is not True:
             raise RelayError("Paseo relay enabled 配置回读不一致")
         desired = {**expected, "daemon.relay.enabled": True}
+        if live_before is not None and _live_relay(paseo, paseo_home) != desired:
+            raise RelayError("Paseo relay 启用后的实际运行态不符")
         record = {"schema": 1, "home": str(paseo_home), "desired": desired,
                   "before": receipt["before"] if receipt else {
                       key: {"present": value is not _MISSING, "value": None if value is _MISSING else value}
@@ -366,8 +485,14 @@ def configure_daemon(paseo: Path, paseo_home: Path, endpoint: str, public_endpoi
         owned_files.replace(receipt_path, owned_files.json_bytes(record), before_receipt)
     except BaseException as error:
         try:
-            for path in reversed(paths):
+            set_value("daemon.relay.enabled", "false", False)
+            for path in reversed(paths[1:]):
                 restore_value(path, baseline[path])
+            if restart_attempted:
+                restart_daemon(paseo, paseo_home)
+            restore_value(paths[0], baseline[paths[0]])
+            if live_before is not None and _live_relay(paseo, paseo_home) != live_before:
+                raise RelayError("Paseo relay 原运行态未恢复")
         except BaseException as rollback:
             raise RelayError("Paseo relay 配置失败且恢复失败") from rollback
         raise RelayError("Paseo relay 配置失败，已恢复原配置") from error

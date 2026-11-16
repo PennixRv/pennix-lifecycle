@@ -33,6 +33,54 @@ def _receipt_path() -> Path:
     return owned_files.state_root() / "release.json"
 
 
+def _switch_path() -> Path:
+    return owned_files.state_root() / "release-switch.json"
+
+
+def _recover_switch(version: str, source_digest: str, releases: Path, entry: Path) -> None:
+    pending = owned_files.read_json(_switch_path())
+    if pending is None:
+        return
+    fields = {"schema", "version", "source_digest", "before", "after", "previous_link"}
+    if (not isinstance(pending, dict) or set(pending) != fields or pending["schema"] != 1
+            or pending["version"] != version or pending["source_digest"] != source_digest):
+        raise ReleaseError("发行切换未完成；须用同一固定新发行 bootstrap 续接")
+    after = pending["after"]
+    before = pending["before"]
+    if not isinstance(after, dict) or _receipt(owned_files.json_bytes(after)) != after:
+        raise ReleaseError("发行切换目标归属记录无效")
+    if before is not None:
+        _receipt(owned_files.json_bytes(before))
+    target = releases / version
+    if (after["path"] != str(target) or after["version"] != version
+            or _runtime_digest(target) != source_digest or _installed_digest(target) != after["digest"]):
+        raise ReleaseError("发行切换目标内容漂移；保留现场")
+    previous = pending["previous_link"]
+    if previous is not None:
+        if not isinstance(previous, str):
+            raise ReleaseError("发行切换前入口无效")
+        old = (entry.parent / previous).resolve()
+        if old.parent.parent != releases or old.name != "pennix":
+            raise ReleaseError("发行切换前入口越界")
+        if before is not None and (before["path"] != str(old.parent) or _installed_digest(old.parent) != before["digest"]):
+            raise ReleaseError("发行切换前内容漂移")
+    if entry.is_symlink():
+        if entry.resolve(strict=True) != target / "pennix" and str(entry.readlink()) != previous:
+            raise ReleaseError("发行切换入口被其他 writer 修改")
+    elif entry.exists() or previous is not None:
+        raise ReleaseError("发行切换入口不匹配")
+    raw = owned_files.read(_receipt_path(), private=True)
+    if _receipt(raw) not in [before, after]:
+        raise ReleaseError("发行切换归属记录被其他 writer 修改")
+    link = entry.parent / f".pennix.{os.getpid()}.recover"
+    if link.exists() or link.is_symlink():
+        raise ReleaseError("发行恢复暂存入口已存在")
+    link.symlink_to(target / "pennix")
+    os.replace(link, entry)
+    owned_files.replace(_receipt_path(), owned_files.json_bytes(after), raw)
+    owned_files.replace(_switch_path(), None, owned_files.read(_switch_path(), private=True))
+
+
 def _receipt(raw: bytes | None) -> dict | None:
     if raw is None:
         return None
@@ -137,6 +185,7 @@ def _install(source: Path) -> str:
     if entry.parent.stat().st_uid != os.getuid():
         raise ReleaseError("入口目录不属于当前用户")
 
+    _recover_switch(version, source_digest, releases, entry)
     current = _active_target(entry, releases)
     current_digest = _installed_digest(current) if current else None
     receipt_path = _receipt_path()
@@ -209,13 +258,17 @@ def _install(source: Path) -> str:
     link = entry.parent / f".pennix.{os.getpid()}.tmp"
     link.symlink_to(target / "pennix")
     previous = entry.readlink() if entry.is_symlink() else None
+    record = owned_files.json_bytes({
+        "schema": 1, "version": version, "path": str(target), "digest": installed_digest,
+    })
+    switch = owned_files.json_bytes({"schema": 1, "version": version, "source_digest": source_digest,
+        "before": _receipt(previous_receipt), "after": json.loads(record),
+        "previous_link": str(previous) if previous is not None else None})
+    owned_files.replace(_switch_path(), switch, None)
     try:
         os.replace(link, entry)
         if entry.resolve(strict=True) != target / "pennix":
             raise ReleaseError("入口切换核验失败")
-        record = owned_files.json_bytes({
-            "schema": 1, "version": version, "path": str(target), "digest": installed_digest,
-        })
         owned_files.replace(receipt_path, record, previous_receipt)
     except BaseException:
         link.unlink(missing_ok=True)
@@ -230,10 +283,12 @@ def _install(source: Path) -> str:
                 owned_files.replace(receipt_path, previous_receipt, owned_files.read(receipt_path, private=True))
             except (OSError, owned_files.OwnershipError) as error:
                 raise ReleaseError("入口已恢复，但归属记录恢复失败；保留现场核验") from error
+        owned_files.replace(_switch_path(), None, switch)
         if current and current != target:
             raise ReleaseError("入口切换失败；原发行版已恢复")
         raise
 
+    owned_files.replace(_switch_path(), None, switch)
     if current and current != target:
         inactive[current] = current_digest
     for item, expected in inactive.items():

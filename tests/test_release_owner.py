@@ -5,6 +5,7 @@ import unittest
 import hashlib
 import tarfile
 import subprocess
+import signal
 from unittest.mock import patch
 
 import sys
@@ -101,6 +102,49 @@ class ReleaseOwnerTests(unittest.TestCase):
         with self.assertRaises(release_owner.ReleaseError):
             release_owner.install(second)
         self.assertEqual((self.home / ".local/bin/pennix").resolve().parent, current)
+
+    @unittest.skipUnless(hasattr(os, 'fork'), 'SIGKILL recovery targets POSIX')
+    def test_sigkill_around_link_and_receipt_switch_recovers_with_fixed_new_release(self):
+        for boundary in ['before-link', 'after-link', 'before-receipt', 'after-receipt']:
+            with self.subTest(boundary=boundary):
+                first = make_release(self.home / ('old-' + boundary), '1.0.0')
+                second = make_release(self.home / ('new-' + boundary), '1.0.1')
+                release_owner.install(first)
+                releases, entry = release_owner._locations()
+                replace = os.replace
+                owned_replace = release_owner.owned_files.replace
+
+                def switch(src, dst, *args, **kwargs):
+                    if Path(dst) == entry and boundary == 'before-link':
+                        os.kill(os.getpid(), signal.SIGKILL)
+                    result = replace(src, dst, *args, **kwargs)
+                    if Path(dst) == entry and boundary == 'after-link':
+                        os.kill(os.getpid(), signal.SIGKILL)
+                    return result
+
+                def write(path, content, *args, **kwargs):
+                    if path == release_owner._receipt_path() and boundary == 'before-receipt':
+                        os.kill(os.getpid(), signal.SIGKILL)
+                    result = owned_replace(path, content, *args, **kwargs)
+                    if path == release_owner._receipt_path() and boundary == 'after-receipt':
+                        os.kill(os.getpid(), signal.SIGKILL)
+                    return result
+
+                pid = os.fork()
+                if pid == 0:
+                    with patch.object(os, 'replace', side_effect=switch), patch.object(release_owner.owned_files, 'replace', side_effect=write):
+                        release_owner.install(second)
+                    os._exit(99)
+                _, status = os.waitpid(pid, 0)
+                self.assertTrue(os.WIFSIGNALED(status))
+                self.assertEqual(os.WTERMSIG(status), signal.SIGKILL)
+                self.assertTrue(release_owner._switch_path().exists())
+                with self.assertRaisesRegex(release_owner.ReleaseError, '固定新发行'):
+                    release_owner.install(first)
+                self.assertEqual(release_owner.install(second), 'current 1.0.1')
+                self.assertEqual(release_owner._active_target(entry, releases), releases / '1.0.1')
+                self.assertFalse(release_owner._switch_path().exists())
+                self.assertEqual(release_owner.uninstall(), 'uninstalled')
 
     def test_inactive_complete_releases_are_cleaned_after_switch(self):
         release_owner.install(make_release(self.home / "source-1", "1.0.0"))

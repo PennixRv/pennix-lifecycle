@@ -114,7 +114,7 @@ def desired(key, home):
     if key == "codegraph":
         require(shutil.which("codegraph") is not None, "CodeGraph owner 不可用")
         return {"mcp": {"type": "stdio", "command": "codegraph", "args": ["serve", "--mcp"],
-                        "tools": ["*"], "deferTools": "never"}, "files": {}}
+                        "env": {"CODEGRAPH_MANAGED": "1"}, "tools": ["*"], "deferTools": "never"}, "files": {}}
     record = read(key, home)
     path = record["desired"]["mcp"].get("env", {}).get("PATH") if record else None
     if path is None:
