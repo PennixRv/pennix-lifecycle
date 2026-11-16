@@ -3,6 +3,7 @@ import json
 import os
 import copy
 import shutil
+import shlex
 import tomllib
 import tempfile
 import unittest
@@ -578,6 +579,40 @@ class NativeIntegrationTests(unittest.TestCase):
         path.write_text(path.read_text() + '\n[mcp_servers.siyuan.env]\nEXTRA = "keep"\n')
         native_integrations.unconfigure("siyuan", self.codex)
         self.assertEqual(tomllib.loads(path.read_text())["mcp_servers"]["siyuan"], {"env": {"EXTRA": "keep"}})
+
+    def test_siyuan_helper_survives_lifecycle_interpreter_and_path_changes(self):
+        helper = self.home / ".agents/skills/pennix-skills/pennix-siyuan-knowledge/scripts/mcp_headers.py"
+        helper.parent.mkdir(parents=True)
+        helper.write_text('import json; print(json.dumps({"url":"http://127.0.0.1:6806"}))\n')
+        for release in ("old-release", "new-release"):
+            directory = self.root / release
+            directory.mkdir()
+            (directory / "python3").write_text('#!/bin/sh\nexit 91\n')
+            (directory / "python3").chmod(0o700)
+            with patch.dict(os.environ, {"PATH": str(directory) + os.pathsep + os.environ["PATH"]}):
+                native_integrations.apply("siyuan", self.codex)
+                fields = tomllib.loads((self.codex / "config.toml").read_text())["mcp_servers"]["siyuan"]
+                self.assertEqual(shlex.split(fields["http_headers_helper"])[0], "/usr/bin/python3")
+                self.assertEqual(native_integrations.inspect("siyuan", self.codex, enabled=True)["state"], "current")
+
+    def test_siyuan_migrates_an_owned_retired_interpreter_without_touching_policy(self):
+        helper = self.home / ".agents/skills/pennix-skills/pennix-siyuan-knowledge/scripts/mcp_headers.py"
+        helper.parent.mkdir(parents=True)
+        helper.write_text('import json; print(json.dumps({"url":"https://notes.example.test/mcp"}))\n')
+        retired = self.root / "retired-runtime/python3"
+        desired = native_integrations._desired("siyuan", self.codex, enabled=True)
+        desired["mcp"]["http_headers_helper"] = shlex.join([str(retired), str(helper)])
+        with patch.object(native_integrations, "_desired", return_value=desired):
+            native_integrations.apply("siyuan", self.codex)
+        config = self.codex / "config.toml"
+        config.write_text(config.read_text() + '\n[mcp_servers.siyuan.env]\nEXTRA = "keep"\n')
+        self.assertFalse(retired.exists())
+        self.assertEqual(native_integrations.inspect("siyuan", self.codex, enabled=True)["state"], "update-required")
+        native_integrations.apply("siyuan", self.codex)
+        actual = tomllib.loads(config.read_text())["mcp_servers"]["siyuan"]
+        self.assertEqual(shlex.split(actual["http_headers_helper"])[0], "/usr/bin/python3")
+        self.assertEqual(actual["env"], {"EXTRA": "keep"})
+        self.assertEqual(native_integrations.inspect("siyuan", self.codex, enabled=True)["state"], "current")
 
 
 if __name__ == "__main__":

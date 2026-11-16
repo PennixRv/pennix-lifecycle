@@ -96,7 +96,8 @@ def _desired(key: str, codex_home: Path, *, enabled: bool, receipt: dict | None 
         value["mcp"] = {"command": _command(key), "args": ["serve", "--mcp"], "env": {"CODEGRAPH_MANAGED": "1"}}
     else:
         helper = Path.home() / ".agents/skills/pennix-skills/pennix-siyuan-knowledge/scripts/mcp_headers.py"
-        python = shutil.which("python3")
+        # The stdlib-only helper outlives this release's private virtualenv.
+        python = shutil.which("python3", path="/usr/bin")
         if python is None or not helper.is_file():
             raise NativeIntegrationError("SiYuan 本机 helper 不可用")
         result = subprocess.run([python, str(helper), "--metadata"], capture_output=True, text=True, timeout=15, check=False)
