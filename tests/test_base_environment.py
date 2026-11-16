@@ -121,6 +121,36 @@ class BaseEnvironmentTests(unittest.TestCase):
         base.apply(self.kconf,self.catalog)
         self.assertEqual(base.inspect(self.kconf)['state'],'current')
 
+    def test_partial_native_uninstall_resumes_after_prefix_restoration(self):
+        base.apply(self.kconf, self.catalog)
+        record = base.receipt()
+        record['native'].update(npm_prefix='/usr', shell='/bin/bash')
+        base._save(record)
+        current = {**self.native, 'npm_prefix': str(self.home / '.local')}
+        calls = []
+        interrupted = True
+        def run(command):
+            nonlocal interrupted
+            calls.append(command)
+            if command[0] == 'npm':
+                current['npm_prefix'] = '/usr'
+            elif command[:2] == ['sudo', 'chsh']:
+                if interrupted:
+                    interrupted = False
+                    raise base.BaseError('native shell restore interrupted')
+                current['shell'] = '/bin/bash'
+            return SimpleNamespace(returncode=0, stdout='')
+        with patch.object(base, 'native_state', side_effect=lambda: dict(current)), \
+                patch.object(base, '_run', side_effect=run), \
+                patch.object(base.subprocess, 'run', return_value=SimpleNamespace(returncode=1, stdout='')):
+            with self.assertRaisesRegex(base.BaseError, 'interrupted'):
+                base.uninstall()
+            self.assertEqual(base.receipt()['uninstall']['native'], {'npm-prefix': 'verified', 'shell': 'started'})
+            self.assertTrue(base.uninstall().startswith('changed;'))
+        self.assertEqual(sum(command[0] == 'npm' for command in calls), 1)
+        self.assertEqual(current['shell'], '/bin/bash')
+        self.assertIsNone(base.receipt())
+
     def test_symlink_never_adopted_even_with_hash(self):
         target = self.home/'external';target.write_text('keep')
         (self.home/'.p10k.zsh').symlink_to(target)
