@@ -18,6 +18,7 @@ PREFERENCES = {
     "responsesExcludedXHandles", "responsesMaxTurns", "responsesOpenRouterEngine",
     "responsesReasoningEffort", "xImageUnderstanding", "xVideoUnderstanding",
 }
+LEGACY_HIKARI_SHA256 = "a1478ac4612b0234dbb9ee56bcb30fcfff2a1bd40ce6c8001f7f58e1d9d82b71"
 
 
 def cleanup(*, execute: bool = False, expected_sha256: str | None = None) -> dict:
@@ -25,6 +26,7 @@ def cleanup(*, execute: bool = False, expected_sha256: str | None = None) -> dic
     directories = [config / "grok-search", config / "tavily-hikari-cli",
                    Path.home() / ".local/lib/pennix-clients/tavily-hikari"]
     path = directories[0] / "config.json"
+    legacy = Path.home() / ".local/bin/.tvly-hikari-real"
     with files.locked():
         if apply_journal.read() is not None:
             raise files.OwnershipError("先完成已有 Lifecycle 事务")
@@ -35,6 +37,9 @@ def cleanup(*, execute: bool = False, expected_sha256: str | None = None) -> dic
                 if not directory.is_dir() or set(directory.iterdir()) - allowed:
                     raise files.OwnershipError("旧 owner 尚未退出或含未知文件；保留现场")
         raw = files.read(path, private=True)
+        legacy_raw = files.read(legacy)
+        if legacy_raw is not None and hashlib.sha256(legacy_raw).hexdigest() != LEGACY_HIKARI_SHA256:
+            raise files.OwnershipError("旧 Hikari 隐藏载荷不匹配已核验来源；保留现场")
         digest = hashlib.sha256(raw).hexdigest() if raw is not None else None
         if raw is not None:
             value = json.loads(raw, object_pairs_hook=files.unique_pairs)
@@ -45,12 +50,14 @@ def cleanup(*, execute: bool = False, expected_sha256: str | None = None) -> dic
                 raise files.OwnershipError("必须提供当前预览的精确配置摘要")
             if raw is not None:
                 files.replace(path, None, raw)
+            if legacy_raw is not None:
+                files.replace(legacy, None, legacy_raw)
             for directory in directories:
                 if directory.exists():
                     directory.rmdir()
         return {"state": "cleaned" if execute else "preview", "config_sha256": digest,
                 "directories": [str(directory) for directory in directories],
-                "config_present": raw is not None}
+                "config_present": raw is not None, "legacy_client_present": legacy_raw is not None}
 
 
 def main() -> int:

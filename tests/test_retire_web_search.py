@@ -35,7 +35,7 @@ class RetirementTests(unittest.TestCase):
             self.assertEqual("cleaned", retire_web_search.cleanup(execute=True)["state"])
 
     def test_unknown_files_credentials_symlinks_and_pending_transaction_block(self):
-        for fixture in ["receipt", "credentials", "symlink", "transaction"]:
+        for fixture in ["receipt", "credentials", "symlink", "transaction", "legacy-drift"]:
             with self.subTest(fixture=fixture), tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {
                     "HOME": temporary, "XDG_CONFIG_HOME": temporary + "/config",
                     "XDG_STATE_HOME": temporary + "/state"}):
@@ -51,7 +51,27 @@ class RetirementTests(unittest.TestCase):
                 if fixture == "symlink":
                     config.unlink()
                     config.symlink_to(root / "missing")
+                if fixture == "legacy-drift":
+                    legacy = root / ".local/bin/.tvly-hikari-real"
+                    legacy.parent.mkdir(parents=True)
+                    legacy.write_text("unowned file")
                 with patch.object(retire_web_search.apply_journal, "read", return_value={} if fixture == "transaction" else None):
                     with self.assertRaises(owned_files.OwnershipError):
                         retire_web_search.cleanup(execute=True)
                 self.assertTrue(config.exists() or config.is_symlink())
+
+    def test_verified_legacy_payload_is_removed_without_touching_adjacent_commands(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {
+                "HOME": temporary, "XDG_CONFIG_HOME": temporary + "/config",
+                "XDG_STATE_HOME": temporary + "/state"}):
+            root = Path(temporary)
+            legacy = root / ".local/bin/.tvly-hikari-real"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_bytes(b"verified legacy fixture")
+            adjacent = legacy.with_name("keep-command")
+            adjacent.write_text("keep")
+            with patch.object(retire_web_search, "LEGACY_HIKARI_SHA256", hashlib.sha256(legacy.read_bytes()).hexdigest()):
+                self.assertTrue(retire_web_search.cleanup()["legacy_client_present"])
+                retire_web_search.cleanup(execute=True)
+            self.assertFalse(legacy.exists())
+            self.assertEqual("keep", adjacent.read_text())
