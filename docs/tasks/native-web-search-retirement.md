@@ -21,3 +21,11 @@ Pennix已真实卸载0.3.29、证明入口缺失、安装公开0.3.30并原生�
 用户随后明确接受已知Fake-IP抓页限制并授权继续收敛；Copilot失败及目标端重复抓页的未运行处置仍如实保留。目标端迁移前暴露另一独立缺口：Codex0.169.0在自定义provider名为Pennix时，需要supports_standalone_web_search声明才注册搜索扩展；源端OpenAI名称走原生判定，掩盖了该缺口。已核对openai/codex的rust-v0.169.0源码ext/web-search/src/extension.rs，字段来自原生ModelProviderInfo，不新建provider或替换后端。
 
 诊断还确认--ephemeral不生成Context Mode恢复所需session_meta，前两次探针没有执行搜索，不能误记为后端失败。普通新会话加原生能力声明的第8次入口实际完成web.run搜索并返回IANA，启动ctx_resume也成功。Lifecycle增加最小联动声明及先失败后通过的回归，覆盖Live／Cached、Disabled／不接管、幂等和首次基线恢复。发布候选0.3.31，继续以无命令行覆盖的实际安装验证最终行为；账号、provider ID、URL及模型保持。
+
+最终发行0.3.31源码db3978a190186603a22bfce841ad6c6c1bc19730已推送main及不可变tag。329项回归通过、4项条件跳过；本地和公开实际载荷分别通过隔离bootstrap、失败恢复与卸载重装测试。公开CI44019062975成功，公开归档SHA256为66b7c8da77ab4937d46be2cbd1a2b27b4da41ba0f35084dcd11988dcbd80a3e0；解压tar与本地受测构建相同，共54成员。
+
+Pennix已真实卸载0.3.30、确认入口缺失并安装公开0.3.31；PennixLaptop先由0.3.28原生撤回三连接和两客户端，再通过新配置owner退出9个退休键，真实卸载、确认入口缺失并安装同一公开0.3.31。Laptop的自定义provider经repair获得原生supports_standalone_web_search=true；随后无命令行覆盖的Codex CLI和Paseo Codex均实际完成搜索并返回IANA官方来源，启动ctx_resume成功。一次Paseo创建因无效mode在Agent创建前被原生拒绝；核对可用mode后使用auto完成，保留失败记录，不误报工具缺失。
+
+两端check exit0（Pennix29、Laptop30个已选组件，各6连接），recover idle，plan无待变更；重复apply未复活退休项。Skills均由原生owner切到5534241、17成员／1命令。已知退休命令、载荷、配置、发现目录、receipt及锁条目检查为空；源端历史项目trust路径、Git对象、中央旧秘密和NAS独立服务按合同保留，均不构成活动搜索入口。两端7项私有文件摘要保持；Codex只增加批准的web_search及Laptop原生provider能力字段，其余语义保持；生产Paseo PID、workerPID、serverId、启动时间和版本保持。临时关闭的SYSTEM_UPGRADE均恢复原y，未执行系统升级。
+
+目标测试Agent及其专用workspace已原生归档。源端Copilot CLI／Paseo抓页的Fake-IP失败按用户明确接受的限制保留；目标端重复抓页为已接受的未运行项，没有关闭校验或修改DNS／路由器。此owner源码、发行和双端部署已交付；根仍拥有组合验收、源码子模块退出和任务归档，以及归档后的OpenAI官方文档原生查询。
