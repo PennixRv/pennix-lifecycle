@@ -41,19 +41,6 @@ class AuditRegressions(unittest.TestCase):
             with self.assertRaises(config_model.ConfigError):
                 config_model.load()
 
-    def test_tavily_specific_probe_never_accepts_direct_fallback_or_error(self):
-        spec = _engine.load_catalog(pennix.CATALOG)
-        command = spec['configuration_targets']['grok-tavily']['functional_command']
-        self.assertEqual(command[2:4], ['--provider', 'tavily'])
-        for provider, error, wanted in [('tavily', None, 'passed'), ('direct', None, 'failed'),
-                                         ('tavily', {'message': 'failed'}, 'failed')]:
-            response = {'diagnostics': {'provider': provider}, 'content': {'text': 'synthetic'}, 'error': error}
-            with self.subTest(provider=provider, error=error), \
-                    patch.object(connection_owners, '_command', return_value=command), \
-                    patch.object(connection_owners.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=json.dumps(response))):
-                result = connection_owners.functional_checks(spec, {'grok-tavily': {'selected': True, 'action': 'keep'}}, self.root / 'codex')
-                self.assertEqual(result['grok-tavily']['state'], wanted)
-
     def test_config_prefix_environment_cannot_change_public_syntax(self):
         with patch.dict(os.environ, {"CONFIG_": "HOSTILE_"}):
             path = config_model.init()
@@ -213,13 +200,13 @@ class AuditRegressions(unittest.TestCase):
 
     def test_pending_owner_uses_fixed_staged_native_validation_before_mutation(self):
         args = SimpleNamespace(kconf=object(), codex_home=self.root / "codex")
-        spec = {"command": ["grok-search"]}
-        value = {"connections": {"grok": {"state": "pending-owner"}}}
-        catalog = {"configuration_targets": {"grok": spec}, "components": {"pennix-skills": {}}}
+        spec = {"command": ["example-owner"]}
+        value = {"connections": {"example": {"state": "pending-owner"}}}
+        catalog = {"configuration_targets": {"example": spec}, "components": {"pennix-skills": {}}}
         steps = [{"component": "pennix-skills", "action": "install", "target": {}}]
         candidate = {"source": "collection", "ref": "a" * 40, "sha256": "b" * 64}
         with patch.object(candidates, "resolve", return_value=candidate), \
-             patch.object(pennix.skill_collections, "_stage", return_value=(self.root, {"commands": {"grok-search": "native.js"}})) as stage, \
+             patch.object(pennix.skill_collections, "_stage", return_value=(self.root, {"commands": {"example-owner": "native.js"}})) as stage, \
              patch.object(config_model, "config_value", return_value=str(self.root / "secrets")), \
              patch.object(connection_owners, "_payload", return_value={"operation_id": "bound"}), \
              patch.object(connection_owners, "_run", side_effect=connection_owners.ConnectionError("invalid input")) as validate, \

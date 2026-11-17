@@ -26,8 +26,6 @@ SOURCES = {
     "codex": (".codex/auth.json", "json", {"OPENAI_API_KEY": "api_key"}),
     "siyuan": (".config/pennix-siyuan/connection.json", "json", {"api_token": "api_token"}),
     "cch": (".config/cch-codex-tmux-status/cch-admin-token", "text", {"": "admin_token"}),
-    "hikari": (".config/tavily-hikari-cli/config.json", "json", {"token": "api_token"}),
-    "grok": (".config/grok-search/config.json", "json", {"apiKey": "api_key", "tavilyApiKey": "tavily_api_key"}),
     "windsurf": (".config/windsurf-code-search/config.json", "json", {"apiKey": "api_key"}),
 }
 ALIAS = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@:-]*$")

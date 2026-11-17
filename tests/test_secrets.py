@@ -43,42 +43,42 @@ class SecretStoreTests(unittest.TestCase):
                 self.assertEqual(credential_import._fetch_remote('trusted-home', '.config/windsurf-code-search/config.json'), source.read_bytes())
 
     def test_central_transfer_is_selective_and_rejects_bad_envelopes(self):
-        good = {"schema": 1, "fields": {"grok": {"api_key": "private-fixture"}}}
-        self.assertEqual(credential_import.read_from_lifecycle("home", ["grok.api_key"],
+        good = {"schema": 1, "fields": {"codex": {"api_key": "private-fixture"}}}
+        self.assertEqual(credential_import.read_from_lifecycle("home", ["codex.api_key"],
                          fetch=lambda *_: json.dumps(good).encode()), good["fields"])
         bad = [b'{"schema":1,"schema":1,"fields":{}}', b'[]', b'private-fixture',
-               json.dumps({**good, "fields": {"grok": {"api_key": "private-fixture", "tavily_api_key": "extra"}}}).encode(),
+               json.dumps({**good, "fields": {"codex": {"api_key": "private-fixture", "unknown": "extra"}}}).encode(),
                json.dumps({"schema": 1, "fields": {}}).encode(), b'x' * (credential_import.LIMIT + 1)]
         for raw in bad:
             with self.subTest(size=len(raw)), self.assertRaises(credential_import.CredentialImportError) as failure:
-                credential_import.read_from_lifecycle("home", ["grok.api_key"], fetch=lambda *_: raw)
+                credential_import.read_from_lifecycle("home", ["codex.api_key"], fetch=lambda *_: raw)
             self.assertNotIn("private-fixture", str(failure.exception))
         with self.assertRaises(credential_import.CredentialImportError):
-            credential_import.read_from_lifecycle("-oProxyCommand=bad", ["grok.api_key"])
+            credential_import.read_from_lifecycle("-oProxyCommand=bad", ["codex.api_key"])
 
     def test_selected_requirements_check_and_config_change_are_redacted(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"HOME": directory,
                 "XDG_CONFIG_HOME": directory + '/config', "XDG_STATE_HOME": directory + '/state'}):
             cfg = config_model.init()
             kconf, _ = config_model.load()
-            for name, value in {"PENNIX_COMPONENT_PENNIX_SKILLS": "y", "PENNIX_TARGET_GROK": "y",
-                                "PENNIX_TARGET_GROK_TAVILY": "y"}.items():
+            for name, value in {"PENNIX_COMPONENT_PENNIX_SKILLS": "y", "PENNIX_COMPONENT_CODEX_CONFIG": "y",
+                                "PENNIX_TARGET_SIYUAN": "y"}.items():
                 kconf.syms[name].set_value(value)
             config_model.write(kconf, cfg)
             kconf, _ = config_model.load()
             path = Path(config_model.config_value(kconf, 'PENNIX_SECRETS_FILE'))
-            secret_store.update(path, {"grok": {"api_key": "private-fixture"}})
+            secret_store.update(path, {"codex": {"api_key": "private-fixture"}})
             output = io.StringIO()
             with redirect_stdout(output):
                 self.assertEqual(pennix.main(['secrets', 'check', '--json']), 2)
-            self.assertIn('grok.tavily_api_key', output.getvalue())
+            self.assertIn('siyuan.api_token', output.getvalue())
             self.assertNotIn('private-fixture', output.getvalue())
             before = path.read_bytes()
             def changed(*_):
                 cfg.write_bytes(cfg.read_bytes() + b'\n# changed\n')
-                return {"grok": {"tavily_api_key": "new"}}
+                return {"siyuan": {"api_token": "new"}}
             with patch.object(credential_import, 'read_from_lifecycle', side_effect=changed):
-                args = pennix.parser().parse_args(['secrets', 'import-ssh', '--alias', 'home', '--field', 'grok.tavily_api_key'])
+                args = pennix.parser().parse_args(['secrets', 'import-ssh', '--alias', 'home', '--field', 'siyuan.api_token'])
                 with self.assertRaises(pennix.CliError):
                     pennix.cmd_secrets_import_ssh(args)
             self.assertEqual(path.read_bytes(), before)
@@ -93,7 +93,7 @@ class SecretStoreTests(unittest.TestCase):
                     return b'{"OPENAI_API_KEY":"keep"}'
                 raise credential_import.CredentialImportError('unavailable')
             with self.assertRaises(credential_import.CredentialImportError):
-                credential_import.import_from_ssh(path, 'home', ['codex', 'grok'], fetch=fetch)
+                credential_import.import_from_ssh(path, 'home', ['codex', 'siyuan'], fetch=fetch)
             self.assertEqual(path.read_bytes(), before)
 
     def test_preserved_codex_native_auth_is_a_central_requirement(self):
@@ -157,6 +157,27 @@ class SecretStoreTests(unittest.TestCase):
                 secret_store.update(path, {"codex": {"api_key": "key-b"}})
             self.assertEqual(secret_store.get(path, "codex", "api_key"), "key-a")
 
+    def test_retired_secrets_are_read_only_and_unknown_fields_still_fail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "secrets.toml"
+            original = b'[grok]\napi_key="old"\ntavily_api_key="old-tavily"\n[hikari]\napi_token="old-hikari"\n'
+            path.write_bytes(original)
+            path.chmod(0o600)
+            self.assertEqual(secret_store.get(path, "grok", "api_key"), "old")
+            for service, field in [("grok", "api_key"), ("hikari", "api_token")]:
+                with self.assertRaises(secret_store.SecretError):
+                    secret_store.update(path, {service: {field: "new"}})
+                with self.assertRaises(secret_store.SecretError):
+                    secret_store.field_names([f"{service}.{field}"])
+                with self.assertRaises(credential_import.CredentialImportError):
+                    credential_import.read_from_ssh("home", [service], fetch=lambda *_: b"{}")
+            self.assertEqual(path.read_bytes(), original)
+            secret_store.update(path, {"codex": {"api_key": "active"}})
+            self.assertEqual(secret_store.get(path, "hikari", "api_token"), "old-hikari")
+            path.write_bytes(path.read_bytes() + b'[unknown]\nkey="reject"\n')
+            with self.assertRaises(secret_store.SecretError):
+                secret_store.load(path)
+
     def test_broken_symlink_is_not_treated_as_missing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "secrets.toml"
@@ -169,8 +190,6 @@ class SecretStoreTests(unittest.TestCase):
             ".codex/auth.json": json.dumps({"OPENAI_API_KEY": "codex-key"}),
             ".config/pennix-siyuan/connection.json": json.dumps({"api_token": "siyuan-token"}),
             ".config/cch-codex-tmux-status/cch-admin-token": "cch-token\n",
-            ".config/tavily-hikari-cli/config.json": json.dumps({"token": "hikari-token"}),
-            ".config/grok-search/config.json": json.dumps({"apiKey": "grok-key", "tavilyApiKey": "tavily-key"}),
             ".config/windsurf-code-search/config.json": json.dumps({"apiKey": "windsurf-key"}),
         }
 
@@ -186,9 +205,6 @@ class SecretStoreTests(unittest.TestCase):
                 "codex.api_key",
                 "siyuan.api_token",
                 "cch.admin_token",
-                "hikari.api_token",
-                "grok.api_key",
-                "grok.tavily_api_key",
                 "windsurf.api_key",
             })
 

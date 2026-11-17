@@ -43,9 +43,9 @@ ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "references" / "catalog.json"
 APPLY_ORDER = [
     "codex-cli", "copilot-cli", "trellis-cli", "pnpm", "context-mode", "codegraph-cli", "paseo-cli", "trellis-paseo-adapter",
-    "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "uv", "tavily-cli",
+    "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "uv",
     "markitdown", "pandoc", "libreoffice", "poppler", "tesseract-eng", "tesseract-chi-sim", "tesseract", "noto-fonts-cjk",
-    "tavily-hikari", "peon-ping", "codex-config", "codex-agents", "pennix-skills-extra",
+    "peon-ping", "codex-config", "codex-agents", "pennix-skills-extra",
     "pennix-skills",
     "base-environment",
 ]
@@ -53,8 +53,8 @@ DEPENDENCIES = {
     "base-environment": base_environment.SHARED,
     "tmux-config": {"tmux"}, "ponytail-plugin": {"codex-cli"},
     "codex-config": {"codex-cli"}, "codex-agents": {"codex-cli"},
-    "context-mode": {"codex-cli"}, "tavily-hikari": {"tavily-cli", "pennix-skills"},
-    "tavily-cli": {"uv"}, "markitdown": {"uv"},
+    "context-mode": {"codex-cli"},
+    "markitdown": {"uv"},
     "trellis-paseo-adapter": {"trellis-cli", "paseo-cli"},
 }
 

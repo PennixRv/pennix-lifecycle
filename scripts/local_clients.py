@@ -6,8 +6,6 @@ import os
 import re
 from pathlib import Path
 import shutil
-import shlex
-import subprocess
 import tempfile
 import urllib.parse
 
@@ -61,7 +59,7 @@ def _source_matches(key: str, component: dict, record: dict) -> bool:
     parts = parsed.path.strip("/").split("/")
     if not current.get("archive") and parsed.hostname == "raw.githubusercontent.com" and len(parts) >= 4:
         repo, ref, path = "/".join(parts[:2]), parts[2], "/".join(parts[3:])
-        owned = ".tvly-hikari-real" if key == "tavily-hikari" else path
+        owned = path
         return (repo == current.get("repo") and path == current.get("path")
                 and re.fullmatch(r"[0-9a-f]{40}", ref) is not None
                 and record["files"].get(owned, {}).get("digest") == source.get("sha256"))
@@ -153,7 +151,7 @@ def lock_migration(key: str, component: dict) -> dict | None:
             old_repo, ref, old_path = "/".join(parts[:2]), parts[2], "/".join(parts[3:])
             if old_repo != repo or old_path != path:
                 return None
-            owned_name = ".tvly-hikari-real" if key == "tavily-hikari" else path
+            owned_name = path
             if record["files"].get(owned_name, {}).get("digest") != digest:
                 return None
         elif archive and parsed.hostname == "codeload.github.com" and len(parts) == 4 and parts[2] == "tar.gz":
@@ -207,26 +205,6 @@ def stage(component: dict, workspace: Path, candidate: dict | None = None) -> di
             raise ClientError(f"固定客户端资产缺少文件: {name}")
     if not result:
         raise ClientError("客户端运行文件为空")
-    if component.get("id") == "tavily-hikari":
-        if not shutil.which("tvly"):
-            raise ClientError("Hikari 客户端需要先完成官方 tvly 交付")
-        version = subprocess.run(["tvly", "--version"], capture_output=True, text=True, timeout=10, check=False)
-        parsed = re.search(r"\d+\.\d+\.\d+", version.stdout)
-        if version.returncode or not parsed or tuple(map(int, parsed[0].split("."))) < (0, 1, 3):
-            raise ClientError("Hikari 所需 tvly 未达到最低版本")
-        generated = workspace / "generated"
-        generated.mkdir(mode=0o700)
-        config = files.xdg_home("XDG_CONFIG_HOME", Path.home() / ".config") / "tavily-hikari-cli"
-        real = generated / ".tvly-hikari-real"
-        real.write_bytes(asset.read_bytes())
-        real.chmod(0o700)
-        wrapper = generated / "tvly-hikari"
-        wrapper.write_text("#!/usr/bin/env bash\nset -euo pipefail\n"
-                           'if [[ -z "${TAVILY_HIKARI_CONFIG_DIR:-}" && -z "${TAVILY_HIKARI_CONFIG_FILE:-}" ]]; then\n'
-                           f"  export TAVILY_HIKARI_CONFIG_DIR={shlex.quote(str(config))}\nfi\n"
-                           f'exec {shlex.quote(str(root(component) / ".tvly-hikari-real"))} "$@"\n')
-        wrapper.chmod(0o700)
-        result = {name: generated / name for name in ("tvly-hikari", ".tvly-hikari-real")}
     return result
 
 
@@ -270,7 +248,7 @@ def operate(key: str, component: dict, operation: str, *, adopt: bool = False, e
                           }) if candidate else component["client"]["source"]
         output = files.json_bytes({"schema": 1, "root": str(target), "source": receipt_source,
                                    "files": {name: {"digest": hashlib.sha256(path.read_bytes()).hexdigest(),
-                                                    "mode": modes.get(name, 0o700 if path.stat().st_mode & 0o111 or name.endswith(".sh") or key == "tavily-hikari" else 0o600)}
+                                                    "mode": modes.get(name, 0o700 if path.stat().st_mode & 0o111 or name.endswith(".sh") else 0o600)}
                                              for name, path in incoming.items()}, "commands": commands}) if incoming else None
         changed = []
         changed_links = []
@@ -280,7 +258,7 @@ def operate(key: str, component: dict, operation: str, *, adopt: bool = False, e
                 raise ClientError("客户端在提交前改变")
             for name, raw in before.items():
                 after = incoming[name].read_bytes() if name in incoming else None
-                mode = modes.get(name, 0o700 if name in incoming and (incoming[name].stat().st_mode & 0o111 or name.endswith(".sh") or key == "tavily-hikari") else 0o600)
+                mode = modes.get(name, 0o700 if name in incoming and (incoming[name].stat().st_mode & 0o111 or name.endswith(".sh")) else 0o600)
                 files.replace(target / name, after, raw, mode=mode)
                 changed.append((name, after))
             for link in links:

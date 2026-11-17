@@ -177,6 +177,43 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual("keep", deselected["components"]["pennix-skills-extra"]["action"])
             self.assertTrue(target.exists())
 
+    def test_retired_runtime_receipt_can_upgrade_without_reinstalling_retired_members(self):
+        from copy import deepcopy
+        current = deepcopy(self.manifest)
+        self.manifest["skills"]["old-search"] = {"path": "skills/old-search", "license": None}
+        self.manifest["commands"]["old-search"] = "old-search/search"
+        self.manifest["materialized"]["old-search"] = {
+            "repo": "example/old-search", "ref": "a" * 40, "commit": "a" * 40,
+            "name": "old-search", "snapshot": "archive", "post_install": ["grok-search-runtime"]}
+        with self.assertRaises(collections.CollectionError):
+            collections.validate_manifest(self.manifest, "example")
+        def old_stage(component, workspace, candidate=None):
+            staging, manifest = self.stage(component, workspace, candidate)
+            old = staging / "old-search"
+            old.mkdir()
+            (old / "SKILL.md").write_text("---\nname: old-search\ndescription: old\n---\n")
+            (old / "search").write_text("#!/bin/sh\nexit 0\n")
+            (old / "search").chmod(0o755)
+            return staging, manifest
+        with patch.object(collections, "_stage", side_effect=old_stage):
+            collections.operate(self.component, self.codex, "install")
+        path = collections.destination(self.component, self.codex)
+        self.assertEqual("match", collections.inspect(self.component, self.codex)[0])
+        self.manifest = current
+        self.component["collection_contract"]["source"]["ref"] = "b" * 40
+        with patch.object(collections, "_stage", side_effect=self.stage):
+            collections.operate(self.component, self.codex, "upgrade")
+        self.assertFalse((path / "old-search").exists())
+        self.assertFalse((self.home / ".local/bin/old-search").is_symlink())
+        self.assertEqual(current, collections.read_receipt(path)["manifest"])
+        self.assertEqual("match", collections.inspect(self.component, self.codex)[0])
+        invalid = deepcopy(current)
+        invalid["materialized"]["example-skill"] = {
+            "repo": "example/source", "ref": "a" * 40, "commit": "a" * 40,
+            "name": "example-skill", "snapshot": "archive", "post_install": ["unknown-runtime"]}
+        with self.assertRaises(collections.CollectionError):
+            collections.validate_manifest(invalid, "example", reading_receipt=True)
+
     def test_deselected_old_source_receipt_can_be_removed(self):
         path = self.install()
         self.component["collection_contract"]["source"] = {

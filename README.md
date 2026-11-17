@@ -17,6 +17,14 @@ pennix apply
 
 支持范围为 Arch Linux / WSL2 Arch、x86_64。bootstrap 会先执行完整 `pacman -Syu`，准备 curl、CA/keyring、系统 Python 和 uv；Kconfiglib、TOML、YAML 按发行内的完整哈希锁安装到工具私有 `.runtime`，不再要求系统 Kconfiglib/AUR 包或全局 pip。不以局部依赖升级替代完整系统准备。普通用户的 HOME 必须与目标账户一致；root→用户调用清空宿主环境。自定义 XDG 目录可在普通用户入口保留。发现未结事务时 bootstrap 先停止，不能用重装清除 unknown。
 
+## 网页搜索退役迁移
+
+新配置默认明确选择 Codex `web_search="live"`；“保留现有配置（不接管）”不会清除旧的 `disabled`。Copilot 仅使用其原生 `web_fetch`，不承诺独立搜索。Windsurf 代码定位保留。
+
+已有部署须先用旧正式 Lifecycle 取消三条搜索连接及两个客户端，确认原生撤回完成，再从公开配置中移除退役键、安装新工具并更新集合。新版本不再安装网页搜索客户端；中央旧秘密保持只读兼容，不再导入或列为必填。
+
+旧 Grok owner 会留下普通偏好，旧客户端可能留下空目录。新发行提供一次性原生清理脚本 `scripts/retire_web_search.py`：先预览，再以 `--yes --config-sha256 <预览摘要>` 执行。仅处理固定旧目录中无凭据的已知偏好和空目录；receipt、未知文件、符号链接、待恢复事务及摘要不符均阻断。它不清理中央秘密、NAS 服务或历史，也不提供搜索安装入口。
+
 ## 开发基础环境
 
 普通工具安装保持最小默认。显式选择开发基础环境时，使用同一固定发行的公开 bootstrap：
@@ -65,7 +73,7 @@ pennix secrets import-ssh --alias office-wsl-via-nas --service codex
 
 ```sh
 pennix secrets check --json
-pennix secrets import-ssh --alias home-wsl-via-nas --field codex.api_key --field grok.api_key --field grok.tavily_api_key
+pennix secrets import-ssh --alias home-wsl-via-nas --field codex.api_key --field siyuan.api_token
 pennix secrets check --json
 ```
 
@@ -176,7 +184,7 @@ Context Mode 通过 `@pennixrv/context-mode` 包、Codex 原生 MCP 和四个 Ho
 
 Codex Context Mode MCP 通过原生 `env_vars` 动态继承两个 user bus 变量及标准 XDG 用户目录变量，未设置时保持缺省；不转发任意秘密，也不固化主机的 UID 或总线地址。CODEX_HOME 与 PATH 继续显式绑定受管目标。Codex 和 Copilot 的已有受管 Context Mode 接入均沿用回执中的 PATH，不因检查进程环境不同而提示配置更新；首次配置及缺少 PATH 的旧回执迁移须从已核验的原生环境执行。执行器的 shell、TTY、工作目录和预加载隔离仍遵守 Context Mode 合同，不能据 doctor 通过就认为它与交互式终端完全等价。
 
-本地 Hikari wrapper、官方 `tvly`、OpenPeon 运行文件和 AoE/OpenPeon 的精确 Codex Hook 由各自登记合同管理。所有 NAS/其他主机的服务端均为外部依赖，不安装或升级。Hikari 只取得固定上游客户端，并由 Lifecycle 生成本地 wrapper，不执行上游 installer 或 fork 源码；OpenPeon 只更新有限运行文件，保留音效包、偏好和运行数据。CCH 使用经过摘要校验的私有 GitHub Release npm 包，需要现有 `gh` 认证。
+OpenPeon 运行文件和 AoE/OpenPeon 的精确 Codex Hook 由各自登记合同管理。所有 NAS/其他主机的服务端均为外部依赖，不安装或升级。OpenPeon 只更新有限运行文件，保留音效包、偏好和运行数据。CCH 使用经过摘要校验的私有 GitHub Release npm 包，需要现有 `gh` 认证。
 
 正确的既有包可通过 `PENNIX_ADOPT_EXISTING_PACKAGES` 显式纳管，接管前核对原生包名、版本和命令归属；更新须使用 `pennix update <component>`。对无 receipt 的客户端既有文件，先审阅 `plan` 的摘要，再用 `repair <component> --expected-sha256 <摘要>` 精确迁移，未知旁侧文件保留。
 

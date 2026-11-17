@@ -134,29 +134,19 @@ class ConfigModelTests(unittest.TestCase):
             with self.subTest(aliases=aliases), self.assertRaises(owner_engine.BootstrapError):
                 owner_engine.load_catalog(path)
 
-    def test_catalog_manages_only_hikari_local_wrapper_and_skill_connection(self) -> None:
+    def test_retired_search_has_no_install_or_connection_registration(self) -> None:
         catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
-        target = catalog["configuration_targets"]["hikari"]
-        component = catalog["components"]["tavily-hikari"]
-        self.assertEqual(target["owner"], "pennix-tavily-search")
-        self.assertEqual(target["component"], "tavily-hikari")
-        self.assertEqual(
-            target["command"],
-            ["python3", "$HOME/.agents/skills/pennix-skills/pennix-tavily-search/scripts/connection.py"],
-        )
-        self.assertEqual(component["delivery"], "client")
-        self.assertEqual(component["lock_source"], "git:IvanLi-CN/tavily-hikari:scripts/tvly-hikari")
-        self.assertEqual(component["client"]["source"]["repo"], "IvanLi-CN/tavily-hikari")
-        self.assertEqual(component["client"]["source"]["path"], "scripts/tvly-hikari")
-        self.assertEqual(component["client"]["paths"], ["tvly-hikari"])
-        self.assertNotIn("installer", component["client"])
-        self.assertIn("NAS service is an external dependency", component["source"])
+        self.assertTrue({"tavily-cli", "tavily-hikari"}.isdisjoint(catalog["components"]))
+        self.assertTrue({"grok", "grok-tavily", "hikari"}.isdisjoint(catalog["configuration_targets"]))
+        kconf, _ = config_model.load(str(config_model.init()))
+        self.assertEqual(config_model.config_value(kconf, "PENNIX_CODEX_WEB_SEARCH_LIVE"), "y")
+        self.assertNotIn("PENNIX_TARGET_GROK", kconf.syms)
 
     def test_catalog_has_unique_dynamic_sources_and_unpinned_static_templates(self) -> None:
         catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
         dynamic = {key: value for key, value in catalog["components"].items()
                    if value["delivery"] in {"package", "plugin", "client", "collection"}}
-        self.assertEqual(len(dynamic), 26)
+        self.assertEqual(len(dynamic), 24)
         self.assertEqual(len({value["lock_source"] for value in dynamic.values()}), len(dynamic))
         for component in catalog["components"].values():
             if component.get("delivery") == "static" and "template" in component:
@@ -326,6 +316,25 @@ class ConfigModelTests(unittest.TestCase):
         codex_config.uninstall(config)
         self.assertNotIn('remote_compaction_v2', config.read_text())
 
+    def test_native_web_search_is_explicit_idempotent_and_preserves_baseline(self) -> None:
+        config = self.home / "codex/config.toml"
+        config.parent.mkdir()
+        config.write_text('web_search="disabled"\nmodel="keep-model"\n')
+        kconf = config_model._new()
+        kconf.syms["PENNIX_CODEX_WEB_SEARCH_NATIVE"].set_value("y")
+        self.assertNotIn("web_search", codex_config.expected(config_model.values(kconf)))
+        for mode in ["LIVE", "CACHED", "DISABLED"]:
+            kconf.syms["PENNIX_CODEX_WEB_SEARCH_" + mode].set_value("y")
+            values = config_model.values(kconf)
+            codex_config.apply(config, values)
+            from tomlkit import parse
+            document = parse(config.read_text())
+            self.assertEqual(document["web_search"], mode.lower())
+            self.assertEqual(document["model"], "keep-model")
+            self.assertEqual("no-op", codex_config.apply(config, values))
+        codex_config.uninstall(config)
+        self.assertEqual(parse(config.read_text())["web_search"], "disabled")
+
     def test_codex_provider_rejects_credentials_in_base_url(self) -> None:
         kconf = config_model._new()
         kconf.syms["PENNIX_CODEX_PROVIDER_CUSTOM"].set_value("y")
@@ -359,7 +368,7 @@ class ConfigModelTests(unittest.TestCase):
         secrets = directory / "secrets.toml"
         fixtures = {
             ".codex/auth.json": b'{"OPENAI_API_KEY":"codex-test-key"}',
-            ".config/grok-search/config.json": b'{"apiKey":"grok-test-key","tavilyApiKey":"tavily-test-key","baseUrl":"https://example.invalid"}',
+            ".config/windsurf-code-search/config.json": b'{"apiKey":"windsurf-test-key","baseUrl":"https://example.invalid"}',
         }
         calls = []
 
@@ -368,13 +377,13 @@ class ConfigModelTests(unittest.TestCase):
             return fixtures[remote_path]
 
         updated = credential_import.import_from_ssh(
-            secrets, "fixture", ["codex", "grok"], fetch=fetch
+            secrets, "fixture", ["codex", "windsurf"], fetch=fetch
         )
-        self.assertEqual(updated, {"codex.api_key", "grok.api_key", "grok.tavily_api_key"})
+        self.assertEqual(updated, {"codex.api_key", "windsurf.api_key"})
         self.assertEqual(secret_store.get(secrets, "codex", "api_key"), "codex-test-key")
-        self.assertEqual(secret_store.get(secrets, "grok", "api_key"), "grok-test-key")
-        self.assertEqual(calls, [("fixture", ".codex/auth.json"), ("fixture", ".config/grok-search/config.json")])
-        self.assertNotIn("baseUrl", secret_store.load(secrets).get("grok", {}))
+        self.assertEqual(secret_store.get(secrets, "windsurf", "api_key"), "windsurf-test-key")
+        self.assertEqual(calls, [("fixture", ".codex/auth.json"), ("fixture", ".config/windsurf-code-search/config.json")])
+        self.assertNotIn("baseUrl", secret_store.load(secrets).get("windsurf", {}))
         with self.assertRaises(secret_store.SecretError):
             credential_import.import_from_ssh(
                 secrets, "fixture", ["codex"],

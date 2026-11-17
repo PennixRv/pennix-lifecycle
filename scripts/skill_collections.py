@@ -180,7 +180,7 @@ def source_identity(component: dict) -> dict:
     return {"repo": source["repo"], "ref": ref, "manifest": source["manifest"]}
 
 
-def validate_manifest(value: dict, name: str) -> None:
+def validate_manifest(value: dict, name: str, *, reading_receipt: bool = False) -> None:
     if (not isinstance(value, dict) or set(value) != {"schema", "name", "skills", "commands", "materialized"}
             or type(value["schema"]) is not int or value["schema"] != 1 or value["name"] != name
             or not isinstance(value["skills"], dict) or not value["skills"]
@@ -205,7 +205,7 @@ def validate_manifest(value: dict, name: str) -> None:
                 or not REPO.fullmatch(material.get("repo", "")) or not SHA.fullmatch(material.get("commit", ""))
                 or material.get("ref") != material["commit"] or material.get("name") != member
                 or material.get("snapshot") not in {"archive", "npm-pack"}
-                or material.get("post_install", []) not in [[], ["grok-search-runtime"]]):
+                or material.get("post_install", []) not in ([[], ["grok-search-runtime"]] if reading_receipt else [[]])):
             raise CollectionError("物化来源未固定或动作不受支持")
 
 
@@ -249,7 +249,7 @@ def read_receipt(path: Path) -> dict | None:
     if "target" in value and value["target"] != str(path):
         raise CollectionError("集合 receipt 属于其他目标路径")
     source_identity({"collection_contract": {"source": value["source"]}})
-    validate_manifest(value["manifest"], path.name)
+    validate_manifest(value["manifest"], path.name, reading_receipt=True)
     return value
 
 
@@ -373,13 +373,6 @@ def _stage(component: dict, workspace: Path, candidate: dict | None = None, *, e
     staging.mkdir(mode=0o700)
     for name, entry in manifest["skills"].items():
         shutil.copytree(checkout / entry["path"], staging / name)
-    validate_members(staging, manifest)
-    for name, material in manifest["materialized"].items():
-        if material.get("post_install") == ["grok-search-runtime"]:
-            result = subprocess.run(["npm", "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
-                                    cwd=staging / name, capture_output=True, timeout=240, env=environment)
-            if result.returncode:
-                raise CollectionError(f"集合生产依赖安装失败: {name}")
     validate_members(staging, manifest)
     return staging, manifest
 

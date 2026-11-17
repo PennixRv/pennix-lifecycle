@@ -57,46 +57,6 @@
       "values": {},
       "secrets": {}
     },
-    "hikari": {
-      "select": "PENNIX_TARGET_HIKARI",
-      "owner": "pennix-tavily-search",
-      "component": "tavily-hikari",
-      "command": ["python3", "$HOME/.agents/skills/pennix-skills/pennix-tavily-search/scripts/connection.py"],
-      "functional_command": ["tvly-hikari", "search", "IANA example domain", "--max-results", "1", "--depth", "basic", "--json"],
-      "values": {
-        "base_url": "PENNIX_HIKARI_URL"
-      },
-      "secrets": {
-        "token": "hikari.api_token"
-      }
-    },
-    "grok": {
-      "select": "PENNIX_TARGET_GROK",
-      "owner": "grok-search",
-      "component": "pennix-skills",
-      "command": ["grok-search"],
-      "functional_command": ["grok-search", "search", "--no-extra", "--deadline", "120", "IANA example domain"],
-      "values": {
-        "base_url": "PENNIX_GROK_URL",
-        "model": "PENNIX_GROK_MODEL"
-      },
-      "secrets": {
-        "api_key": "grok.api_key"
-      }
-    },
-    "grok-tavily": {
-      "select": "PENNIX_TARGET_GROK_TAVILY",
-      "owner": "grok-search",
-      "component": "pennix-skills",
-      "command": ["grok-search"],
-      "functional_command": ["grok-search", "fetch", "--provider", "tavily", "--deadline", "60", "https://example.com"],
-      "values": {
-        "base_url": "PENNIX_GROK_TAVILY_URL"
-      },
-      "secrets": {
-        "api_key": "grok.tavily_api_key"
-      }
-    },
     "windsurf": {
       "select": "PENNIX_TARGET_WINDSURF",
       "owner": "windsurf-code-search",
@@ -522,37 +482,6 @@
         "questions": []
       }
     },
-    "tavily-hikari": {
-      "delivery": "client",
-      "lock_source": "git:IvanLi-CN/tavily-hikari:scripts/tvly-hikari",
-      "source": "fixed upstream Hikari local wrapper; NAS service is an external dependency",
-      "owner": "hikari",
-      "scope": "global",
-      "verify_key": "tvly-hikari --version",
-      "actions": {
-        "install": "managed",
-        "configure": "native-owner",
-        "upgrade": "managed",
-        "uninstall": "managed",
-        "verify": "managed",
-        "reconcile": "not-applicable"
-      },
-      "project_init": "not-applicable",
-      "client": {
-        "root": "$HOME/.local/lib/pennix-clients/tavily-hikari",
-        "source": {
-          "repo": "IvanLi-CN/tavily-hikari",
-          "path": "scripts/tvly-hikari",
-          "archive": false
-        },
-        "paths": ["tvly-hikari"],
-        "commands": {"tvly-hikari": "tvly-hikari"}
-      },
-      "probe": "tvly-hikari",
-      "version_args": [
-        "--version"
-      ]
-    },
     "uv": {
       "delivery": "package", "lock_source": "arch:extra/uv",
       "source": "Arch official uv package", "owner": "uv", "scope": "global",
@@ -616,13 +545,6 @@
       "source": "Arch official noto-fonts-cjk package", "owner": "pacman", "scope": "global",
       "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
       "package": {"source": "official", "name": "noto-fonts-cjk", "architecture": "any", "identity_only": true, "external_satisfies": true, "resolve_dependencies": true}
-    },
-    "tavily-cli": {
-      "delivery": "package", "lock_source": "pypi:tavily-cli",
-      "source": "official PyPI tavily-cli through uv tool", "owner": "tavily-cli", "scope": "global",
-      "probe": "tvly", "version_args": ["--version"],
-      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed"},
-      "package": {"source": "uv", "name": "tavily-cli"}
     },
     "peon-ping": {
       "delivery": "client", "lock_source": "git:PeonPing/peon-ping:runtime",
@@ -723,7 +645,7 @@
         "directory": "pennix-skills",
         "source": {
           "repo": "PennixRv/pennix-skills",
-          "ref": "b82f21882173cc291c62f8cfcdb7d569dc462249",
+          "ref": "5534241dd1b186d1e688fc8f5e17f26c3e96d6a5",
           "manifest": "collection.json"
         }
       }

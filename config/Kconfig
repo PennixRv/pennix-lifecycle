@@ -158,20 +158,9 @@ config PENNIX_COMPONENT_AOE
 	help
 		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
-config PENNIX_COMPONENT_TAVILY_HIKARI
-	bool "Tavily Hikari 本地 wrapper（远端服务为外部依赖）"
-	default n
-	help
-		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
-
 config PENNIX_COMPONENT_UV
 	bool "uv（本地 Python 工具管理器）"
 	default y
-
-config PENNIX_COMPONENT_TAVILY_CLI
-	bool "官方 Tavily CLI（tvly）"
-	default n
-	depends on PENNIX_COMPONENT_UV
 
 menu "文档本地阅读（Office 与 PDF）"
 
@@ -456,12 +445,12 @@ endchoice
 
 choice PENNIX_CODEX_WEB_SEARCH
 	prompt "原生 Web 搜索"
-	default PENNIX_CODEX_WEB_SEARCH_NATIVE
+	default PENNIX_CODEX_WEB_SEARCH_LIVE
 	help
 		沿用原生时不接管该字段；显式选择会保存首次基线，撤回时检查漂移。
 
 config PENNIX_CODEX_WEB_SEARCH_NATIVE
-	bool "沿用原生"
+	bool "保留现有配置（不接管）"
 
 config PENNIX_CODEX_WEB_SEARCH_DISABLED
 	bool "disabled"
@@ -734,24 +723,6 @@ config PENNIX_TARGET_CCH_TMUX
 	help
 		连接配置完成后由 CCH 原生 owner 安装、更新和撤回运行副本；保留用户区块外内容。
 
-config PENNIX_TARGET_HIKARI
-	bool "配置 Tavily Hikari 连接"
-	default n
-	help
-			默认关闭；开启后须提供 URL 等普通数据，并按需填写集中凭据。
-
-config PENNIX_TARGET_GROK
-	bool "配置 Grok provider 连接"
-	default n
-	help
-			默认关闭；开启后须提供 URL 等普通数据，并按需填写集中凭据。
-
-config PENNIX_TARGET_GROK_TAVILY
-	bool "配置 Grok Tavily 扩展 连接"
-	default n
-	help
-			默认关闭；开启后须提供 URL 等普通数据，并按需填写集中凭据。
-
 config PENNIX_TARGET_WINDSURF
 	bool "配置 Windsurf credential 连接"
 	default n
@@ -782,30 +753,6 @@ config PENNIX_SIYUAN_NOTEBOOK
 	default ""
 	help
 		普通数据；启用思源连接时必填，格式由思源 owner 校验。
-
-config PENNIX_HIKARI_URL
-	string "Hikari base URL"
-	default ""
-	help
-		公开数据；秘密放在集中 secrets.toml。关闭连接保留输入。
-
-config PENNIX_GROK_URL
-	string "Grok base URL"
-	default ""
-	help
-		公开数据；秘密放在集中 secrets.toml。关闭连接保留输入。
-
-config PENNIX_GROK_MODEL
-	string "Grok 模型 ID"
-	default "grok-4"
-	help
-		公开数据；秘密放在集中 secrets.toml。关闭连接保留输入。
-
-config PENNIX_GROK_TAVILY_URL
-	string "Grok Tavily endpoint"
-	default ""
-	help
-		公开数据；秘密放在集中 secrets.toml。关闭连接保留输入。
 
 endmenu
 menu "Paseo 运行与 relay"

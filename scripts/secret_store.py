@@ -15,21 +15,24 @@ FIELDS = {
     "codex": {"api_key"},
     "siyuan": {"api_token"},
     "cch": {"admin_token"},
-    "hikari": {"api_token"},
-    "grok": {"api_key", "tavily_api_key"},
     "windsurf": {"api_key"},
 }
+
+
+# Retired credentials remain readable, without becoming active inputs.
+RETIRED_FIELDS = {"hikari": {"api_token"}, "grok": {"api_key", "tavily_api_key"}}
 
 
 class SecretError(RuntimeError):
     pass
 
 
-def _validate(value: object) -> dict[str, dict[str, str]]:
-    if not isinstance(value, dict) or set(value) - FIELDS.keys():
+def _validate(value: object, *, allow_retired: bool = True) -> dict[str, dict[str, str]]:
+    known = {**FIELDS, **RETIRED_FIELDS} if allow_retired else FIELDS
+    if not isinstance(value, dict) or set(value) - known.keys():
         raise SecretError("秘密文件包含未知表")
     for table_name, fields in value.items():
-        if not isinstance(table_name, str) or not isinstance(fields, dict) or set(fields) - FIELDS[table_name]:
+        if not isinstance(table_name, str) or not isinstance(fields, dict) or set(fields) - known[table_name]:
             raise SecretError("秘密文件包含未知字段或无效表")
         if any(not isinstance(item, str) or "\x00" in item for item in fields.values()):
             raise SecretError("秘密字段必须是文本")
@@ -56,7 +59,7 @@ def load(path: Path) -> dict[str, dict[str, str]]:
 
 def update(path: Path, updates: dict[str, dict[str, str]]) -> set[str]:
     """Merge credential values without exposing them in the return value."""
-    _validate(updates)
+    _validate(updates, allow_retired=False)
     try:
         owned_files.ensure_parent(path)
         if path.parent.stat().st_mode & 0o077:
