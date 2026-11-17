@@ -17,3 +17,7 @@
 Pennix已真实卸载0.3.29、证明入口缺失、安装公开0.3.30并原生清理隐藏旧载荷；此前已真实退出0.3.28并更新共享Skills到5534241。最终本地check exit0（29已选组件、6连接）、recover idle；重复apply仅有no-op及官方Skills核验，未复活退休组件。7项私有文件及Codex除web_search外的语义摘要、Paseo实例均保持；临时关闭的SYSTEM_UPGRADE已恢复原值y，全程未执行系统升级。源端已知安装路径和组件锁中的退休项均为空。
 
 根有限真实验证已使用5／12：Codex旧owner前置、最终CLI、Paseo原生搜索通过；Copilot CLI web_fetch和Paseo原生fetch均实际调用后因www.iana.org解析为198.18.12.143被地址校验拒绝。未使用后备或关闭校验，两Probe Agent已原生archive。Windows DNS为192.168.31.1，WSL经10.255.255.254转发；developers.openai.com、github.com也解析到198.18/15。它是环境验收缺口，本地check不请求网络，不能冒充功能通过。根合同要求源端完整通过才推进目标，因此PennixLaptop仍保持旧部署；DNS owner整改边界未确认，组件任务整体未交付。
+
+用户随后明确接受已知Fake-IP抓页限制并授权继续收敛；Copilot失败及目标端重复抓页的未运行处置仍如实保留。目标端迁移前暴露另一独立缺口：Codex0.169.0在自定义provider名为Pennix时，需要supports_standalone_web_search声明才注册搜索扩展；源端OpenAI名称走原生判定，掩盖了该缺口。已核对openai/codex的rust-v0.169.0源码ext/web-search/src/extension.rs，字段来自原生ModelProviderInfo，不新建provider或替换后端。
+
+诊断还确认--ephemeral不生成Context Mode恢复所需session_meta，前两次探针没有执行搜索，不能误记为后端失败。普通新会话加原生能力声明的第8次入口实际完成web.run搜索并返回IANA，启动ctx_resume也成功。Lifecycle增加最小联动声明及先失败后通过的回归，覆盖Live／Cached、Disabled／不接管、幂等和首次基线恢复。发布候选0.3.31，继续以无命令行覆盖的实际安装验证最终行为；账号、provider ID、URL及模型保持。

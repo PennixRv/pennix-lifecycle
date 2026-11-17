@@ -316,6 +316,30 @@ class ConfigModelTests(unittest.TestCase):
         codex_config.uninstall(config)
         self.assertNotIn('remote_compaction_v2', config.read_text())
 
+    def test_custom_provider_search_capability_follows_explicit_search_and_restores_baseline(self):
+        config = self.home / "codex/config.toml"
+        config.parent.mkdir()
+        config.write_text('model_provider="custom"\n[model_providers.custom]\nname="keep"\nsupports_standalone_web_search=false\n')
+        kconf = config_model._new()
+        kconf.syms["PENNIX_CODEX_PROVIDER_CUSTOM"].set_value("y")
+        kconf.syms["PENNIX_CODEX_PROVIDER_URL"].set_value("https://proxy.example/v1")
+        key = "model_providers.custom.supports_standalone_web_search"
+        for mode in ["LIVE", "CACHED"]:
+            kconf.syms["PENNIX_CODEX_WEB_SEARCH_" + mode].set_value("y")
+            values = config_model.values(kconf)
+            self.assertIs(codex_config.expected(values)[key], True)
+            codex_config.apply(config, values)
+            self.assertEqual("no-op", codex_config.apply(config, values))
+        for mode in ["DISABLED", "NATIVE"]:
+            kconf.syms["PENNIX_CODEX_WEB_SEARCH_" + mode].set_value("y")
+            values = config_model.values(kconf)
+            self.assertNotIn(key, codex_config.expected(values))
+            codex_config.apply(config, values)
+            from tomlkit import parse
+            self.assertIs(parse(config.read_text())["model_providers"]["custom"]["supports_standalone_web_search"], False)
+        codex_config.uninstall(config)
+        self.assertEqual(parse(config.read_text())["model_providers"]["custom"]["name"], "keep")
+
     def test_native_web_search_is_explicit_idempotent_and_preserves_baseline(self) -> None:
         config = self.home / "codex/config.toml"
         config.parent.mkdir()

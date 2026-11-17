@@ -21,6 +21,8 @@ pennix apply
 
 新配置默认明确选择 Codex `web_search="live"`；“保留现有配置（不接管）”不会清除旧的 `disabled`。Copilot 仅使用其原生 `web_fetch`，不承诺独立搜索。Windsurf 代码定位保留。
 
+显式配置自定义 Responses provider 且选择 Live／Cached 搜索时，同时写入原生 `supports_standalone_web_search=true`。Codex 0.169 的搜索扩展要求这一能力声明；仅写入 `web_search` 不能证明工具已暴露或后端可用。后端仍须支持该原生接口，按新CLI／Paseo实际搜索验证；保留已有provider模式不改写其元数据，关闭或不接管搜索时恢复该字段的原始基线。
+
 已有部署须先用旧正式 Lifecycle 取消三条搜索连接及两个客户端，确认原生撤回完成，再从公开配置中移除退役键、安装新工具并更新集合。新版本不再安装网页搜索客户端；中央旧秘密保持只读兼容，不再导入或列为必填。
 
 旧 Grok owner 会留下普通偏好，旧客户端可能留下空目录或早期隐藏载荷。新发行提供一次性原生清理脚本 `scripts/retire_web_search.py`：先预览，再以 `--yes --config-sha256 <预览摘要>` 执行。仅处理固定旧目录中无凭据的已知偏好、空目录，以及固定来源摘要一致的 `~/.local/bin/.tvly-hikari-real`；receipt、未知文件、符号链接、待恢复事务及摘要不符均阻断。它不清理中央秘密、NAS 服务或历史，也不提供搜索安装入口。

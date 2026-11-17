@@ -110,6 +110,8 @@ def expected(values: dict) -> dict:
         want[prefix + "name"] = values["PENNIX_CODEX_PROVIDER_NAME"]
         want[prefix + "base_url"] = url
         want[prefix + "wire_api"] = "responses"
+        if values.get("PENNIX_CODEX_WEB_SEARCH_LIVE") == "y" or values.get("PENNIX_CODEX_WEB_SEARCH_CACHED") == "y":
+            want[prefix + "supports_standalone_web_search"] = True
         if values.get("PENNIX_CODEX_AUTH_API_KEY") == "y":
             secrets = values.get("PENNIX_SECRETS_FILE", "$HOME/.config/pennix/secrets.toml")
             secrets_path = Path(os.path.expandvars(os.path.expanduser(secrets)))
