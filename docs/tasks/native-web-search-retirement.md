@@ -11,3 +11,9 @@
 源端旧owner真实撤回后确认遗留Grok普通偏好及空目录，因此新增一次性retire_web_search.py，采用既有owned_files保护与共享锁，预览后须精确摘要才删除已知无凭据偏好；未知内容、receipt、符号链接和待恢复事务阻断。此修复属于已批准安装无残留验收，不增加搜索组件或秘密删除入口。新增旧receipt升级、旧凭据只读、原生live覆盖disabled／幂等／基线恢复及清理反例；最终发行验证与双端部署继续记录。
 
 0.3.29源码327项通过（4条件跳过），公开CI44006661850成功，公开载荷独立验证通过。源端真实重装和集合更新后继续扫描用户目录，发现早期Hikari installer留下的隐藏载荷~/.local/bin/.tvly-hikari-real，当前Lifecycle receipt未拥有它。其SHA256与旧维护源码scripts/tvly-hikari完整相同，为a1478ac4612b0234dbb9ee56bcb30fcfff2a1bd40ce6c8001f7f58e1d9d82b71。原生一次性清理据此增加固定路径／固定来源摘要识别、漂移拒绝及相邻命令保留反例。0.3.29保持不可变；最终候选提升0.3.30，重新运行源码、公开载荷和两端原生重装。目标只读盘点未发现该隐藏文件，目前尚未改变部署。
+
+0.3.30完整328项通过（4条件跳过），本地与公开实际载荷分别通过bootstrap／失败恢复／卸载重装门禁；正式CI44008212113成功。公开归档SHA256为11512feede35eeaf7c1945525275ba6ad961c2de5831e72bf6ad9a88d486b91d，解压后54成员的内容、类型和权限与受测构建一致。
+
+Pennix已真实卸载0.3.29、证明入口缺失、安装公开0.3.30并原生清理隐藏旧载荷；此前已真实退出0.3.28并更新共享Skills到5534241。最终本地check exit0（29已选组件、6连接）、recover idle；重复apply仅有no-op及官方Skills核验，未复活退休组件。7项私有文件及Codex除web_search外的语义摘要、Paseo实例均保持；临时关闭的SYSTEM_UPGRADE已恢复原值y，全程未执行系统升级。源端已知安装路径和组件锁中的退休项均为空。
+
+根有限真实验证已使用5／12：Codex旧owner前置、最终CLI、Paseo原生搜索通过；Copilot CLI web_fetch和Paseo原生fetch均实际调用后因www.iana.org解析为198.18.12.143被地址校验拒绝。未使用后备或关闭校验，两Probe Agent已原生archive。Windows DNS为192.168.31.1，WSL经10.255.255.254转发；developers.openai.com、github.com也解析到198.18/15。它是环境验收缺口，本地check不请求网络，不能冒充功能通过。根合同要求源端完整通过才推进目标，因此PennixLaptop仍保持旧部署；DNS owner整改边界未确认，组件任务整体未交付。
