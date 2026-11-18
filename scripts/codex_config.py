@@ -7,7 +7,7 @@ from pathlib import Path
 from collections.abc import Mapping, MutableMapping
 from urllib.parse import urlsplit
 import re
-from tomlkit import document, parse
+from tomlkit import document, dumps, parse
 import owned_files as files
 
 CodexConfigError = files.OwnershipError
@@ -17,6 +17,15 @@ OWNED = {
     "features.goals": "PENNIX_CODEX_GOALS",
 }
 RETIRED = {"features.remote_compaction_v2"}
+NATIVE_DEFAULTS = {
+    "personality", "approvals_reviewer", "cli_auth_credentials_store",
+    "tui.status_line", "tui.status_line_use_colors", "tui.terminal_title", "tui.theme",
+}
+IDLE_AGENT_FIELDS = {"agents.max_threads", "agents.max_depth", "agents.interrupt_message"}
+IDLE_MEMORY_FIELDS = {"memories." + key for key in (
+    "disable_on_external_context", "max_raw_memories_for_consolidation", "max_rollout_age_days",
+    "max_rollouts_per_startup", "max_unused_days", "min_rate_limit_remaining_percent", "min_rollout_idle_hours",
+)}
 CHOICES = {
     "model_reasoning_effort": "REASONING",
     "plan_mode_reasoning_effort": "PLAN_REASONING",
@@ -80,20 +89,60 @@ def _choice(values, name):
 
 
 def expected(values: dict) -> dict:
+    managed = values.get("PENNIX_CODEX_MANAGED_TEMPLATE") == "y"
     want = {key: values[symbol] == "y" for key, symbol in OWNED.items()}
     for key, name in CHOICES.items():
         value = _choice(values, name)
         if value == "native":
+            if managed:
+                want[key] = None
             continue
         want[key] = {"on": True, "off": False}.get(value, value)
     if values.get("PENNIX_CODEX_MODEL_CUSTOM") == "y":
         want["model"] = values["PENNIX_CODEX_MODEL_ID"]
     if values.get("PENNIX_CODEX_HISTORY_LIMIT") == "y":
         want["history.max_bytes"] = int(values["PENNIX_CODEX_HISTORY_BYTES"])
+    elif managed:
+        want["history.max_bytes"] = None
+    if managed:
+        want.update({key: None for key in NATIVE_DEFAULTS | RETIRED})
+        for key, symbol in {
+            "model_context_window": "CONTEXT_WINDOW",
+            "model_auto_compact_token_limit": "AUTO_COMPACT_TOKENS",
+        }.items():
+            want[key] = int(values["PENNIX_CODEX_" + symbol])
+        if not 0 < want["model_auto_compact_token_limit"] <= want["model_context_window"]:
+            raise CodexConfigError("Codex 自动压缩阈值必须为正整数且不超过上下文窗口")
+        scope = values["PENNIX_CODEX_COMPACT_SCOPE"]
+        if scope not in {"total", "body_after_prefix"}:
+            raise CodexConfigError("Codex 自动压缩 scope 无效")
+        want["model_auto_compact_token_limit_scope"] = scope
+        for key, symbol in {
+            "features.default_mode_request_user_input": "DEFAULT_MODE_INPUT",
+            "check_for_update_on_startup": "CHECK_UPDATES",
+            "suppress_unstable_features_warning": "SUPPRESS_UNSTABLE",
+            "analytics.enabled": "ANALYTICS",
+            "feedback.enabled": "FEEDBACK",
+        }.items():
+            want[key] = values["PENNIX_CODEX_" + symbol] == "y"
+        want["log_dir"] = str(Path(os.path.expandvars(os.path.expanduser(values["PENNIX_CODEX_HOME"]))) / "logs")
+        context = values["PENNIX_CODEX_SEARCH_CONTEXT"]
+        if context not in {"low", "medium", "high"}:
+            raise CodexConfigError("Codex 搜索上下文必须为 low、medium 或 high")
+        want["tools.web_search.context_size"] = context
+        for key in ("city", "country", "region", "timezone"):
+            want["tools.web_search.location." + key] = values["PENNIX_CODEX_SEARCH_" + key.upper()]
+        if want.get("agents.enabled") is False:
+            want["features.multi_agent_v2"] = False
+            want.update({key: None for key in IDLE_AGENT_FIELDS})
+        if want.get("features.memories") is False:
+            want.update({key: None for key in IDLE_MEMORY_FIELDS})
+            want.update({"memories.generate_memories": False, "memories.use_memories": False})
+        want["features.code_mode.direct_only_tool_namespaces"] = None
     if values.get("PENNIX_CODEX_PROVIDER_CUSTOM") == "y":
         provider = values["PENNIX_CODEX_PROVIDER_ID"]
         if (not re.fullmatch(r"[A-Za-z0-9_-]+", provider)
-                or provider.lower() in {"openai", "ollama", "lmstudio"}):
+                or provider in {"openai", "ollama", "lmstudio"}):
             raise CodexConfigError("Codex provider ID 无效或使用了保留名称")
         url = values["PENNIX_CODEX_PROVIDER_URL"]
         parsed = urlsplit(url)
@@ -110,9 +159,13 @@ def expected(values: dict) -> dict:
         want[prefix + "name"] = values["PENNIX_CODEX_PROVIDER_NAME"]
         want[prefix + "base_url"] = url
         want[prefix + "wire_api"] = "responses"
+        if managed:
+            want[prefix + "capabilities.remote_compaction"] = None
         if values.get("PENNIX_CODEX_WEB_SEARCH_LIVE") == "y" or values.get("PENNIX_CODEX_WEB_SEARCH_CACHED") == "y":
             want[prefix + "supports_standalone_web_search"] = True
         if values.get("PENNIX_CODEX_AUTH_API_KEY") == "y":
+            if managed:
+                want[prefix + "requires_openai_auth"] = False
             secrets = values.get("PENNIX_SECRETS_FILE", "$HOME/.config/pennix/secrets.toml")
             secrets_path = Path(os.path.expandvars(os.path.expanduser(secrets)))
             if not secrets_path.is_absolute() or ".." in secrets_path.parts:
@@ -137,6 +190,7 @@ def _get(doc, key):
 def _set(doc, key, value):
     parts = key.split(".")
     current = doc
+    parents = []
     for part in parts[:-1]:
         if part not in current:
             if value is None:
@@ -144,9 +198,14 @@ def _set(doc, key, value):
             current[part] = {}
         if not isinstance(current[part], MutableMapping):
             raise CodexConfigError("Codex 受管字段前缀不是 table，拒绝覆盖")
+        parents.append((current, part))
         current = current[part]
     if value is None:
         current.pop(parts[-1], None)
+        for parent, part in reversed(parents):
+            if parent[part]:
+                break
+            parent.pop(part)
     else:
         current[parts[-1]] = value
 
@@ -157,12 +216,15 @@ def _assert_current(doc, record):
 
 
 def inspect(path: Path, values: dict) -> dict:
-    doc, _ = _read(path)
+    doc, raw = _read(path)
     record = _load_record(path)
     _assert_current(doc, record)
     want = expected(values)
-    retired_owned = record is not None and bool(RETIRED.intersection(record["after"]))
-    return {"state": "current" if not retired_owned and all(_get(doc, key) == value for key, value in want.items()) else "pending",
+    retired_owned = record is not None and any(record["after"].get(key) is not None for key in RETIRED)
+    formatted = values.get("PENNIX_CODEX_MANAGED_TEMPLATE") != "y" or dumps(doc.unwrap()).encode() == raw
+    owned = values.get("PENNIX_CODEX_MANAGED_TEMPLATE") != "y" or record is not None and all(
+        key in record["after"] and record["after"][key] == value for key, value in want.items())
+    return {"state": "current" if not retired_owned and formatted and owned and all(_get(doc, key) == value for key, value in want.items()) else "pending",
             "target": str(path), "owned_fields": sorted(record["after"]) if record else [],
             "requested_fields": sorted(want), "scope": "user-defaults; native callers may override"}
 
@@ -182,6 +244,15 @@ def apply(path: Path, values: dict, expected_sha256: str | None = None) -> str:
     doc, raw = _read(path)
     record = _load_record(path)
     want = expected(values)
+    managed = values.get("PENNIX_CODEX_MANAGED_TEMPLATE") == "y"
+    if managed:
+        namespaces = _get(doc, "features.code_mode.direct_only_tool_namespaces")
+        if namespaces not in (None, []):
+            raise CodexConfigError("Code Mode 已有非空偏好，拒绝按空配置清理")
+        prefix = "model_providers." + values.get("PENNIX_CODEX_PROVIDER_ID", "") + "."
+        if record and values.get("PENNIX_CODEX_PROVIDER_CUSTOM") == "y":
+            want.update({key: None for key in record["after"]
+                         if key.startswith("model_providers.") and not key.startswith(prefix)})
     if expected_sha256 is None:
         _assert_current(doc, record)
     else:
@@ -204,7 +275,7 @@ def apply(path: Path, values: dict, expected_sha256: str | None = None) -> str:
         _set(doc, key, None if key in RETIRED else baseline)
     for key, value in want.items():
         _set(doc, key, value)
-    after_raw = doc.as_string().encode()
+    after_raw = (dumps(doc.unwrap()) if managed else doc.as_string()).encode()
     after_record = files.json_bytes({"schema": STATE_SCHEMA, "path": str(path), "before": before, "after": want})
     record_raw = files.read(_state_path(), private=True)
     if after_raw == raw and after_record == record_raw:

@@ -250,6 +250,13 @@ config PENNIX_COMPONENT_PENNIX_SKILLS
 endmenu
 menu "Codex provider 与模型"
 
+config PENNIX_CODEX_MANAGED_TEMPLATE
+	bool "按受管模板统一 Codex 默认配置"
+	default n
+	help
+		显式选择的值与原生默认缺席均纳管，清理已审定旧项及说明注释。
+		未选择时保留已有 NATIVE／PRESERVE 兼容语义。
+
 choice PENNIX_CODEX_PROVIDER
 	prompt "Provider 配置"
 	default PENNIX_CODEX_PROVIDER_PRESERVE
@@ -675,11 +682,63 @@ config PENNIX_CODEX_HISTORY_BYTES
 	help
 		正整数 bytes；只在启用空间上限时应用。
 
-config PENNIX_CODEX_REMOTE_COMPACTION
-	bool "旧远程压缩开关（仅兼容既有输入）"
+if PENNIX_CODEX_MANAGED_TEMPLATE
+
+config PENNIX_CODEX_CONTEXT_WINDOW
+	int "模型上下文窗口（tokens）"
+	default 500000
+	range 1 2147483647
+
+config PENNIX_CODEX_AUTO_COMPACT_TOKENS
+	int "自动压缩阈值（tokens）"
+	default 450000
+	range 1 2147483647
+
+config PENNIX_CODEX_COMPACT_SCOPE
+	string "自动压缩计数范围"
+	default "total"
+
+config PENNIX_CODEX_DEFAULT_MODE_INPUT
+	bool "默认模式原生提问"
 	default y
-	help
-		当前 Codex 已移除此 feature，不再生成；V2 使用 provider 的 capabilities.remote_compaction。
+
+config PENNIX_CODEX_CHECK_UPDATES
+	bool "启动检查 Codex 更新"
+	default n
+
+config PENNIX_CODEX_SUPPRESS_UNSTABLE
+	bool "隐藏实验功能警告"
+	default y
+
+config PENNIX_CODEX_ANALYTICS
+	bool "OpenAI analytics 上传"
+	default n
+
+config PENNIX_CODEX_FEEDBACK
+	bool "反馈上传与后台审查留存"
+	default n
+
+config PENNIX_CODEX_SEARCH_CONTEXT
+	string "搜索上下文（low / medium / high）"
+	default "high"
+
+config PENNIX_CODEX_SEARCH_CITY
+	string "搜索城市"
+	default "Shanghai"
+
+config PENNIX_CODEX_SEARCH_COUNTRY
+	string "搜索国家"
+	default "CN"
+
+config PENNIX_CODEX_SEARCH_REGION
+	string "搜索地区"
+	default "Shanghai"
+
+config PENNIX_CODEX_SEARCH_TIMEZONE
+	string "搜索时区"
+	default "Asia/Shanghai"
+
+endif
 
 config PENNIX_CODEX_HOOKS
 	bool "Hooks"
@@ -692,8 +751,6 @@ config PENNIX_CODEX_GOALS
 	default y
 	help
 		工作流基础偏好；保留其他未知字段和项目覆盖。
-
-comment "颜色和高级 TUI/模型选项保留原生：当前官方配置未声明通用颜色开关"
 
 endmenu
 menu "全局集成与连接"

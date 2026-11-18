@@ -44,6 +44,136 @@ class ConfigModelTests(unittest.TestCase):
                 os.environ[key] = value
         self.temp.cleanup()
 
+    def test_managed_codex_template_clears_legacy_values_and_preserves_other_owners(self):
+        from tomlkit import parse
+        source = Path(__file__).resolve().parents[1] / "config/defconfig-wsl"
+        path = config_model.init(str(self.home / "workflow.config"), defconfig=str(source))
+        kconf, _ = config_model.load(str(path))
+        values = config_model.values(kconf)
+        config = self.home / "codex/config.toml"
+        config.parent.mkdir()
+        config.write_text('''# remove this comment
+plan_mode_reasoning_effort = "xhigh"
+personality = "friendly"
+file_opener = "vscode"
+[history]
+max_bytes = 52428800
+[agents]
+max_threads = 8
+max_depth = 1
+interrupt_message = true
+[memories]
+max_rollout_age_days = 30
+[features.code_mode]
+direct_only_tool_namespaces = []
+[model_providers.OpenAI.capabilities]
+remote_compaction = "v2"
+[mcp_servers.external]
+command = "keep#literal" # remove inline comment
+args = ["a", "b"]
+note = """line one
+# keep literal line
+line three"""
+[projects."/tmp/project.with.dot"]
+trust_level = "trusted"
+''')
+        original = parse(config.read_text()).unwrap()
+        self.assertEqual("changed", codex_config.apply(config, values))
+        doc = parse(config.read_text()).unwrap()
+        self.assertEqual(doc["model_reasoning_effort"], "high")
+        self.assertEqual(doc["model_context_window"], 500000)
+        self.assertFalse(doc["features"]["multi_agent_v2"])
+        self.assertEqual(doc["agents"], {"enabled": False})
+        self.assertEqual(doc["memories"], {"generate_memories": False, "use_memories": False})
+        self.assertNotIn("code_mode", doc["features"])
+        self.assertNotIn("capabilities", doc["model_providers"]["OpenAI"])
+        for key in ("plan_mode_reasoning_effort", "personality", "file_opener"):
+            self.assertNotIn(key, doc)
+        self.assertEqual(doc["history"], {"persistence": "save-all"})
+        self.assertEqual(doc["mcp_servers"], original["mcp_servers"])
+        self.assertEqual(doc["projects"], original["projects"])
+        self.assertNotIn("remove this comment", config.read_text())
+        self.assertNotIn("remove inline comment", config.read_text())
+        first = config.read_bytes()
+        receipt = (self.home / "state/pennix-lifecycle/codex-config.json").read_bytes()
+        self.assertEqual("current", codex_config.inspect(config, values)["state"])
+        self.assertEqual("no-op", codex_config.apply(config, values))
+        self.assertEqual(first, config.read_bytes())
+        self.assertEqual(receipt, (self.home / "state/pennix-lifecycle/codex-config.json").read_bytes())
+        doc = parse(config.read_text())
+        doc["history"]["max_bytes"] = 10
+        config.write_text(doc.as_string())
+        for digest in (None, hashlib.sha256(config.read_bytes()).hexdigest()):
+            with self.assertRaises(codex_config.CodexConfigError):
+                codex_config.apply(config, values, digest)
+
+    def test_managed_matching_values_still_require_current_ownership(self):
+        config = self.home / "codex/config.toml"
+        config.parent.mkdir()
+        path = config_model.init(str(self.home / "workflow.config"),
+                                 defconfig=str(Path(__file__).resolve().parents[1] / "config/defconfig-wsl"))
+        values = config_model.values(config_model.load(str(path))[0])
+        codex_config.apply(config, values)
+        receipt = self.home / "state/pennix-lifecycle/codex-config.json"
+        receipt.unlink()
+        self.assertEqual("pending", codex_config.inspect(config, values)["state"])
+        codex_config.apply(config, values)
+        record = json.loads(receipt.read_text())
+        del record["before"]["model_context_window"]
+        del record["after"]["model_context_window"]
+        receipt.write_text(json.dumps(record))
+        self.assertEqual("pending", codex_config.inspect(config, values)["state"])
+        codex_config.apply(config, values)
+        self.assertEqual("current", codex_config.inspect(config, values)["state"])
+
+    def test_managed_provider_switch_removes_only_owned_old_fields(self):
+        from tomlkit import parse
+        config = self.home / "codex/config.toml"
+        config.parent.mkdir()
+        config.write_text('[model_providers.custom]\nname="Legacy"\nexternal="keep"\n')
+        old = config_model._new()
+        old.syms["PENNIX_CODEX_PROVIDER_CUSTOM"].set_value("y")
+        old.syms["PENNIX_CODEX_PROVIDER_URL"].set_value("https://old.example/v1")
+        codex_config.apply(config, config_model.values(old))
+        path = config_model.init(str(self.home / "workflow.config"),
+                                 defconfig=str(Path(__file__).resolve().parents[1] / "config/defconfig-wsl"))
+        values = config_model.values(config_model.load(str(path))[0])
+        digest = hashlib.sha256(config.read_bytes()).hexdigest()
+        codex_config.apply(config, values, digest)
+        self.assertEqual(parse(config.read_text())["model_providers"]["custom"].unwrap(), {"external": "keep"})
+        self.assertEqual("OpenAI", parse(config.read_text())["model_provider"])
+        self.assertEqual("no-op", codex_config.apply(config, values))
+
+    def test_retired_kconfig_input_is_read_only_compatibility(self):
+        path = config_model.init()
+        path.write_text(path.read_text() + "CONFIG_PENNIX_CODEX_REMOTE_COMPACTION=y\n")
+        before = path.read_bytes()
+        kconf, _ = config_model.load(str(path))
+        self.assertEqual(before, path.read_bytes())
+        config_model.write(kconf, path, before=before)
+        self.assertNotIn("REMOTE_COMPACTION", path.read_text())
+        self.assertTrue(all(not line.startswith("#") or line == config_model.HEADER.strip()
+                            or config_model.UNSET.match(line) for line in path.read_text().splitlines()))
+        path.write_text(path.read_text() + 'CONFIG_PENNIX_CODEX_REMOTE_COMPACTION="bad"\n')
+        with self.assertRaises(config_model.ConfigError):
+            config_model.load(str(path))
+
+    def test_managed_template_rejects_invalid_budget_and_nonempty_code_mode(self):
+        path = config_model.init(str(self.home / "workflow.config"),
+                                 defconfig=str(Path(__file__).resolve().parents[1] / "config/defconfig-wsl"))
+        kconf, _ = config_model.load(str(path))
+        values = config_model.values(kconf)
+        invalid = dict(values, PENNIX_CODEX_AUTO_COMPACT_TOKENS="500001")
+        with self.assertRaises(codex_config.CodexConfigError):
+            codex_config.expected(invalid)
+        config = self.home / "codex/config.toml"
+        config.parent.mkdir()
+        config.write_text('[features.code_mode]\ndirect_only_tool_namespaces=["custom"]\n')
+        before = config.read_bytes()
+        with self.assertRaises(codex_config.CodexConfigError):
+            codex_config.apply(config, values)
+        self.assertEqual(before, config.read_bytes())
+
     def test_default_roundtrip_and_disabled_value_preservation(self) -> None:
         path = config_model.init()
         kconf, _ = config_model.load()

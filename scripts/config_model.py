@@ -19,6 +19,7 @@ HEADER = f"# Pennix workflow.config format: {FORMAT_VERSION}\n"
 PATH_KEYS = {"PENNIX_CODEX_HOME", "PENNIX_COPILOT_HOME", "PENNIX_PASEO_HOME", "PENNIX_SECRETS_FILE"}
 ASSIGN = re.compile(r"^\s*(?:CONFIG_)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 UNSET = re.compile(r"^\s*#\s*CONFIG_([A-Za-z_][A-Za-z0-9_]*)\s+is not set\s*$")
+RETIRED_BOOL_KEYS = {"PENNIX_CODEX_REMOTE_COMPACTION"}
 
 
 class ConfigError(ValueError):
@@ -82,9 +83,13 @@ def _parse_assignments(text: str, kconf: StrictKconfig) -> dict[str, str]:
         name = match[1]
         if name in values:
             raise ConfigError(f"配置包含重复赋值: {name}")
-        if name not in defined:
+        value = "n" if UNSET.match(line) else match[2]
+        if name in RETIRED_BOOL_KEYS:
+            if value not in {"y", "n"}:
+                raise ConfigError(f"旧布尔选项值无效: {name}")
+        elif name not in defined:
             raise ConfigError(f"配置包含未知选项: {name}")
-        values[name] = "n" if UNSET.match(line) else match[2]
+        values[name] = value
     for choice in kconf.unique_choices:
         enabled = [symbol.name for symbol in choice.syms if values.get(symbol.name) in {"y", '"y"'}]
         if len(enabled) > 1:
@@ -102,6 +107,8 @@ def _validate(kconf: StrictKconfig, raw: str) -> None:
                 and symbol.name not in {"PENNIX_COMPONENT_BASE_ENVIRONMENT", "PENNIX_COMPONENT_COPILOT_CLI"}):
             raise ConfigError(f"组件选择缺失，需核对新配置项: {symbol.name}")
     for name, value in assignments.items():
+        if name in RETIRED_BOOL_KEYS:
+            continue
         symbol = kconf.syms[name]
         if symbol.type in {kconfiglib.BOOL, kconfiglib.TRISTATE}:
             if value not in {"y", "m", "n"} or value != symbol.str_value:
@@ -141,10 +148,16 @@ def _load_file(path: Path) -> StrictKconfig:
     raw = _read(path)
     kconf = _new()
     try:
+        _parse_assignments(raw.decode("utf-8"), kconf)
+        lines = []
+        for line in raw.decode("utf-8").splitlines(keepends=True):
+            match = ASSIGN.match(line) or UNSET.match(line)
+            if not match or match[1] not in RETIRED_BOOL_KEYS:
+                lines.append(line)
         # Parse the same bytes that pass validation, not a second read of the source.
         with tempfile.TemporaryDirectory(prefix="pennix-config-snapshot-") as directory:
             snapshot = Path(directory) / ".config"
-            snapshot.write_bytes(raw)
+            snapshot.write_text("".join(lines), encoding="utf-8")
             kconf.load_config(str(snapshot))
         _validate(kconf, raw.decode("utf-8"))
     except (OSError, UnicodeError, kconfiglib.KconfigError) as error:
@@ -170,7 +183,9 @@ def _render(kconf) -> bytes:
     with tempfile.TemporaryDirectory(prefix="pennix-kconfig-") as directory:
         path = Path(directory) / ".config"
         kconf.write_config(str(path))
-        return HEADER.encode() + path.read_bytes()
+        lines = [line for line in path.read_text().splitlines()
+                 if not line.lstrip().startswith("#") or UNSET.match(line)]
+        return HEADER.encode() + ("\n".join(lines).strip() + "\n").encode()
 
 
 _UNSPECIFIED = object()
