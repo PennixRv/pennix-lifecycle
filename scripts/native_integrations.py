@@ -10,12 +10,12 @@ import shlex
 import shutil
 import subprocess
 import tomllib
-import tempfile
 import tomlkit
 
 import owned_files
 import hook_integrations
 import context_mode_integration as context_mode
+import codegraph_integration as codegraph
 import copilot_integrations as copilot
 import sys
 
@@ -94,6 +94,7 @@ def _desired(key: str, codex_home: Path, *, enabled: bool, receipt: dict | None 
         value.update(_context_target(codex_home, receipt, configure=configure))
     elif key == "codegraph":
         value["mcp"] = {"command": _command(key), "args": ["serve", "--mcp"], "env": {"CODEGRAPH_MANAGED": "1"}}
+        value.update(codegraph.target(sys.modules[__name__]))
     else:
         helper = Path.home() / ".agents/skills/pennix-skills/pennix-siyuan-knowledge/scripts/mcp_headers.py"
         # The stdlib-only helper outlives this release's private virtualenv.
@@ -117,6 +118,8 @@ def _read_receipt(key: str) -> dict | None:
         return None
     if key == "context-mode":
         return context_mode.validate_receipt(value)
+    if key == "codegraph":
+        return codegraph.validate_receipt(value)
     fields = {"schema", "key", "codex_home", "desired_digest"}
     if key == "context-mode":
         fields |= {"mcp", "hooks", "hooks_file_created"}
@@ -140,6 +143,8 @@ def _write_receipt(key: str, desired: dict, *, previous: bytes | None, hooks_fil
             record.update(schema=3, skill_root=desired["skill_root"])
     else:
         record.update(mcp=desired["mcp"], baseline=baseline)
+        if key == "codegraph" and "hooks" in desired:
+            record.update(schema=2, hooks=desired["hooks"], trust=trust, hooks_file_created=hooks_file_created)
     owned_files.replace(_receipt_path(key), owned_files.json_bytes(record), previous)
 
 
@@ -199,6 +204,8 @@ def inspect(key: str, codex_home: Path, *, enabled: bool) -> dict[str, object]:
         return {"state": "blocked", "owned": False, "detail": "native receipt belongs to another CODEX_HOME"}
     current = (_context_matches(codex_home, receipt) if key == "context-mode" else
                _mcp_fields(key, codex_home) == receipt["mcp"])
+    if key == "codegraph":
+        current = current and codegraph.matches(sys.modules[__name__], codex_home, receipt)
     if not current:
         return {"state": "drifted", "owned": True, "detail": "native owner configuration changed"}
     if not enabled:
@@ -338,17 +345,12 @@ def apply(key: str, codex_home: Path, *, adopt: bool = False, repair: bool = Fal
     desired = _desired(key, codex_home, enabled=True, receipt=_read_receipt(key), configure=True)
     if key == "context-mode":
         return _context_apply(codex_home, desired, _read_receipt(key), repair=repair)
+    if key == "codegraph":
+        return codegraph.configure(sys.modules[__name__], codex_home, desired, _read_receipt(key))
     previous = owned_files.read(_receipt_path(key), private=True)
     receipt = _read_receipt(key)
     before = _mcp_fields(key, codex_home)
     baseline = receipt["baseline"] if receipt else before
-    # Ask the native owner for its contract in isolation, then merge its fields.
-    if key == "codegraph":
-        with tempfile.TemporaryDirectory(prefix="pennix-codegraph-") as directory:
-            staging = Path(directory)
-            _run([_command(key), "install", "--target", "codex", "--location", "global", "--yes"], staging)
-            if _mcp_fields(key, staging) != {"command": "codegraph", "args": ["serve", "--mcp"]}:
-                raise NativeIntegrationError("CodeGraph 原生配置合同已变化")
     _mcp_edit(key, codex_home, desired["mcp"], before)
     try:
         _write_receipt(key, desired, previous=previous, baseline=baseline)
@@ -372,6 +374,8 @@ def unconfigure(key: str, codex_home: Path) -> str:
     before = owned_files.read(path, private=True)
     if key == "context-mode":
         return context_mode.unconfigure(sys.modules[__name__], codex_home, receipt)
+    if key == "codegraph":
+        return codegraph.configure(sys.modules[__name__], codex_home, {}, receipt, remove=True)
     _mcp_edit(key, codex_home, receipt["baseline"], receipt["mcp"])
     try:
         owned_files.replace(path, None, before)

@@ -645,7 +645,7 @@
         "directory": "pennix-skills",
         "source": {
           "repo": "PennixRv/pennix-skills",
-          "ref": "5534241dd1b186d1e688fc8f5e17f26c3e96d6a5",
+          "ref": "ccc0f9da9ac178de9b90f885ff5c87f95663e308",
           "manifest": "collection.json"
         }
       }

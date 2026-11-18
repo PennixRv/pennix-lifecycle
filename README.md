@@ -117,7 +117,11 @@ Context Mode 的三个命令 Skill 由其原生计划渲染，Lifecycle 按新�
 Copilot CLI 接入必须显式选择 `PENNIX_TARGET_COPILOT_CONTEXT_MODE` 或
 `PENNIX_TARGET_COPILOT_CODEGRAPH`，两项默认关闭；`PENNIX_COPILOT_HOME` 决定实际配置根。
 `PENNIX_CONTEXT_MODE_CODEX` 保留既有 Codex 默认选择，程序安装可与宿主接入分别管理。
-CodeGraph 只执行原生 global MCP 登记，不创建索引。Context Mode 使用固定包的
+CodeGraph 从原生 global installer 取得 MCP 和 Codex 分层路由 Hook 定义，不创建索引。
+Codex 的两个 handler 由 Lifecycle 通过真实 `hooks/list` 核验身份和当前摘要后配置确切信任，
+保留其他 Hook 的顺序与信任；更新迁移旧 MCP 回执，失败按原字节撤回，漂移拒绝覆盖。
+项目仍须由宿主信任且有本树独立可用索引；不自动初始化、同步或重建图。
+Context Mode 使用固定包的
 `setup --print copilot-cli --json` 计划，核验四类 Hook、三个命令 Skill 和 MCP 后再执行；
 不复用 Codex TOML、Hook 信任或认证。共享命令包含各宿主的原生工具名，私有命令仍由原生发现。
 
