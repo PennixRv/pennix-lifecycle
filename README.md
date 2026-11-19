@@ -17,6 +17,12 @@ pennix apply
 
 支持范围为 Arch Linux / WSL2 Arch、x86_64。bootstrap 会先执行完整 `pacman -Syu`，准备 curl、CA/keyring、系统 Python 和 uv；Kconfiglib、TOML、YAML 按发行内的完整哈希锁安装到工具私有 `.runtime`，不再要求系统 Kconfiglib/AUR 包或全局 pip。不以局部依赖升级替代完整系统准备。普通用户的 HOME 必须与目标账户一致；root→用户调用清空宿主环境。自定义 XDG 目录可在普通用户入口保留。发现未结事务时 bootstrap 先停止，不能用重装清除 unknown。
 
+## 主动项目初始化策略
+
+`PENNIX_PROJECT_INIT_CODEX_TRUST` 和 `PENNIX_PROJECT_INIT_CODEGRAPH` 默认关闭，可在现有声明中分别开启。具备对应能力的 `trellis init --codex` 读取该策略，自动接入明确项目的 Codex 信任、已核验 Trellis Hooks 和 CodeGraph local／索引；显式关闭、未知配置及修改过的受管脚本仍保留。系统安装、普通会话和目录创建不触发项目初始化，也不安装 Git 同步 Hook。
+
+`pennix config policy --json` 只读返回版本化的两项布尔策略，不输出完整配置或秘密，不查询包锁和组件运行态。缺少项目能力由 Trellis 明确报告，系统部署和项目操作仍分属原生 owner。
+
 ## 网页搜索退役迁移
 
 新配置默认明确选择 Codex `web_search="live"`；“保留现有配置（不接管）”不会清除旧的 `disabled`。Copilot 仅使用其原生 `web_fetch`，不承诺独立搜索。Windsurf 代码定位保留。

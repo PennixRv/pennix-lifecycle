@@ -779,6 +779,11 @@ def cmd_config_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_config_policy(args: argparse.Namespace) -> int:
+    _emit(config_model.project_policy(args.config), args.json)
+    return 0
+
+
 def cmd_config_edit(args: argparse.Namespace) -> int:
     print(config_model.edit(args.config))
     return 0
@@ -2439,7 +2444,7 @@ def parser() -> argparse.ArgumentParser:
 
     config = sub.add_parser("config", help="管理 workflow.config")
     config_sub = config.add_subparsers(dest="config_command", required=True)
-    for name, function in (("init", cmd_config_init), ("edit", cmd_config_edit), ("check", cmd_config_check)):
+    for name, function in (("init", cmd_config_init), ("edit", cmd_config_edit), ("check", cmd_config_check), ("policy", cmd_config_policy)):
         child = config_sub.add_parser(name)
         child.add_argument("--config")
         child.add_argument("--json", action="store_true")

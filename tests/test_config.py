@@ -44,6 +44,20 @@ class ConfigModelTests(unittest.TestCase):
                 os.environ[key] = value
         self.temp.cleanup()
 
+    def test_project_policy_is_explicit_independent_and_reads_only_declaration(self):
+        path = config_model.init()
+        before = path.read_bytes()
+        self.assertEqual(config_model.project_policy(), {
+            "schema_version": 1, "project_init": {"codex_trust": False, "codegraph": False}})
+        self.assertEqual(path.read_bytes(), before)
+        kconf, _ = config_model.load()
+        kconf.syms["PENNIX_PROJECT_INIT_CODEGRAPH"].set_value("y")
+        config_model.write(kconf, path)
+        policy = config_model.project_policy()
+        self.assertEqual(policy["project_init"], {"codex_trust": False, "codegraph": True})
+        with mock.patch("secret_store.load", side_effect=AssertionError("must not read secrets")):
+            self.assertEqual(config_model.project_policy(), policy)
+
     def test_managed_codex_template_clears_legacy_values_and_preserves_other_owners(self):
         from tomlkit import parse
         source = Path(__file__).resolve().parents[1] / "config/defconfig-wsl"
@@ -917,6 +931,18 @@ class CliTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_policy_cli_returns_only_versioned_project_choices(self) -> None:
+        env = {**os.environ, "HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / "config"),
+               "XDG_STATE_HOME": str(self.home / "state")}
+        root = Path(__file__).resolve().parents[1]
+        subprocess.run([str(root / "pennix"), "config", "init"], cwd=root, env=env,
+                       check=True, capture_output=True, text=True)
+        result = subprocess.run([str(root / "pennix"), "config", "policy", "--json"],
+                                cwd=root, env=env, check=True, capture_output=True, text=True)
+        self.assertEqual(json.loads(result.stdout), {"schema_version": 1,
+            "project_init": {"codex_trust": False, "codegraph": False}})
+        self.assertNotIn("PENNIX_CODEX", result.stdout)
 
     def test_plan_does_not_print_nested_codex_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

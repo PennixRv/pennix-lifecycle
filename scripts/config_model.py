@@ -175,6 +175,14 @@ def values(kconf) -> dict[str, str]:
     return {symbol.name: symbol.str_value for symbol in kconf.unique_defined_syms}
 
 
+def project_policy(explicit: str | None = None) -> dict:
+    kconf, _ = load(explicit)
+    return {"schema_version": 1, "project_init": {
+        "codex_trust": kconf.syms["PENNIX_PROJECT_INIT_CODEX_TRUST"].str_value == "y",
+        "codegraph": kconf.syms["PENNIX_PROJECT_INIT_CODEGRAPH"].str_value == "y",
+    }}
+
+
 def _render(kconf) -> bytes:
     for key in PATH_KEYS:
         symbol = kconf.syms[key]

@@ -1,5 +1,21 @@
 mainmenu "Pennix 工作流生命周期"
 
+menu "主动项目初始化的自动接入（一次授权）"
+
+config PENNIX_PROJECT_INIT_CODEX_TRUST
+	bool "自动接入明确项目及已核验的 Trellis Codex Hooks"
+	default n
+	help
+		只在主动执行 Trellis 初始化时授信精确项目与受管 Hook；保留拒绝及未知内容。
+
+config PENNIX_PROJECT_INIT_CODEGRAPH
+	bool "自动接入 CodeGraph 并建立或恢复本项目索引"
+	default n
+	help
+		由项目原生入口执行，不随系统安装初始化仓库，不安装 Git 同步 Hook。
+
+endmenu
+
 config PENNIX_CONFIG_FORMAT
 	string
 	default "5"
