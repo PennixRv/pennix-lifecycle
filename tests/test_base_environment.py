@@ -100,6 +100,29 @@ class BaseEnvironmentTests(unittest.TestCase):
         self.assertIn('pennix: native package download failed', errors.getvalue())
         self.assertNotIn('Traceback', errors.getvalue())
 
+    def test_recover_first_install_without_receipt_checks_frozen_packages(self):
+        frozen = {"official": ["example"], "aur": [], "versions": {"example": "1-1"},
+                  "aur_candidates": {}, "node_replacement": False}
+        changed = {**frozen, "versions": {"example": "2-1"}}
+        empty = {"official": [], "aur": [], "versions": {},
+                 "aur_candidates": {}, "node_replacement": False}
+
+        with patch.object(base, 'package_plan', return_value=changed):
+            with self.assertRaisesRegex(base.BaseError, '冻结候选'):
+                base.apply(self.kconf, self.catalog, package_target=frozen, recover_missing_receipt=True)
+        self.assertIsNone(base.receipt())
+        base._install_packages.assert_not_called()
+
+        upgrade = {"steps": [{"id": "system-upgrade", "status": "verified"}]}
+        before = {**self.native, "docker_active": False}
+        with patch.object(base, 'package_plan', side_effect=[frozen, empty]), \
+             patch.object(base, 'native_state', side_effect=[before, before, self.native]), \
+             patch.object(base.apply_journal, 'read', return_value=upgrade):
+            self.assertEqual(base.apply(self.kconf, self.catalog, package_target=frozen,
+                                        recover_missing_receipt=True), 'changed')
+        self.assertIsNotNone(base.receipt())
+        base._install_packages.assert_called_once()
+
     def test_apply_repair_uninstall_roundtrip_preserves_external_data(self):
         original = b'# user preference\nalias custom=true\n'
         (self.home/'.bashrc').write_bytes(original)

@@ -2377,9 +2377,14 @@ def cmd_recover(args: argparse.Namespace) -> int:
                 raise CliError("基础撤回 owner 未证明完成")
             active = apply_journal.verified(active, step["id"], {"recovered": True, "state": "absent"})
         elif step["component"] == "base-environment" and step["action"] in {"install", "upgrade"}:
-            if base_environment.receipt() is None:
+            recover_missing_receipt = (
+                active["command"] == "apply" and step["action"] == "install"
+                and step["status"] in {"started", "unknown"}
+            )
+            if base_environment.receipt() is None and not recover_missing_receipt:
                 raise CliError("基础环境没有同目标 owner receipt；不能释放 unknown")
-            base_environment.apply(kconf, catalog, package_target=step["target"].get("packages"))
+            base_environment.apply(kconf, catalog, package_target=step["target"].get("packages"),
+                                   recover_missing_receipt=recover_missing_receipt)
             if base_environment.inspect(kconf)["state"] != "current":
                 raise CliError("基础环境 owner 未证明完成")
             active = apply_journal.verified(active, step["id"], {"recovered": True, "state": "current"})

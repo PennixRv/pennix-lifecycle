@@ -326,22 +326,27 @@ def _native_apply():
         _run(["sudo", "chsh", "-s", "/usr/bin/zsh", state["user"]])
 
 
-def apply(kconf, catalog, *, package_target=None):
-    if (receipt() or {}).get("uninstall") is not None:
+def apply(kconf, catalog, *, package_target=None, recover_missing_receipt=False):
+    record = receipt()
+    if (record or {}).get("uninstall") is not None:
         raise BaseError("基础撤回尚未完成；使用同事务 recover 续接撤回")
     state = inspect(kconf)
     if state["state"] == "blocked":
         raise BaseError(state.get("detail", "基础预检失败") + ": " + ", ".join(state.get("conflicts", [])))
-    if state["packages"]["versions"]:
+    packages = state["packages"]
+    if recover_missing_receipt and record is None:
+        # Every package and file mutation follows the first owner receipt.
+        if (not packages["versions"] or packages != package_target or state["native"]["docker_active"]
+                or any(item["before_sha256"] == item["after_sha256"] for item in state["files"])):
+            raise BaseError("基础首次安装的现场与冻结候选不符；保留 unknown")
+    if packages["versions"]:
         journal = apply_journal.read()
         if not journal or not any(step['id']=='system-upgrade' and step['status']=='verified' for step in journal['steps']):
             raise BaseError("缺失的软件须经 apply --scope base 的同次完整系统升级，repair 不绕过此门禁")
-    record = receipt()
     if record is None:
         record = {"schema": 1, "target": files.target_identity(), "files": {},
                   "native": native_state(), "version": (ROOT/'VERSION').read_text().strip()}
         _save(record)
-    packages = state["packages"]
     if packages["aur"]:
         if package_target is None or any(name not in package_target.get("aur_candidates", {}) for name in packages["aur"]):
             raise BaseError("基础 AUR 缺少同事务已审阅候选；须重新 plan/apply")
