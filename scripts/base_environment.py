@@ -177,8 +177,8 @@ def package_plan():
     if aur:
         url = "https://aur.archlinux.org/rpc/v5/info?" + urllib.parse.urlencode([("arg[]", x) for x in aur])
         with urllib.request.urlopen(url, timeout=30) as response:
-            candidates = json.load(response)["results"]
-        for item in candidates:
+            aur_results = json.load(response)["results"]
+        for item in aur_results:
             if not item.get("Maintainer") or item.get("OutOfDate"):
                 raise BaseError(f"AUR 候选无维护者或已标记过期: {item['Name']}")
             versions[item["Name"]] = item["Version"]

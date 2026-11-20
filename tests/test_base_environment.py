@@ -22,6 +22,36 @@ import pennix
 
 install_base_packages = base._install_packages
 
+
+class BasePackagePlanTests(unittest.TestCase):
+    def test_first_install_freezes_missing_aur_package(self):
+        name = 'example-base-aur'
+        ref = 'a' * 40
+        metadata = {'results': [{'Name': name, 'Version': '1-1', 'Maintainer': 'example', 'OutOfDate': None}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'references').mkdir()
+            (root / 'references/base-packages.json').write_text(json.dumps({'official': [], 'aur': [name]}))
+            (root / 'PKGBUILD').write_text('pkgname=example-base-aur\n')
+            (root / '.SRCINFO').write_text('pkgbase = example-base-aur\n')
+            candidate = {'source': f'aur:{name}', 'version': '1-1', 'path': str(root)}
+            with patch.object(base, 'ROOT', root), \
+                 patch.object(base, '_run', return_value=''), \
+                 patch.object(base.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(metadata).encode())), \
+                 patch.object(base.candidates, '_git_head', return_value=ref) as git_head, \
+                 patch.object(base.candidates, 'resolve_aur', return_value=candidate) as resolve_aur, \
+                 patch.object(base.candidates, 'freeze_aur_sources', return_value={'source': 'frozen'}):
+                plan = base.package_plan()
+
+            git_head.assert_called_once_with(name, aur=True)
+            self.assertEqual(resolve_aur.call_args.args[2], {'version': '1-1', 'ref': ref})
+            self.assertEqual(plan['aur'], [name])
+            frozen = plan['aur_candidates'][name]
+            self.assertEqual(frozen['ref'], ref)
+            self.assertEqual(frozen['recipe_sha256'], hashlib.sha256((root / 'PKGBUILD').read_bytes()).hexdigest())
+            self.assertEqual(frozen['sources'], {'source': 'frozen'})
+
+
 class BaseEnvironmentTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='pennix-base-test-')
