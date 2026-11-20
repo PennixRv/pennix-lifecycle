@@ -158,6 +158,40 @@ class ConvergenceTests(unittest.TestCase):
     def test_recover_missing_aur_package_uses_frozen_target_and_upgrade_gate(self):
         self._recover_missing_arch_package('aur')
 
+    def test_recover_missing_plugin_replays_frozen_native_install(self):
+        config, lock = self.root / "workflow.config", self.root / "components.lock.json"
+        config.write_text("same input")
+        source = "codex-marketplace:https://example.invalid/marketplace.git:example@marketplace"
+        sources = {"example": source}
+        component = {"delivery": "plugin", "lock_source": source, "plugin": {"id": "example@marketplace"}}
+        target = {"source": source, "version": "1.0", "ref": "a" * 40}
+        component_lock.write(lock, {"schema": 1, "components": {}}, sources)
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.root)}):
+            active = apply_journal.start("apply", None, apply_journal.digest(config), apply_journal.digest(lock), [
+                {"id": "example:install", "component": "example", "action": "install", "target": target}])
+        apply_journal.unknown(active, "example:install")
+        args = SimpleNamespace(json=True, resolve="completed", transaction=active["transaction"],
+                               step="example:install", component_lock_path=lock, component_lock_sources=sources,
+                               component_lock=component_lock.read(lock, sources))
+        with patch.object(pennix, "_load", return_value=(object(), config, {"components": {"example": component}})), \
+             patch.object(config_model, "config_value", return_value=str(self.root)), \
+             patch.object(engine, "probe_component", return_value=("match", None)) as probe, \
+             patch.object(pennix.candidates, "resolve", return_value=target) as resolve, \
+             patch.object(pennix, "_run_component") as install, \
+             patch.object(pennix, "_component_status", return_value={"state": "match"}), \
+             patch.object(engine, "_plugin_owned", side_effect=lambda *_: install.called), \
+             patch.object(pennix, "_emit"):
+            with self.assertRaises(pennix.CliError):
+                pennix.cmd_recover(args)
+            install.assert_not_called()
+            self.assertEqual(apply_journal.step(apply_journal.read(), "example:install")["status"], "unknown")
+            probe.return_value = ("missing", None)
+            self.assertEqual(pennix.cmd_recover(args), 0)
+            self.assertEqual(resolve.call_args.args[2], target)
+            self.assertEqual(install.call_args.args[3], "install")
+            self.assertIsNone(apply_journal.read())
+            self.assertEqual(component_lock.read(lock, sources)["components"]["example"], target)
+
     def _recover_missing_arch_package(self, source):
         config, lock = self.root/'workflow.config', self.root/'components.lock.json'
         config.write_text('same input')

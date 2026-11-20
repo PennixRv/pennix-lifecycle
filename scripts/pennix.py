@@ -2391,11 +2391,18 @@ def cmd_recover(args: argparse.Namespace) -> int:
         elif component and step["action"] in {"install", "upgrade", "adopt", "adopt-upgrade"} and step["target"]:
             component["_lock_target"] = step["target"]
             args.kconf, args.codex_home = kconf, home
-            if (step["action"] == "install" and component.get("package", {}).get("source") in {"official", "aur"}
-                    and owner_engine.package_absent(component)):
-                if not any(item["id"] == "system-upgrade" and item["status"] == "verified" for item in active["steps"]):
+            retry_arch = (step["action"] == "install" and component.get("package", {}).get("source") in {"official", "aur"}
+                          and owner_engine.package_absent(component))
+            retry_plugin = (
+                active["command"] == "apply" and step["action"] == "install"
+                and step["status"] in {"started", "unknown"} and component["delivery"] == "plugin"
+                and owner_engine._plugin_receipt(step["component"], component) is None
+                and owner_engine.probe_component(component, home)[0] == "missing"
+            )
+            if retry_arch or retry_plugin:
+                if retry_arch and not any(item["id"] == "system-upgrade" and item["status"] == "verified" for item in active["steps"]):
                     raise CliError("缺失的 Arch 包恢复须有同次完整系统升级证据；保留 unknown")
-                with tempfile.TemporaryDirectory(prefix="pennix-recover-arch-") as directory:
+                with tempfile.TemporaryDirectory(prefix="pennix-recover-install-") as directory:
                     candidate = candidates.resolve(component, Path(directory), step["target"])
                     _run_component(args, catalog, step["component"], "install", candidate=candidate)
             status = _component_status(args, step["component"], component)
