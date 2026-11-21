@@ -1,4 +1,6 @@
 import hashlib
+from contextlib import redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -8,9 +10,14 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import apply_journal
+import candidates
+import component_lock
+import config_model
 import hook_integrations
 import local_clients
 import owned_files
+import pennix
 
 
 class LocalClientTests(unittest.TestCase):
@@ -80,21 +87,32 @@ class LocalClientTests(unittest.TestCase):
 
     def test_explicit_candidate_replaces_a_matching_client(self):
         self.component["id"] = "client"
+        self.component["lock_source"] = "git:example/client:client"
         self.component["client"]["source"] = {
             "repo": "example/client", "path": "client", "archive": False,
-            "url": "https://example.test/client",
-            "sha256": hashlib.sha256(self.content).hexdigest(),
         }
-        with patch.object(local_clients.files, "download", side_effect=lambda url, path: path.write_bytes(self.content)):
-            local_clients.operate("client", self.component, "install", adopt=True)
+        original = self.home / "original"
+        original.write_bytes(self.content)
+        local_clients.operate("client", self.component, "install", candidate={
+            "repo": "example/client", "ref": "b" * 40, "path": str(original),
+            "sha256": hashlib.sha256(self.content).hexdigest(),
+        })
+        self.component["_lock_target"] = local_clients.lock_migration("client", self.component)
+        self.assertEqual(self.component["_lock_target"]["ref"], "b" * 40)
+        self.assertEqual(local_clients.inspect("client", self.component)[0], "match")
         replacement = self.home / "replacement"
         replacement.write_bytes(b"#!/bin/sh\nexit 1\n")
         candidate = {"repo": "example/client", "ref": "a" * 40,
                      "sha256": hashlib.sha256(replacement.read_bytes()).hexdigest(),
                      "path": str(replacement)}
+        self.component["_candidate_target"] = candidate
+        adjacent = self.home / ".client/user-config.json"
+        adjacent.write_text("user data")
         self.assertEqual(local_clients.operate("client", self.component, "upgrade", candidate=candidate),
                          "changed; preserved adjacent user data")
         self.assertEqual((self.home / ".client/client").read_bytes(), replacement.read_bytes())
+        self.assertEqual(adjacent.read_text(), "user data")
+        self.assertEqual(local_clients.lock_migration("client", self.component)["ref"], "a" * 40)
 
     def test_legacy_url_receipt_migrates_to_a_matching_ref_lock(self):
         component = {"id": "client", "lock_source": "git:example/client:client",
@@ -120,6 +138,85 @@ class LocalClientTests(unittest.TestCase):
         component["_lock_target"] = local_clients.lock_migration("client", component)
         self.assertEqual(component["_lock_target"], {"source": component["lock_source"], "ref": ref, "sha256": digest})
         self.assertEqual(local_clients.inspect("client", component)[0], "match")
+
+    def test_recover_frozen_client_upgrade_and_uninstall_native_hook(self):
+        key, step = "client", "client:upgrade"
+        self.component.update(id=key, delivery="client", lock_source="git:example/client:client",
+                              native_config={"owner": "aoe", "select": "PENNIX_AOE_HOOK"})
+        self.component["client"]["source"] = {"repo": "example/client", "path": "client", "archive": False}
+        codex_home = self.home / ".codex"
+        codex_home.mkdir()
+        hook_integrations.apply("aoe", codex_home)
+        config = config_model.init(str(self.home / "workflow.config"))
+        lock_path = component_lock.path_for(config)
+        sources = {key: self.component["lock_source"]}
+        original = self.home / "original"
+        replacement = self.home / "replacement"
+        original.write_bytes(self.content)
+        newer = b"#!/bin/sh\nexit 1\n"
+        replacement.write_bytes(newer)
+        previous = {"source": sources[key], "ref": "a" * 40, "sha256": hashlib.sha256(self.content).hexdigest()}
+        target = {"source": sources[key], "ref": "b" * 40, "sha256": hashlib.sha256(newer).hexdigest()}
+        old_candidate = {**previous, "path": str(original), "repo": "example/client"}
+        new_candidate = {**target, "path": str(replacement), "repo": "example/client"}
+        local_clients.operate(key, self.component, "install", candidate=old_candidate)
+        installed = self.home / ".client/client"
+        adjacent = installed.with_name("user-config.json")
+        adjacent.write_text("user data")
+        component_lock.write(lock_path, {"schema": 1, "components": {key: previous}}, sources)
+        with patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+            journal = apply_journal.start("update", key, apply_journal.digest(config), apply_journal.digest(lock_path),
+                [{"id": step, "component": key, "action": "upgrade", "target": target}])
+        released_inspect = local_clients.inspect
+
+        def inspect_against_old_lock(name, component):
+            return released_inspect(name, {**component, "_lock_target": previous})
+
+        with patch.object(local_clients, "inspect", side_effect=inspect_against_old_lock):
+            with self.assertRaisesRegex(local_clients.ClientError, "写入后核验失败"):
+                pennix._journal_mutate(journal, step,
+                    lambda: local_clients.operate(key, self.component, "upgrade", candidate=new_candidate))
+        self.assertEqual(installed.read_bytes(), self.content)
+        self.assertEqual(apply_journal.step(apply_journal.read(), step)["status"], "unknown")
+
+        argv = ["recover", "--config", str(config), "--transaction", journal["transaction"], "--step", step,
+                "--resolve", "completed", "--json"]
+        catalog = {"components": {key: self.component}, "configuration_targets": {}}
+        with patch.object(pennix.owner_engine, "load_catalog", return_value=catalog), \
+                patch.object(candidates, "RESOLVERS", {key: candidates.resolve_client}), \
+                patch.object(owned_files, "download") as download, redirect_stdout(io.StringIO()):
+            config_before = config.read_bytes()
+            config.write_bytes(config_before + b"\n")
+            with self.assertRaisesRegex(pennix.CliError, "配置与原事务不同"):
+                pennix.cmd_recover(pennix.parser().parse_args(argv))
+            config.write_bytes(config_before)
+            component_lock.write(lock_path, {"schema": 1, "components": {key: target}}, sources)
+            with self.assertRaisesRegex(pennix.CliError, "锁文件与事务"):
+                pennix.cmd_recover(pennix.parser().parse_args(argv))
+            component_lock.write(lock_path, {"schema": 1, "components": {key: previous}}, sources)
+            installed.write_bytes(b"drift")
+            with self.assertRaisesRegex(pennix.CliError, "后置|未证明"):
+                pennix.cmd_recover(pennix.parser().parse_args(argv))
+            download.assert_not_called()
+            installed.write_bytes(self.content)
+            download.side_effect = lambda url, path: path.write_bytes(b"bad digest")
+            with self.assertRaisesRegex(candidates.CandidateError, "sha256 changed"):
+                pennix.cmd_recover(pennix.parser().parse_args(argv))
+            self.assertEqual(installed.read_bytes(), self.content)
+            download.side_effect = lambda url, path: path.write_bytes(newer)
+            self.assertEqual(pennix.cmd_recover(pennix.parser().parse_args(argv)), 0)
+            self.assertIn(f"/{target['ref']}/client", download.call_args.args[0])
+            self.assertEqual(installed.read_bytes(), newer)
+            self.assertEqual(component_lock.read(lock_path, sources)["components"][key], target)
+            self.assertIsNone(apply_journal.read())
+
+            args = pennix.parser().parse_args(["uninstall", key, "--config", str(config), "--confirm", key, "--json"])
+            self.assertEqual(pennix.cmd_uninstall(args), 0)
+        self.assertFalse(installed.exists())
+        self.assertFalse(local_clients.receipt_path(key).exists())
+        self.assertEqual(hook_integrations.inspect("aoe", codex_home)["state"], "absent")
+        self.assertEqual(component_lock.read(lock_path, sources)["components"], {})
+        self.assertEqual(adjacent.read_text(), "user data")
 
     def test_hooks_adopt_only_exact_entries_and_keep_other_owners(self):
         home = self.home / ".codex"

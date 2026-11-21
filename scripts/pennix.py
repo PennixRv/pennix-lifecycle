@@ -697,7 +697,7 @@ def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_
         return native_integrations.apply(native["owner"], args.codex_home,
             adopt=config_model.config_value(args.kconf, "PENNIX_ADOPT_EXISTING_PACKAGES") == "y",
             repair=repair)
-    if native and operation == "uninstall":
+    if native and operation == "uninstall" and component["delivery"] == "package":
         if not (owner_engine.package_absent(component) or
                 owner_engine.package_owned(component_id, component, codex_home=args.codex_home)):
             raise CliError("包归属未通过预检；未撤回 native 配置")
@@ -2038,6 +2038,10 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         elif component["delivery"] == "plugin" and not (owner_engine._plugin_owned(args.component, component, args.codex_home)
                 or owner_engine.plugin_absent(args.component, component, args.codex_home)):
             raise CliError("卸载预检无法证明 plugin 归属")
+        elif component["delivery"] == "client":
+            state, detail = owner_engine.local_clients.inspect(args.component, component)
+            if state not in {"match", "outdated", "missing"}:
+                raise CliError(f"卸载预检无法证明客户端归属: {detail}")
     paseo = Path(shutil.which("paseo") or Path.home() / ".local/bin/paseo")
     paseo_home = Path(config_model.config_value(kconf, "PENNIX_PASEO_HOME"))
     service_state = paseo_service.inspect(paseo, paseo_home) if args.all else "absent"
@@ -2407,6 +2411,21 @@ def cmd_recover(args: argparse.Namespace) -> int:
                 with tempfile.TemporaryDirectory(prefix="pennix-recover-install-") as directory:
                     candidate = candidates.resolve(component, Path(directory), step["target"])
                     _run_component(args, catalog, step["component"], "install", candidate=candidate)
+            if (active["command"] == "update" and active["component"] == step["component"]
+                    and step["action"] == "upgrade" and step["status"] in {"started", "unknown"}
+                    and component["delivery"] == "client"):
+                key = step["component"]
+                state, _ = owner_engine.local_clients.inspect(key, component)
+                if state == "outdated":
+                    previous = args.component_lock["components"].get(key, {})
+                    if (not {"ref", "sha256"} <= previous.keys() or not {"ref", "sha256"} <= step["target"].keys()
+                            or owner_engine.local_clients.inspect(key, {**component, "_lock_target": previous})[0] != "match"):
+                        raise CliError("旧版客户端与事务锁检查点不符；保留 unknown")
+                    with tempfile.TemporaryDirectory(prefix="pennix-recover-client-") as directory:
+                        candidate = candidates.resolve(component, Path(directory), step["target"])
+                        if candidates.lock_entry(candidate) != step["target"]:
+                            raise CliError("客户端恢复候选与事务冻结目标不符；保留 unknown")
+                        _run_component(args, catalog, key, "upgrade", candidate=candidate)
             status = _component_status(args, step["component"], component)
             if component.get("native_config"):
                 state, observed = owner_engine.probe_component(component, home)

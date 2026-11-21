@@ -270,7 +270,8 @@ def operate(key: str, component: dict, operation: str, *, adopt: bool = False, e
                 changed_links.append((link, previous_link, want))
             files.replace(receipt_path(key), output, previous)
             written = True
-            if incoming and inspect(key, component)[0] != "match":
+            verified_component = {**component, "_lock_target": candidate} if candidate else component
+            if incoming and inspect(key, verified_component)[0] != "match":
                 raise ClientError("本地客户端写入后核验失败")
         except BaseException as error:
             try:
