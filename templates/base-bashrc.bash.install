@@ -6,7 +6,6 @@ HISTSIZE=50000
 HISTFILESIZE=50000
 HISTCONTROL=ignoreboth:erasedups
 shopt -s histappend histverify
-PROMPT_COMMAND=("history -a; history -n" "${PROMPT_COMMAND[@]}")
 
 if [[ -r /usr/share/blesh/ble.sh ]]; then
     source /usr/share/blesh/ble.sh --attach=none
@@ -16,13 +15,21 @@ if ! declare -F _comp_load >/dev/null && [[ -r /usr/share/bash-completion/bash_c
 fi
 eval "$(zoxide init bash)"
 if [[ ${BLE_VERSION-} ]]; then
+    ble-face auto_complete='fg=8'
+    bleopt complete_auto_complete_opts+=syntax-disabled
+    bleopt complete_auto_delay=150 complete_auto_menu= complete_menu_maxlines=6
+    bleopt history_share=1
     ble-import integration/fzf-completion
     ble-import integration/fzf-key-bindings
 else
+    PROMPT_COMMAND=("history -a; history -n" "${PROMPT_COMMAND[@]}")
     eval "$(fzf --bash)"
 fi
 export STARSHIP_CONFIG="${STARSHIP_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/starship.toml}"
 eval "$(starship init bash)"
+if [[ ${BLE_VERSION-} && $STARSHIP_CONFIG == "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/starship.toml" ]]; then
+    bleopt exec_errexit_mark=
+fi
 if [[ -r "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/bashrc.local.bash" ]]; then
     source "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/bashrc.local.bash"
 fi

@@ -54,6 +54,8 @@ pennix check --scope base --json
 
 稳定公共配置位于 `$XDG_CONFIG_HOME/pennix/base`。Bash 登录文件和 `.bashrc` 共用 `env.sh`，systemd 用户服务使用 `environment.d`。PATH 保留项目 venv 优先级，去重并移除旧 `.npm-global`、无来源 `~/bin`、Windows PATH 及 Codex 临时注入路径。直接执行的非登录 Bash 使用其启动方提供的环境。只有交互且有 TTY 时加载 Starship、ble.sh、bash-completion、fzf 和 zoxide。个性化配置可使用 `bashrc.local.bash`、`STARSHIP_CONFIG` 和 `nvim.local.lua`。Yazi 通过 `PENNIX_COMPONENT_YAZI` 显式选择，默认关闭。
 
+ble.sh 在输入停顿 150 毫秒后以暗灰字显示历史联想，沿用终端背景。按 Tab 打开补全菜单，每页最多 6 行。Bash 窗口通过 ble.sh 原生方式共享历史，未加载 ble.sh 时使用 Bash 内建的历史同步。
+
 plan 展示目标、前后摘要、接管对象和原生设置。迁移已有 Zsh 基础环境时，Lifecycle 更新其受管启动段并保留用户文件。对经审阅的旧受管 Shell 启动文件漂移，将目标绝对路径与当前 SHA-256 写入 `PENNIX_BASE_ADOPT_FILES` 的 JSON 映射。无法匹配已审阅值的差异、符号链接和错误标记会阻止应用。Git 通过原生 include 加载公共偏好与私有身份，保留项目覆盖和认证。tmux 仅升级可证明的上一版受管段，保留 CCH 与外部内容。
 
 基础部署会生成指定中英文 locale、启用本地 Docker 服务并加入 docker 组。通过 Bash 语法和登录 PATH 检查后，设置目标用户的默认 Shell 为 `/usr/bin/bash`。新登录后核验组权限及命令入口。保留现有 Docker 数据，不开放 TCP API。已有 npm pnpm 只有在旧锁、receipt 和实际身份一致时才退出原 owner；精确旧归档作为私有恢复材料保留，官方安装、后置验证及新锁提交成功后才退出。pnpm 迁移中断使用同一事务的 `recover --resolve completed` 续接，或 `recover --resolve restored` 从已核验的旧归档恢复原 owner 和锁；未知系统包归属会阻断撤回，不手写归属。
