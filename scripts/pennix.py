@@ -45,7 +45,7 @@ APPLY_ORDER = [
     "codex-cli", "copilot-cli", "trellis-cli", "pnpm", "context-mode", "codegraph-cli", "paseo-cli", "trellis-paseo-adapter",
     "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "uv", "yazi",
     "markitdown", "pandoc", "libreoffice", "poppler", "tesseract-eng", "tesseract-chi-sim", "tesseract", "noto-fonts-cjk",
-    "peon-ping", "codex-config", "codex-agents", "pennix-skills-extra",
+    "codex-config", "codex-agents", "pennix-skills-extra",
     "pennix-skills",
     "base-environment",
 ]

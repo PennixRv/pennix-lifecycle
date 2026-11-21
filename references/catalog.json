@@ -553,21 +553,6 @@
       "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
       "package": {"source": "official", "name": "noto-fonts-cjk", "architecture": "any", "identity_only": true, "external_satisfies": true, "resolve_dependencies": true}
     },
-    "peon-ping": {
-      "delivery": "client", "lock_source": "git:PeonPing/peon-ping:runtime",
-      "source": "fixed PeonPing/peon-ping runtime files", "owner": "peon-ping", "scope": "global",
-      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed"},
-      "native_config": {"owner": "peon-ping", "select": "PENNIX_PEON_HOOK"},
-      "client": {
-        "root": "$HOME/.openpeon",
-        "source": {
-          "repo": "PeonPing/peon-ping",
-          "archive": true
-        },
-        "paths": ["peon.sh", "relay.sh", "VERSION", "LICENSE", "adapters/codex.sh", "scripts"],
-        "commands": {}
-      }
-    },
     "codex-config": {
       "delivery": "static",
       "source": "tracked Codex configuration templates",

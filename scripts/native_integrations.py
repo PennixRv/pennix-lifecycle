@@ -188,7 +188,7 @@ def _context_matches(codex_home: Path, record: dict) -> bool:
 
 
 def inspect(key: str, codex_home: Path, *, enabled: bool) -> dict[str, object]:
-    if key in {"aoe", "peon-ping"}:
+    if key == "aoe":
         return hook_integrations.inspect(key, codex_home, enabled=enabled)
     if key not in {"context-mode", "codegraph", "siyuan"}:
         raise NativeIntegrationError(f"未知 native integration: {key}")
@@ -283,7 +283,7 @@ def _mcp_fields(key: str, home: Path) -> dict | None:
 
 
 def can_adopt(key: str, home: Path) -> bool:
-    if key in {"aoe", "peon-ping"}:
+    if key == "aoe":
         return hook_integrations._read(key, home)[1] == hook_integrations.desired(key)
     if key == "codegraph":
         fields = _mcp_fields(key, home)
@@ -335,7 +335,7 @@ def _mcp_edit(key: str, home: Path, fields: dict | None, expected: dict | None) 
 
 
 def apply(key: str, codex_home: Path, *, adopt: bool = False, repair: bool = False) -> str:
-    if key in {"aoe", "peon-ping"}:
+    if key == "aoe":
         return hook_integrations.apply(key, codex_home, adopt=adopt)
     status = inspect(key, codex_home, enabled=True)
     if status["state"] == "blocked" or status["state"] == "external" and not (adopt and can_adopt(key, codex_home)):
@@ -363,7 +363,7 @@ def apply(key: str, codex_home: Path, *, adopt: bool = False, repair: bool = Fal
 
 
 def unconfigure(key: str, codex_home: Path) -> str:
-    if key in {"aoe", "peon-ping"}:
+    if key == "aoe":
         return hook_integrations.apply(key, codex_home, remove=True)
     receipt = _read_receipt(key)
     if receipt is None:

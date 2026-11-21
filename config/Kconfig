@@ -227,21 +227,10 @@ config PENNIX_COMPONENT_NOTO_FONTS_CJK
 
 endmenu
 
-config PENNIX_COMPONENT_PEON_PING
-	bool "OpenPeon / peon-ping 本地运行文件"
-	default n
-	help
-		只交付固定官方运行文件；保留 packs、用户配置、状态和日志，不运行多宿主 installer。
-
 config PENNIX_AOE_HOOK
 	bool "AoE 的 Codex SessionStart Hook"
 	default y
 	depends on PENNIX_COMPONENT_AOE && PENNIX_COMPONENT_CODEX_CLI && PENNIX_CODEX_HOOKS
-
-config PENNIX_PEON_HOOK
-	bool "OpenPeon 的 Codex Hook"
-	default y
-	depends on PENNIX_COMPONENT_PEON_PING && PENNIX_COMPONENT_CODEX_CLI && PENNIX_CODEX_HOOKS
 
 config PENNIX_COMPONENT_CODEX_CONFIG
 	bool "Codex 配置"

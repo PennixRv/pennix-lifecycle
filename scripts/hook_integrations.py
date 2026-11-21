@@ -1,10 +1,9 @@
-"""Own the finite Codex Hook entries for the local AoE and OpenPeon clients."""
+"""Own the registered AoE Codex Hook entries."""
 from __future__ import annotations
 
 import copy
 import json
 from pathlib import Path
-import shlex
 import tomllib
 
 import owned_files as files
@@ -34,18 +33,11 @@ def desired(key: str) -> dict:
     if key == "aoe":
         command = "sh -c '[ -n \"$AOE_INSTANCE_ID\" ] || exit 0; [ -n \"$AOE_HOOK_BIN\" ] || exit 0; [ -x \"$AOE_HOOK_BIN\" ] || exit 0; \"$AOE_HOOK_BIN\" __extract-session-id --field session-id --agent codex 2>/dev/null; exit 0 # aoe-hooks'"
         return {"SessionStart": [{"hooks": [{"type": "command", "command": command}]}]}
-    if key == "peon-ping":
-        root = Path.home() / ".openpeon"
-        adapter = shlex.quote(str(root / "adapters/codex.sh"))
-        command = f"if [ -f {adapter} ]; then CLAUDE_PEON_DIR={shlex.quote(str(root))} bash {adapter} >/dev/null 2>&1 || true; fi"
-        return {event: [{"hooks": [{"type": "command", "command": command, "timeout": 5}]}]
-                for event in ("PermissionRequest", "PreCompact", "Stop")}
     raise HookError("未知本地 Hook owner")
 
 
 def _marked(key: str, entry: dict) -> bool:
-    marker = "aoe-hooks" if key == "aoe" else ".openpeon/adapters/codex.sh"
-    return isinstance(entry, dict) and any(isinstance(hook, dict) and marker in str(hook.get("command", ""))
+    return key == "aoe" and isinstance(entry, dict) and any(isinstance(hook, dict) and "aoe-hooks" in str(hook.get("command", ""))
                                            for hook in entry.get("hooks", []))
 
 

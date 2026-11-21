@@ -19,7 +19,11 @@ HEADER = f"# Pennix workflow.config format: {FORMAT_VERSION}\n"
 PATH_KEYS = {"PENNIX_CODEX_HOME", "PENNIX_COPILOT_HOME", "PENNIX_PASEO_HOME", "PENNIX_SECRETS_FILE"}
 ASSIGN = re.compile(r"^\s*(?:CONFIG_)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 UNSET = re.compile(r"^\s*#\s*CONFIG_([A-Za-z_][A-Za-z0-9_]*)\s+is not set\s*$")
-RETIRED_BOOL_KEYS = {"PENNIX_CODEX_REMOTE_COMPACTION"}
+RETIRED_BOOL_KEYS = {
+    "PENNIX_CODEX_REMOTE_COMPACTION": {"y", "n"},
+    "PENNIX_COMPONENT_PEON_PING": {"n"},
+    "PENNIX_PEON_HOOK": {"n"},
+}
 
 
 class ConfigError(ValueError):
@@ -85,7 +89,7 @@ def _parse_assignments(text: str, kconf: StrictKconfig) -> dict[str, str]:
             raise ConfigError(f"配置包含重复赋值: {name}")
         value = "n" if UNSET.match(line) else match[2]
         if name in RETIRED_BOOL_KEYS:
-            if value not in {"y", "n"}:
+            if value not in RETIRED_BOOL_KEYS[name]:
                 raise ConfigError(f"旧布尔选项值无效: {name}")
         elif name not in defined:
             raise ConfigError(f"配置包含未知选项: {name}")

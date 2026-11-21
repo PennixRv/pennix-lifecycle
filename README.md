@@ -198,7 +198,9 @@ Context Mode 通过 `@pennixrv/context-mode` 包、Codex 原生 MCP 和四个 Ho
 
 Codex Context Mode MCP 通过原生 `env_vars` 动态继承两个 user bus 变量及标准 XDG 用户目录变量，未设置时保持缺省；不转发任意秘密，也不固化主机的 UID 或总线地址。CODEX_HOME 与 PATH 继续显式绑定受管目标。Codex 和 Copilot 的已有受管 Context Mode 接入均沿用回执中的 PATH，不因检查进程环境不同而提示配置更新；首次配置及缺少 PATH 的旧回执迁移须从已核验的原生环境执行。执行器的 shell、TTY、工作目录和预加载隔离仍遵守 Context Mode 合同，不能据 doctor 通过就认为它与交互式终端完全等价。
 
-OpenPeon 运行文件和 AoE/OpenPeon 的精确 Codex Hook 由各自登记合同管理。所有 NAS/其他主机的服务端均为外部依赖，不安装或升级。OpenPeon 只更新有限运行文件，保留音效包、偏好和运行数据。CCH 使用经过摘要校验的私有 GitHub Release npm 包，需要现有 `gh` 认证。
+AoE 的 Codex Hook 由 Lifecycle 按归属管理。NAS 与其他主机上的服务端由各自的原生入口维护。CCH 使用经过摘要校验的私有 GitHub Release npm 包，需要现有 `gh` 认证。
+
+从 0.3.41 起，Peon Ping 已退役。已选用的主机先在 0.3.40 以 `pennix uninstall peon-ping --confirm peon-ping` 撤回原生接入和运行文件，再关闭旧的组件与 Hook 选项，最后升级工具。0.3.41 可读取仍含关闭状态的旧配置。原生卸载保留音效包、偏好和相邻数据，其他宿主的外部接入由其各自 owner 撤回。
 
 正确的既有包可通过 `PENNIX_ADOPT_EXISTING_PACKAGES` 显式纳管，接管前核对原生包名、版本和命令归属；更新须使用 `pennix update <component>`。对无 receipt 的客户端既有文件，先审阅 `plan` 的摘要，再用 `repair <component> --expected-sha256 <摘要>` 精确迁移，未知旁侧文件保留。
 

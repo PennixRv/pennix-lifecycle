@@ -500,7 +500,6 @@ RESOLVERS = {
     "tesseract-eng": resolve_arch,
     "tesseract-chi-sim": resolve_arch,
     "noto-fonts-cjk": resolve_arch,
-    "peon-ping": resolve_client,
     "pennix-skills": resolve_collection,
     "pennix-skills-extra": resolve_collection,
 }

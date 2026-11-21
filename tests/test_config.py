@@ -172,6 +172,20 @@ trust_level = "trusted"
         with self.assertRaises(config_model.ConfigError):
             config_model.load(str(path))
 
+    def test_peon_retirement_requires_disabled_legacy_config(self):
+        path = config_model.init()
+        original = path.read_text()
+        retired = ("PENNIX_COMPONENT_PEON_PING", "PENNIX_PEON_HOOK")
+        for key in retired:
+            path.write_text(original + f"CONFIG_{key}=y\n")
+            with self.assertRaisesRegex(config_model.ConfigError, key):
+                config_model.load(str(path))
+        path.write_text(original + "".join(f"# CONFIG_{key} is not set\n" for key in retired))
+        kconf, _ = config_model.load(str(path))
+        config_model.write(kconf, path, before=path.read_bytes())
+        for key in retired:
+            self.assertNotIn(key, path.read_text())
+
     def test_managed_template_rejects_invalid_budget_and_nonempty_code_mode(self):
         path = config_model.init(str(self.home / "workflow.config"),
                                  defconfig=str(Path(__file__).resolve().parents[1] / "config/defconfig-wsl"))
@@ -290,7 +304,8 @@ trust_level = "trusted"
         catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
         dynamic = {key: value for key, value in catalog["components"].items()
                    if value["delivery"] in {"package", "plugin", "client", "collection"}}
-        self.assertEqual(len(dynamic), 25)
+        self.assertEqual(len(dynamic), 24)
+        self.assertNotIn("peon-ping", dynamic)
         self.assertEqual(len({value["lock_source"] for value in dynamic.values()}), len(dynamic))
         for component in catalog["components"].values():
             if component.get("delivery") == "static" and "template" in component:
