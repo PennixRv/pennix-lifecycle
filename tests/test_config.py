@@ -290,7 +290,7 @@ trust_level = "trusted"
         catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
         dynamic = {key: value for key, value in catalog["components"].items()
                    if value["delivery"] in {"package", "plugin", "client", "collection"}}
-        self.assertEqual(len(dynamic), 24)
+        self.assertEqual(len(dynamic), 25)
         self.assertEqual(len({value["lock_source"] for value in dynamic.values()}), len(dynamic))
         for component in catalog["components"].values():
             if component.get("delivery") == "static" and "template" in component:
@@ -975,7 +975,8 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(json.loads(result.stdout)["components"]["cch-status"]["action"], "keep")
 
-    def test_path_injection_is_idempotent(self) -> None:
+    @mock.patch.object(path_env.pwd, 'getpwuid', return_value=SimpleNamespace(pw_shell='/usr/bin/zsh'))
+    def test_path_injection_is_idempotent(self, _pwd) -> None:
         zshrc = self.home / ".zshrc"
         zshrc.write_text('path=("/usr/bin" $path)\n', encoding="utf-8")
         original_home = Path.home
@@ -988,7 +989,8 @@ class CliTests(unittest.TestCase):
         finally:
             Path.home = original_home  # type: ignore[method-assign]
 
-    def test_path_with_shell_metacharacters_is_quoted_and_uninstall_keeps_it(self) -> None:
+    @mock.patch.object(path_env.pwd, 'getpwuid', return_value=SimpleNamespace(pw_shell='/usr/bin/zsh'))
+    def test_path_with_shell_metacharacters_is_quoted_and_uninstall_keeps_it(self, _pwd) -> None:
         zshrc = self.home / ".zshrc"
         original_home = Path.home
         Path.home = lambda: self.home  # type: ignore[method-assign]
@@ -1002,6 +1004,23 @@ class CliTests(unittest.TestCase):
             self.assertEqual(path_env.apply(str(prefix)), "no-op")
         finally:
             Path.home = original_home  # type: ignore[method-assign]
+
+    @mock.patch.object(path_env.pwd, 'getpwuid', return_value=SimpleNamespace(pw_shell='/usr/bin/bash'))
+    def test_path_only_bash_keeps_existing_profile_and_deduplicates(self, _pwd) -> None:
+        profile = self.home / '.profile'
+        profile.write_text('export KEEP_PROFILE=yes\n')
+        prefix = self.home / "npm $(touch nope) 'quoted'"
+        with mock.patch.object(Path, 'home', return_value=self.home):
+            self.assertEqual(path_env.apply(prefix), 'changed')
+            self.assertEqual(path_env.apply(prefix), 'no-op')
+            self.assertFalse((self.home / '.bash_profile').exists())
+            command = '. "$HOME/.profile"; . "$HOME/.bashrc"; printf "%s\\n%s" "$KEEP_PROFILE" "$PATH"'
+            result = subprocess.run(['bash', '--noprofile', '--norc', '-c', command],
+                                    env={**os.environ, 'HOME': str(self.home), 'PATH': '/usr/bin', 'BASH_ENV': ''},
+                                    capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout.splitlines(), ['yes', f'{prefix}/bin:/usr/bin'])
+            self.assertEqual(path_env.remove(), 'changed')
+            self.assertEqual(profile.read_text(), 'export KEEP_PROFILE=yes\n')
 
     def test_external_collection_is_preserved(self) -> None:
         catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references" / "catalog.json")

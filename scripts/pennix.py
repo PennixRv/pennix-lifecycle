@@ -43,7 +43,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "references" / "catalog.json"
 APPLY_ORDER = [
     "codex-cli", "copilot-cli", "trellis-cli", "pnpm", "context-mode", "codegraph-cli", "paseo-cli", "trellis-paseo-adapter",
-    "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "uv",
+    "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "uv", "yazi",
     "markitdown", "pandoc", "libreoffice", "poppler", "tesseract-eng", "tesseract-chi-sim", "tesseract", "noto-fonts-cjk",
     "peon-ping", "codex-config", "codex-agents", "pennix-skills-extra",
     "pennix-skills",
@@ -524,7 +524,7 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             "unit_state": "absent", "mode": "off", "run": False, "listen": "", "runtime": {"running": False}}
         return {"config": str(path), "codex_home": str(args.codex_home), "components": components,
                 "connections": {}, "functional_checks_requested": False,
-                "side_effects": {"path": {"action": "keep", "path": str(Path.home()/'.zshrc'), "prefix": str(Path.home()/'.local')},
+                "side_effects": {"path": path_env.plan(Path.home() / ".local", managed=True),
                     "system_upgrade": config_model.config_value(kconf, "PENNIX_SYSTEM_UPGRADE") == "y",
                     "system_upgrade_command": "sudo pacman -Syu --noconfirm",
                     "system_upgrade_components": [key for key, item in components.items() if item.get('selected')
@@ -615,7 +615,7 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
     return {"config": str(path), "codex_home": str(args.codex_home), "components": components, "connections": connections,
             "functional_checks_requested": config_model.config_value(kconf, "PENNIX_FUNCTIONAL_CHECKS") == "y",
             "side_effects": {
-                "path": {"path": str(Path.home() / ".zshrc"), "prefix": str(Path.home() / ".local"), "action": "keep" if "base-environment" in selected else path_env.inspect(str(Path.home() / ".local"))},
+                "path": path_env.plan(Path.home() / ".local", managed="base-environment" in selected),
                 "system_upgrade": config_model.config_value(kconf, "PENNIX_SYSTEM_UPGRADE") == "y",
                 "system_upgrade_command": "sudo pacman -Syu --noconfirm",
                 "system_upgrade_components": arch_components,
@@ -654,7 +654,8 @@ def _emit(value: Any, as_json: bool) -> None:
                 print(f"functional:{key}: {item['state']}" + (f" ({item['detail']})" if item.get("detail") else ""))
         side_effects = value.get("side_effects", {})
         if side_effects.get("path"):
-            print(f"PATH: {side_effects['path']['action']} {side_effects['path']['path']} <- {side_effects['path']['prefix']}/bin")
+            path_plan = side_effects["path"]
+            print(f"PATH: {path_plan['action']} {', '.join(path_plan.get('paths', [path_plan['path']]))} <- {path_plan['prefix']}/bin")
         if side_effects.get("system_upgrade"):
             print(f"system-upgrade: confirm {side_effects['system_upgrade_command']} (system-wide; lifecycle Arch components: {', '.join(side_effects['system_upgrade_components']) or 'none'})")
         return
@@ -1347,7 +1348,8 @@ def cmd_apply(args: argparse.Namespace) -> int:
             active, results["paseo-relay"] = _journal_mutate(active, step_id, apply_relay)
             continue
         if component_id == "path-env":
-            active, results["zshrc-user-bin-path"] = _journal_mutate(
+            name = "zshrc-user-bin-path" if path_env.targets()[0].name == ".zshrc" else "bash-user-bin-path"
+            active, results[name] = _journal_mutate(
                 active, step_id, lambda: path_env.apply(Path.home() / ".local"))
             continue
         if component_id == "paseo-autostart":

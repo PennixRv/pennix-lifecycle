@@ -491,6 +491,7 @@ RESOLVERS = {
     "tmux": resolve_arch,
     "aoe": _resolve_aur,
     "uv": resolve_arch,
+    "yazi": resolve_arch,
     "markitdown": resolve_pypi,
     "pandoc": resolve_arch,
     "libreoffice": resolve_arch,

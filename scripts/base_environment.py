@@ -25,7 +25,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DOCUMENTS = {"markitdown", "pandoc", "libreoffice", "poppler", "tesseract",
              "tesseract-eng", "tesseract-chi-sim", "noto-fonts-cjk"}
 SHARED = {"pnpm", "uv", "tmux", "tmux-config"}
-SCOPE = {"base-environment", *SHARED, *DOCUMENTS}
+SCOPE = {"base-environment", "yazi", *SHARED, *DOCUMENTS}
+BASH = "/usr/bin/bash"
+ZSH = "/usr/bin/zsh"
+BASH_STARTUP = {".bashrc", ".bash_profile", ".bash_login", ".profile"}
+ZSH_STARTUP = {".zshrc", ".zshenv"}
 
 
 class BaseError(RuntimeError):
@@ -47,16 +51,18 @@ def receipt_path():
 def receipt():
     value = files.read_json(receipt_path())
     if value is not None and (not {"schema", "target", "files", "native", "version"} <= set(value)
-                              or set(value) - {"schema", "target", "files", "native", "version", "uninstall", "packages"}
+                              or set(value) - {"schema", "target", "files", "native", "version", "uninstall", "packages", "managed_shell"}
+                              or value.get("managed_shell", ZSH) not in (BASH, ZSH)
                               or value["schema"] != 1 or value["target"] != files.target_identity()
                               or not isinstance(value["files"], dict) or not isinstance(value["native"], dict)):
         raise BaseError("基础环境 receipt 无效或属于其他目标")
     if value is not None:
         home = Path.home()
         config = files.xdg_home("XDG_CONFIG_HOME", home / ".config")
-        allowed = {home / x for x in [".p10k.zsh", ".zshrc", ".zshenv", ".bashrc", ".bash_profile", ".gitconfig"]}
+        allowed = {home / x for x in BASH_STARTUP | ZSH_STARTUP | {".p10k.zsh", ".gitconfig"}}
         allowed |= {config / x for x in ["environment.d/60-pennix-base.conf", "nvim/init.lua",
-            "pennix/base/env.sh", "pennix/base/zshrc.zsh", "pennix/base/nvim.lua", "pennix/base/git.config", "pennix/base/git-identity.config"]}
+            "pennix/base/env.sh", "pennix/base/zshrc.zsh", "pennix/base/bashrc.bash", "pennix/base/starship.toml",
+            "pennix/base/nvim.lua", "pennix/base/git.config", "pennix/base/git-identity.config"]}
         if any(Path(path) not in allowed or not isinstance(entry, dict)
                or set(entry) - {"before", "mode", "applied", "previous_applied", "replaced"}
                or not {"before", "mode", "applied"} <= set(entry)
@@ -107,26 +113,28 @@ def _template(name):
     return (ROOT / "templates" / name).read_bytes()
 
 
-def _hook(path, body, *, replace_external=False, before=None):
+def _hook(path, body, *, before=None):
     start, end = "# pennix-lifecycle:base:begin", "# pennix-lifecycle:base:end"
-    text = "" if replace_external else (before or b"").decode()
+    text = (before or b"").decode()
     count = text.count(start), text.count(end)
     if count not in {(0, 0), (1, 1)} or count == (1, 1) and text.index(end) < text.index(start):
         raise BaseError(f"基础加载标记不完整: {path}")
-    block = f"{start}\n{body.rstrip()}\n{end}\n"
+    block = f"{start}\n{body.rstrip()}\n{end}\n" if body else ""
     if count == (1, 1):
         a, b = text.index(start), text.index(end) + len(end)
+        if not block and text[b:b + 1] == "\n":
+            b += 1
         return (text[:a] + block.rstrip() + text[b:]).encode()
     # Bash's interactive guard must come after the shared environment.
     return (block + text).encode()
 
 
-def targets(kconf):
+def targets(kconf, *, observed):
     home = Path.home()
     config = files.xdg_home("XDG_CONFIG_HOME", home / ".config")
     base = config / "pennix/base"
-    result = {**path_env.base_targets(), home / ".p10k.zsh": _template("base-p10k.zsh.install"),
-              base / "zshrc.zsh": _template("base-zshrc.zsh.install"),
+    result = {**path_env.base_targets(), base / "bashrc.bash": _template("base-bashrc.bash.install"),
+              base / "starship.toml": _template("base-starship.toml.install"),
               base / "nvim.lua": _template("base-nvim.lua.install"),
               base / "git.config": _template("base-git.config.install")}
     name, email = _config(kconf, "PENNIX_BASE_GIT_NAME"), _config(kconf, "PENNIX_BASE_GIT_EMAIL")
@@ -134,23 +142,26 @@ def targets(kconf):
         raise BaseError("基础环境需要目标机 Git 姓名与邮箱白名单值")
     result[base / "git-identity.config"] = (f"[user]\n\tname = {json.dumps(name, ensure_ascii=False)}\n"
                                           f"\temail = {json.dumps(email, ensure_ascii=False)}\n").encode()
-    adopt = adoption(kconf)
-    sources = {home / ".zshenv": '. "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/env.sh"',
-               home / ".bashrc": '. "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/env.sh"',
-               home / ".bash_profile": '. "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/env.sh"',
-               home / ".zshrc": 'source "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/zshrc.zsh"',
+    startup = ('. "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/env.sh"\n'
+               '. "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/bashrc.bash"')
+    sources = {home / ".bashrc": startup,
+               path_env.bash_login_file(home): startup,
                config / "nvim/init.lua": f'dofile({json.dumps(str(base / "nvim.lua"))})',
                home / ".gitconfig": f'[include]\n\tpath = {json.dumps(str(base / "git.config"))}\n'
                                       f'\tpath = {json.dumps(str(base / "git-identity.config"))}'}
     record = receipt()
     for path, body in sources.items():
         before = files.read(path)
+        observed[path] = before
         entry = (record or {}).get("files", {}).get(str(path))
         if before is None and entry and entry["before"] is not None:
             before = base64.b64decode(entry["before"], validate=True)
-        # Explicit adoption is bound to the reviewed bytes, never to a blanket yes.
-        replace_external = bool(entry and entry.get("replaced")) or (path.name in {".zshrc", ".zshenv"} and str(path) in adopt and entry is None)
-        result[path] = _hook(path, body, replace_external=replace_external, before=before)
+        result[path] = _hook(path, body, before=before)
+    for name in sorted(ZSH_STARTUP):
+        path = home / name
+        if str(path) in (record or {}).get("files", {}) and (before := files.read(path)) is not None:
+            observed[path] = before
+            result[path] = _hook(path, "", before=before)
     return result
 
 
@@ -159,6 +170,8 @@ def package_plan():
     installed = dict(line.split(maxsplit=1) for line in _run(["pacman", "-Q"]).splitlines())
     official = [name for name in spec["official"] if name not in installed]
     aur = [name for name in spec["aur"] if name not in installed]
+    if "blesh" in installed and "blesh-git" in aur:
+        raise BaseError("已安装 blesh，不能自动替换为 blesh-git")
     if "nodejs" in installed and "nodejs-lts-krypton" not in official:
         official.append("nodejs-lts-krypton")
     if "rustup" in installed:
@@ -203,20 +216,31 @@ def _digest(content):
     return hashlib.sha256(content).hexdigest() if content is not None else None
 
 
+def _reviewed_shell_drift(record, adopt, path, actual):
+    return (record.get("managed_shell", ZSH) == ZSH
+            and path.name in BASH_STARTUP | ZSH_STARTUP
+            and actual is not None and adopt.get(str(path)) == actual)
+
+
 def inspect(kconf):
     try:
-        record, adopt, desired = receipt(), adoption(kconf), targets(kconf)
+        observed = {}
+        record, adopt, desired = receipt(), adoption(kconf), targets(kconf, observed=observed)
         changes, blocked = [], []
         for path, output in desired.items():
             before = files.read(path)
+            if path in observed and before != observed[path]:
+                raise BaseError(f"启动文件在计划期间变化: {path}")
             old = (record or {}).get("files", {}).get(str(path))
             actual = _digest(before)
-            if old and actual not in {old["applied"], old.get("previous_applied"), None}:
+            if (old and actual not in {old["applied"], old.get("previous_applied"), None}
+                    and not _reviewed_shell_drift(record, adopt, path, actual)):
                 blocked.append(str(path))
             elif not old and before is not None and before != output:
                 # Hooks preserve external text; whole configuration adoption needs a digest.
                 hook = b"# pennix-lifecycle:base:begin" in output
-                shell_conflict = path.name == ".zshrc" and any(x in before for x in [b"oh-my-zsh", b"powerlevel10k", b"ZSH_THEME"])
+                shell_conflict = path.name == ".bashrc" and any(x in before for x in [
+                    b"starship init", b"ble.sh", b"oh-my-posh init"])
                 if (not hook or shell_conflict) and adopt.get(str(path)) != actual:
                     blocked.append(str(path))
             if before != output or not old:
@@ -233,7 +257,8 @@ def inspect(kconf):
                 "template_version": (ROOT/'VERSION').read_text().strip(),
                 "template_source": "pennix-lifecycle/templates/base-*.install",
                 "conflicts": blocked, "packages": packages,
-                "native": native, "detail": "基础模板、软件和原生设置" if not blocked else "用户修改或外部配置需审阅摘要接管"}
+                "native": native, "desired_shell": BASH,
+                "detail": "基础模板、软件和原生设置" if not blocked else "用户修改或外部配置需审阅摘要接管"}
     except (OSError, ValueError, files.OwnershipError, BaseError) as error:
         return {"state": "blocked", "detail": str(error)}
 
@@ -251,7 +276,7 @@ def native_state():
 
 
 def native_ready(state):
-    return (state["shell"] == "/usr/bin/zsh" and state["docker_group"] and state["docker_enabled"]
+    return (state["shell"] == BASH and state["docker_group"] and state["docker_enabled"]
             and state["docker_active"] and len(state["locales"]) == 2 and state["node24"]
             and state["npm_prefix"] == str(Path.home()/'.local'))
 
@@ -321,9 +346,12 @@ def _native_apply():
     if not state["docker_group"]:
         _run(["sudo", "usermod", "-aG", "docker", state["user"]])
     _run(["sudo", "systemctl", "enable", "--now", "docker.service"], timeout=120)
-    if state["shell"] != "/usr/bin/zsh":
-        _run(["zsh", "-n", str(Path.home()/'.zshrc')])
-        _run(["sudo", "chsh", "-s", "/usr/bin/zsh", state["user"]])
+    if state["shell"] != BASH:
+        for path in (Path.home() / ".bashrc", path_env.bash_login_file(Path.home())):
+            _run([BASH, "-n", str(path)])
+        _run([BASH, "-lc", '[[ :$PATH: == *":$HOME/.local/bin:"* ]]'],
+             environment={"PATH": "/usr/bin:/bin", "BASH_ENV": ""})
+        _run(["sudo", "chsh", "-s", BASH, state["user"]])
 
 
 def apply(kconf, catalog, *, package_target=None, recover_missing_receipt=False):
@@ -352,16 +380,20 @@ def apply(kconf, catalog, *, package_target=None, recover_missing_receipt=False)
             raise BaseError("基础 AUR 缺少同事务已审阅候选；须重新 plan/apply")
         packages = {**packages, "aur_candidates": package_target["aur_candidates"]}
     _install_packages(packages, catalog, record)
-    for path, output in targets(kconf).items():
+    adopt, observed = adoption(kconf), {}
+    for path, output in targets(kconf, observed=observed).items():
         before = files.read(path)
+        if path in observed and before != observed[path]:
+            raise BaseError(f"启动文件在应用期间变化: {path}")
         entry = record["files"].get(str(path))
         if entry is None:
             entry = {"before": base64.b64encode(before).decode() if before is not None else None,
                      "mode": path.stat().st_mode & 0o777 if before is not None else 0o600,
-                     "applied": _digest(before),
-                     "replaced": path.name in {".zshrc", ".zshenv"} and str(path) in adoption(kconf)}
+                     "applied": _digest(before)}
             record["files"][str(path)] = entry
-        if _digest(before) not in {entry["applied"], entry.get("previous_applied"), None}:
+        actual = _digest(before)
+        if (actual not in {entry["applied"], entry.get("previous_applied"), None}
+                and not _reviewed_shell_drift(record, adopt, path, actual)):
             raise BaseError(f"配置在应用期间变化: {path}")
         entry["previous_applied"], entry["applied"] = _digest(before), _digest(output)
         _save(record)
@@ -369,6 +401,7 @@ def apply(kconf, catalog, *, package_target=None, recover_missing_receipt=False)
         entry.pop("previous_applied", None)
         _save(record)
     _native_apply()
+    record["managed_shell"] = BASH
     record["version"] = (ROOT/'VERSION').read_text().strip()
     _save(record)
     if inspect(kconf)["state"] != "current":
@@ -405,7 +438,7 @@ def uninstall():
         native_step("npm-prefix", ["npm", "config", "set", "prefix", old["npm_prefix"], "--location=user"])
     elif old['npm_prefix'] is None and state['npm_prefix'] == str(Path.home()/'.local'):
         native_step("npm-prefix", ['npm', 'config', 'delete', 'prefix', '--location=user'])
-    if state["shell"] == "/usr/bin/zsh" and old["shell"] != state["shell"]:
+    if state["shell"] == record.get("managed_shell", ZSH) and old["shell"] != state["shell"]:
         native_step("shell", ["sudo", "chsh", "-s", old["shell"], state["user"]])
     # Container data is shared; only reverse Docker settings when the native owner proves no workload.
     containers = subprocess.run(["sudo", "docker", "ps", "-aq"], capture_output=True, text=True)

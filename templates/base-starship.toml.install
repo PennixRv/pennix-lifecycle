@@ -1,0 +1,35 @@
+add_newline = false
+format = '$directory$git_branch$git_status$status$cmd_duration$python$jobs$fill$username$hostname$line_break$character'
+
+[directory]
+truncation_length = 3
+
+[git_branch]
+format = '[$branch]($style) '
+
+[status]
+disabled = false
+symbol = ''
+format = '[exit:$status]($style) '
+
+[cmd_duration]
+min_time = 2_000
+
+[python]
+format = '[(\($virtualenv\) )]($style)'
+symbol = ''
+
+[fill]
+symbol = ' '
+
+[username]
+show_always = true
+format = '[$user]($style)'
+
+[hostname]
+ssh_only = false
+format = '[@$hostname]($style)'
+
+[character]
+success_symbol = '[>](bold green)'
+error_symbol = '[>](bold red)'

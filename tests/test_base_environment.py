@@ -65,9 +65,10 @@ class BaseEnvironmentTests(unittest.TestCase):
         config_model.init(profile='development', git_name='Base Test', git_email='base@example.invalid')
         self.kconf, self.config = config_model.load()
         self.catalog = engine.load_catalog(base.ROOT/'references/catalog.json')
-        self.native = {"user": "test", "shell": "/usr/bin/zsh", "docker_group": True,
+        self.native = {"user": "test", "shell": base.BASH, "docker_group": True,
             "docker_enabled": True, "docker_active": True, "locales": ["zh_cn.utf8", "en_us.utf8"],
             "npm_prefix": str(self.home/'.local'), "node24": True}
+        self.native_apply = base._native_apply
         for name, value in [('package_plan', {"official": [], "aur": [], "versions": {}, "node_replacement": False}),
                             ('native_state', self.native), ('_native_apply', None), ('_install_packages', None)]:
             p = patch.object(base, name, return_value=value)
@@ -75,7 +76,10 @@ class BaseEnvironmentTests(unittest.TestCase):
 
     def test_profile_is_base_only_on_new_machine_and_preserves_existing_selections(self):
         selected = config_model.selected_components(self.kconf)
-        self.assertEqual(selected, base.SCOPE)
+        self.assertEqual(selected, base.SCOPE - {"yazi"})
+        self.kconf.syms['PENNIX_COMPONENT_YAZI'].set_value('y')
+        self.assertIn('yazi', config_model.selected_components(self.kconf))
+        self.assertEqual(self.catalog['components']['yazi']['probe'], 'yazi')
         self.kconf.syms['PENNIX_COMPONENT_TRELLIS_CLI'].set_value('y')
         config_model.write(self.kconf,self.config)
         config_model.init(profile='development')
@@ -138,11 +142,13 @@ class BaseEnvironmentTests(unittest.TestCase):
         with patch.object(base.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout='workload\n')):
             base.uninstall()
         self.assertEqual((self.home/'.bashrc').read_bytes(),original)
-        self.assertFalse((self.home/'.p10k.zsh').exists())
+        self.assertFalse((self.home/'config/pennix/base/starship.toml').exists())
         self.assertIsNone(base.receipt())
 
     def test_external_template_needs_exact_adoption_and_later_drift_is_protected(self):
-        target = self.home/'.p10k.zsh';target.write_text('# personal\n')
+        target = self.home/'config/pennix/base/starship.toml'
+        target.parent.mkdir(parents=True)
+        target.write_text('# personal\n')
         self.assertEqual(base.inspect(self.kconf)['state'],'blocked')
         self.kconf.syms['PENNIX_BASE_ADOPT_FILES'].set_value(json.dumps({str(target):hashlib.sha256(target.read_bytes()).hexdigest()}))
         base.apply(self.kconf,self.catalog)
@@ -150,6 +156,55 @@ class BaseEnvironmentTests(unittest.TestCase):
         self.assertEqual(base.inspect(self.kconf)['state'],'blocked')
         with self.assertRaises(base.BaseError):base.uninstall()
         self.assertEqual(target.read_text(),'user changed\n')
+
+    def test_hard_cut_adopts_only_exact_legacy_drift_and_keeps_original_bytes(self):
+        base.apply(self.kconf, self.catalog)
+        record = base.receipt()
+        record.pop('managed_shell')
+        zshrc = self.home / '.zshrc'
+        original = b'# personal\n'
+        managed = base._hook(zshrc, 'source old-zsh-template', before=original)
+        zshrc.write_bytes(managed)
+        record['files'][str(zshrc)] = {
+            'applied': hashlib.sha256(managed + b'# stale PATH override\n').hexdigest(),
+            'before': base.base64.b64encode(original).decode(), 'mode': 0o600,
+        }
+        base._save(record)
+        self.assertEqual(base.inspect(self.kconf)['state'], 'blocked')
+        self.kconf.syms['PENNIX_BASE_ADOPT_FILES'].set_value(json.dumps({
+            str(zshrc): hashlib.sha256(managed).hexdigest(),
+        }))
+        base.apply(self.kconf, self.catalog)
+        self.assertEqual(zshrc.read_bytes(), original)
+        record = base.receipt()
+        self.assertEqual(record['managed_shell'], base.BASH)
+        self.assertEqual(record['files'][str(zshrc)]['before'], base.base64.b64encode(original).decode())
+        zshrc.write_bytes(managed)
+        self.assertEqual(base.inspect(self.kconf)['state'], 'blocked')
+
+    def test_existing_bash_login_chain_survives_clean_install(self):
+        profile = self.home / '.profile'
+        profile.write_text('export PENNIX_PROFILE_TEST=preserved\n')
+        base.apply(self.kconf, self.catalog)
+        self.assertFalse((self.home / '.bash_profile').exists())
+        run = subprocess.run([base.BASH, '-lc', 'printf "%s\n%s" "$PENNIX_PROFILE_TEST" "$PATH"'],
+                             env={**os.environ, 'PATH': '/usr/bin:/bin', 'BASH_ENV': ''},
+                             capture_output=True, text=True, check=True)
+        self.assertEqual(run.stderr, '')
+        self.assertEqual(run.stdout.splitlines()[0], 'preserved')
+        self.assertIn(str(self.home / '.local/bin'), run.stdout.splitlines()[1].split(':'))
+
+    def test_failed_bash_login_probe_prevents_chsh(self):
+        commands = []
+        def run(command, **kwargs):
+            commands.append(command)
+            if command[:2] == [base.BASH, '-lc']:
+                raise base.BaseError('Bash login PATH probe failed')
+        with patch.object(base, 'native_state', return_value={**self.native, 'shell': base.ZSH}), \
+                patch.object(base, '_run', side_effect=run):
+            with self.assertRaisesRegex(base.BaseError, 'Bash login PATH probe failed'):
+                self.native_apply()
+        self.assertFalse(any(command[:2] == ['sudo', 'chsh'] for command in commands))
 
     def test_malformed_aur_receipt_is_rejected_without_type_error(self):
         base.apply(self.kconf, self.catalog)
@@ -166,7 +221,7 @@ class BaseEnvironmentTests(unittest.TestCase):
     def test_failed_file_write_keeps_receipt_and_converges_without_reowning(self):
         original = files.replace
         def fail(path,*args,**kwargs):
-            if path == self.home/'.p10k.zsh':raise OSError('injected')
+            if path == self.home/'config/pennix/base/starship.toml':raise OSError('injected')
             return original(path,*args,**kwargs)
         with patch.object(files,'replace',side_effect=fail):
             with self.assertRaisesRegex(OSError,'injected'):base.apply(self.kconf,self.catalog)
@@ -206,7 +261,9 @@ class BaseEnvironmentTests(unittest.TestCase):
 
     def test_symlink_never_adopted_even_with_hash(self):
         target = self.home/'external';target.write_text('keep')
-        (self.home/'.p10k.zsh').symlink_to(target)
+        link = self.home/'config/pennix/base/starship.toml'
+        link.parent.mkdir(parents=True)
+        link.symlink_to(target)
         self.assertEqual(base.inspect(self.kconf)['state'],'blocked')
         self.assertEqual(target.read_text(),'keep')
 
@@ -286,7 +343,8 @@ class BaseEnvironmentTests(unittest.TestCase):
             self.assertNotIn(str(self.home/'go/bin'),parts)
             go=subprocess.run([shell,'-c','. "$XDG_CONFIG_HOME/pennix/base/env.sh"; printf "%s\\n" "$GOPATH" "$GOBIN"'],env=env,capture_output=True,text=True,check=True)
             self.assertEqual(go.stdout.splitlines(),[str(self.home/'.go'),str(self.home/'.go/bin')])
-        p=subprocess.run(['zsh','-ic','true'],env=env,capture_output=True,text=True)
+        p=subprocess.run(['bash', '--noprofile', '--norc', '-c', '. "$HOME/.bashrc"'],
+                         env=env,capture_output=True,text=True)
         self.assertEqual(p.returncode,0,p.stderr);self.assertEqual(p.stdout,'')
 
     def test_scope_excludes_unrelated_components_without_probing_them(self):

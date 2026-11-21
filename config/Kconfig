@@ -178,6 +178,10 @@ config PENNIX_COMPONENT_UV
 	bool "uv（本地 Python 工具管理器）"
 	default y
 
+config PENNIX_COMPONENT_YAZI
+	bool "Yazi（终端文件管理器）"
+	default n
+
 menu "文档本地阅读（Office 与 PDF）"
 
 config PENNIX_DOCUMENT_READING

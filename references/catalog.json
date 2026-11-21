@@ -489,6 +489,13 @@
       "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
       "package": {"source": "official", "name": "uv", "external_satisfies": true}
     },
+    "yazi": {
+      "delivery": "package", "lock_source": "arch:extra/yazi",
+      "source": "Arch official yazi package", "owner": "pacman", "scope": "global",
+      "probe": "yazi", "version_args": ["--version"],
+      "actions": {"install": "managed", "upgrade": "managed", "uninstall": "managed", "verify": "managed", "reconcile": "managed"},
+      "package": {"source": "official", "name": "yazi", "external_satisfies": true, "resolve_dependencies": true}
+    },
     "markitdown": {
       "delivery": "package", "lock_source": "pypi:markitdown",
       "source": "Microsoft MarkItDown and fixed document libraries through uv tool", "owner": "uv", "scope": "global",

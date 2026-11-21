@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import shlex
 import os
+import pwd
+import shlex
 from pathlib import Path
 import owned_files as files
 
@@ -16,36 +17,64 @@ class PathEnvError(RuntimeError):
     pass
 
 
-def _target() -> Path:
-    return Path.home() / ".zshrc"
+def bash_login_file(home: Path) -> Path:
+    for name in (".bash_profile", ".bash_login", ".profile"):
+        path = home / name
+        if files.read(path) is not None:
+            return path
+    return home / ".bash_profile"
 
 
-def _block(prefix: str) -> str:
+def targets() -> tuple[Path, ...]:
+    home = Path.home()
+    if Path(pwd.getpwuid(os.getuid()).pw_shell).name == "bash":
+        return (home / ".bashrc", bash_login_file(home))
+    return (home / ".zshrc",)
+
+
+def _block(prefix: str, path: Path) -> str:
     bin_path = str(Path(prefix).expanduser() / "bin")
-    return f"{BEGIN}\npath=({shlex.quote(bin_path)} $path)\n{END}"
+    quoted = shlex.quote(bin_path)
+    if path.name == ".zshrc":
+        return f"{BEGIN}\npath=({quoted} $path)\n{END}"
+    return (f'{BEGIN}\ncase ":${{PATH-}}:" in\n'
+            f'    *:{quoted}:*) ;;\n    *) export PATH={quoted}${{PATH:+:"$PATH"}} ;;\nesac\n{END}')
 
 
-def _replace(contents: str, block: str) -> str:
+def _replace(contents: str, block: str, *, prepend: bool) -> str:
     count = contents.count(BEGIN), contents.count(END)
     if count != (0, 0) and count != (1, 1):
-        raise PathEnvError("zshrc 中的生命周期 PATH 标记不完整")
+        raise PathEnvError("启动文件中的生命周期 PATH 标记不完整")
     if count == (0, 0):
-        if block.splitlines()[1] in contents.splitlines():
+        if not prepend and block.splitlines()[1] in contents.splitlines():
             return contents
+        if prepend:
+            return block + "\n" + contents
         return contents.rstrip("\n") + "\n\n" + block + "\n"
     start = contents.index(BEGIN)
     if contents.index(END) < start:
-        raise PathEnvError("zshrc 中的生命周期 PATH 标记顺序无效")
+        raise PathEnvError("启动文件中的生命周期 PATH 标记顺序无效")
     finish = contents.index(END, start) + len(END)
     return contents[:start] + block + contents[finish:]
 
 
+def _changes(prefix: str):
+    for path in targets():
+        before = files.read(path)
+        after = _replace((before or b"").decode(), _block(prefix, path),
+                         prepend=path.name != ".zshrc").encode()
+        if after != before:
+            yield path, before, after
+
+
 def inspect(prefix: str) -> str:
-    if _base_env().is_file():
-        return "keep"
-    raw = files.read(_target())
-    before = raw.decode("utf-8") if raw is not None else ""
-    return "keep" if _replace(before, _block(prefix)) == before else "apply"
+    return "apply" if not _base_env().is_file() and list(_changes(prefix)) else "keep"
+
+
+def plan(prefix: Path, *, managed: bool) -> dict:
+    paths = (_base_env(),) if managed else targets()
+    return {"path": str(paths[0]), "paths": [str(path) for path in paths],
+            "prefix": str(prefix), "action": "keep" if managed else inspect(str(prefix))}
 
 
 def activate(prefix: Path) -> None:
@@ -57,15 +86,11 @@ def activate(prefix: Path) -> None:
 def apply(prefix: str) -> str:
     if _base_env().is_file():
         return "no-op"
-    path = _target()
-    raw = files.read(path)
-    before = raw.decode("utf-8") if raw is not None else ""
-    after = _replace(before, _block(prefix))
-    if after == before:
-        return "no-op"
-    mode = path.stat().st_mode & 0o777 if raw is not None else 0o600
-    files.replace(path, after.encode(), raw, mode=mode)
-    return "changed"
+    changes = list(_changes(prefix))
+    for path, before, after in changes:
+        mode = path.stat().st_mode & 0o777 if before is not None else 0o600
+        files.replace(path, after, before, mode=mode)
+    return "changed" if changes else "no-op"
 
 
 def _base_env() -> Path:
@@ -87,17 +112,18 @@ def base_targets() -> dict[Path, bytes]:
 
 
 def remove() -> str:
-    path = _target()
-    raw = files.read(path)
-    if raw is None:
-        return "no-op"
-    before = raw.decode("utf-8")
-    if BEGIN not in before and END not in before:
-        return "preserved"
-    if before.count(BEGIN) != 1 or before.count(END) != 1:
-        raise PathEnvError("zshrc 中的生命周期 PATH 标记不完整")
-    start = before.index(BEGIN)
-    finish = before.index(END, start) + len(END)
-    after = before[:start].rstrip("\n") + before[finish:]
-    files.replace(path, after.lstrip("\n").encode(), raw, mode=path.stat().st_mode & 0o777)
-    return "changed"
+    result = "no-op"
+    changes = []
+    for path in targets():
+        raw = files.read(path)
+        if raw is None:
+            continue
+        result = "preserved"
+        before = raw.decode()
+        if BEGIN not in before and END not in before:
+            continue
+        after = _replace(before, "", prepend=False)
+        changes.append((path, raw, after.lstrip("\n").encode()))
+    for path, raw, after in changes:
+        files.replace(path, after, raw, mode=path.stat().st_mode & 0o777)
+    return "changed" if changes else result

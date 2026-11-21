@@ -1,0 +1,31 @@
+[[ $- == *i* && -t 0 && -t 1 && ${_pennix_bash_loaded-} != 1 ]] || return 0
+_pennix_bash_loaded=1
+
+export COLORTERM=truecolor
+HISTSIZE=50000
+HISTFILESIZE=50000
+HISTCONTROL=ignoreboth:erasedups
+shopt -s histappend histverify
+PROMPT_COMMAND=("history -a; history -n" "${PROMPT_COMMAND[@]}")
+
+if [[ -r /usr/share/blesh/ble.sh ]]; then
+    source /usr/share/blesh/ble.sh --attach=none
+fi
+if ! declare -F _comp_load >/dev/null && [[ -r /usr/share/bash-completion/bash_completion ]]; then
+    source /usr/share/bash-completion/bash_completion
+fi
+eval "$(zoxide init bash)"
+if [[ ${BLE_VERSION-} ]]; then
+    ble-import integration/fzf-completion
+    ble-import integration/fzf-key-bindings
+else
+    eval "$(fzf --bash)"
+fi
+export STARSHIP_CONFIG="${STARSHIP_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/starship.toml}"
+eval "$(starship init bash)"
+if [[ -r "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/bashrc.local.bash" ]]; then
+    source "${XDG_CONFIG_HOME:-$HOME/.config}/pennix/base/bashrc.local.bash"
+fi
+if [[ ${BLE_VERSION-} ]]; then
+    ble-attach
+fi

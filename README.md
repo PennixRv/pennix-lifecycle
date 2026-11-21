@@ -52,11 +52,11 @@ pennix check --scope base --json
 
 新配置只选择基础能力、共享 pnpm/uv/tmux/tmux-config 和文档组；已有配置仅合并这些选择，保留其他组件和设备专属值。`--scope base` 不配置、卸载或启停范围外的工作流集成和 Paseo。基础包清单由 `references/base-packages.json` 唯一维护；软件继续归 pacman/AUR 数据库，不建立机器级全依赖锁。系统使用 Node.js 24 LTS、官方 pnpm、系统 Rust/Cargo 和 Go，不增加语言版本管理器。AUR 候选必须有维护者且未被标记过期；Oh My Zsh 的 VCS 版本由原生 `pkgver` 生成。
 
-稳定公共配置位于 `$XDG_CONFIG_HOME/pennix/base`，P10k 位于 `~/.p10k.zsh`。公共 PATH 由 `path_env` 管理，覆盖 zsh、Bash 和适用的 `environment.d`；保留项目 venv 优先级，去重并移除旧 `.npm-global`、无来源 `~/bin`、Windows PATH 及 Codex 临时注入路径。Shell 无 TTY 时不初始化主题，不自动启动 tmux/fastfetch。私人覆盖可分别使用 `zshrc.local.zsh`、`p10k.local.zsh`、`nvim.local.lua`，工具不创建空占位文件或覆盖它们。
+稳定公共配置位于 `$XDG_CONFIG_HOME/pennix/base`。Bash 登录文件和 `.bashrc` 共用 `env.sh`，systemd 用户服务使用 `environment.d`。PATH 保留项目 venv 优先级，去重并移除旧 `.npm-global`、无来源 `~/bin`、Windows PATH 及 Codex 临时注入路径。直接执行的非登录 Bash 使用其启动方提供的环境。只有交互且有 TTY 时加载 Starship、ble.sh、bash-completion、fzf 和 zoxide。个性化配置可使用 `bashrc.local.bash`、`STARSHIP_CONFIG` 和 `nvim.local.lua`。Yazi 通过 `PENNIX_COMPONENT_YAZI` 显式选择，默认关闭。
 
-plan 展示目标、前后摘要、接管对象和原生设置。已有整份 P10k 或包含旧主题初始化的 `.zshrc` 必须先审阅，再把目标绝对路径与当时 SHA-256 写入 `PENNIX_BASE_ADOPT_FILES` 的 JSON 映射；摘要变化、符号链接、未知用户修改、重复/缺失标记均停止。Git 通过原生 include 加载公共偏好与私有身份，保留项目覆盖和认证。tmux 仅升级可证明的上一版受管段，保留 CCH 与外部内容。
+plan 展示目标、前后摘要、接管对象和原生设置。迁移已有 Zsh 基础环境时，Lifecycle 更新其受管启动段并保留用户文件。对经审阅的旧受管 Shell 启动文件漂移，将目标绝对路径与当前 SHA-256 写入 `PENNIX_BASE_ADOPT_FILES` 的 JSON 映射。无法匹配已审阅值的差异、符号链接和错误标记会阻止应用。Git 通过原生 include 加载公共偏好与私有身份，保留项目覆盖和认证。tmux 仅升级可证明的上一版受管段，保留 CCH 与外部内容。
 
-基础部署会生成指定中英文 locale、设置目标用户默认 zsh、启用本地 Docker 服务并加入 docker 组；新登录后核验组权限。保留现有 Docker 数据，不开放 TCP API。已有 npm pnpm 只有在旧锁、receipt 和实际身份一致时才退出原 owner；精确旧归档作为私有恢复材料保留，官方安装、后置验证及新锁提交成功后才退出。迁移中断使用同一事务的 `recover --resolve completed` 续接，或 `recover --resolve restored` 从已核验的旧归档恢复原 owner 和锁；未知系统包归属会阻断撤回，不手写归属。
+基础部署会生成指定中英文 locale、启用本地 Docker 服务并加入 docker 组。通过 Bash 语法和登录 PATH 检查后，设置目标用户的默认 Shell 为 `/usr/bin/bash`。新登录后核验组权限及命令入口。保留现有 Docker 数据，不开放 TCP API。已有 npm pnpm 只有在旧锁、receipt 和实际身份一致时才退出原 owner；精确旧归档作为私有恢复材料保留，官方安装、后置验证及新锁提交成功后才退出。pnpm 迁移中断使用同一事务的 `recover --resolve completed` 续接，或 `recover --resolve restored` 从已核验的旧归档恢复原 owner 和锁；未知系统包归属会阻断撤回，不手写归属。
 
 `repair base-environment` 可补回缺失的自有配置；用户修改继续阻断，缺失软件须回到有完整升级确认的 apply。`uninstall base-environment --confirm base-environment` 精确恢复原配置及适用原生设置，保留软件、文档和共享依赖；Docker 已有容器或镜像时保留服务和组设置。工具自身卸载不删除稳定基础配置。Python ABI 变化时通过同版本 bootstrap 重建私有工具环境，切换或回执失败保留原活动身份。
 
