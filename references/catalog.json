@@ -5,7 +5,11 @@
       "url": "https://github.com/lthieu96/paseo-chat-polish.git",
       "adopt_registry": {"url": "https://plugins.paseo.sh", "id": "lthieu96/chat-polish"},
       "adopt_ref": "5fb31cbdb3cbaeb1c49568d64feaa468d0c1813d",
-      "schema_1_refs": ["5fb31cbdb3cbaeb1c49568d64feaa468d0c1813d"],
+      "settings_contract": {
+        "index.server.ts": "e80e7d9fa39c9d17dac12aa2d81d59336706996d",
+        "shared/theme.ts": "c119d3804719cf7c2f813256c07cbd6a1918847f",
+        "shared/timeline.ts": "526864f452209024afa12e90f4e4ca65a5f0fa53"
+      },
       "settings": {
         "theme": {"name": "text", "appearance": "text", "colors": {"background": "text", "foreground": "text", "raised": "text", "control": "text", "border": "text", "accent": "text", "mutedForeground": "text", "ring": "text"}, "sidebar": "text", "syntax": "text"},
         "timeline": {"reasoning": "text", "toolDetails": "text", "commandColors": "text", "diffWrap": "text", "hidden": "strings", "userMessages": "text", "steps": "text", "selectionCopy": "text", "density": "text", "rowIcons": {"steps": "text", "tool": "text", "thought": "text"}, "merge": "text", "phoneChat": "text", "iconSet": "text", "loader": "text", "loaderSize": "text", "nativeStyle": "text", "windowStyle": "text", "recap": "text", "diagrams": "text", "html": "text", "images": "text", "imageStacks": "text", "imageStackOpen": "text", "richText": {"quote": "text", "table": "text", "code": "text", "inline": "text", "heading": "text", "list": "text", "callout": "text", "rule": "text"}}
@@ -13,7 +17,10 @@
     },
     "phone-notify": {
       "url": "https://github.com/PennixRv/paseo-phone-notify.git",
-      "schema_1_refs": ["36a56c0041e575d3e253d643964a033013f21414"],
+      "settings_contract": {
+        "index.server.ts": "d406bafe14a46005a375a9762368f60274f66106",
+        "shared/preferences.ts": "01b13284abbd7525ea717dcb8d19818e7e9cdf72"
+      },
       "settings": {
         "notify": {"enabled": "bool", "onCompleted": "bool", "onFailed": "bool", "onPermission": "bool", "onCanceled": "bool", "includeSubagents": "bool"}
       }

@@ -5,6 +5,12 @@ import { isDeepStrictEqual, promisify } from 'node:util';
 
 const run = promisify(execFile);
 
+export function assertPluginSdk(client) {
+  const required = ['getDaemonConfig', 'listPlugins', 'invokePluginRpc', 'installPluginSource',
+    'previewPluginUpdates', 'applyPluginUpdates', 'removePlugin', 'enablePlugin', 'disablePlugin'];
+  if (required.some(name => typeof client[name] !== 'function')) throw new Error('plugin SDK unavailable');
+}
+
 function storedSettings(home, id, name) {
   const path = join(home, 'plugin-settings', id, `${name}.json`);
   try {
@@ -23,9 +29,9 @@ function storedSettings(home, id, name) {
 }
 
 export async function managePlugins(client, home, daemonStatus) {
-  if (!/^v?0\.17\.1$/.test(daemonStatus.daemonVersion)) throw new Error('unreviewed daemon');
+  assertPluginSdk(client);
   const request = JSON.parse(readFileSync(0, 'utf8'));
-  const { id, url, blocks, refs, server } = request;
+  const { id, url, blocks, settingsContract, server } = request;
   if (!/^[a-z0-9-]+$/.test(id) || !blocks.every(name => /^[a-z]+$/.test(name))
       || (server !== undefined && server !== daemonStatus.serverId)) throw new Error('invalid target');
   if ((await client.getDaemonConfig()).config.pluginsEnabled !== true) {
@@ -41,7 +47,7 @@ export async function managePlugins(client, home, daemonStatus) {
     const installation = item.installation;
     const identity = installation?.identity;
     if (identity?.kind !== 'git' || identity.remote !== url || identity.pluginPath !== '.'
-        || !refs.includes(installation.currentRevision)
+        || !/^[0-9a-f]{40}$/.test(installation.currentRevision)
         || !item.path.startsWith(`${home}/plugins/${id}/`) || realpathSync(item.path) !== item.path) {
       throw new Error('unknown plugin installation');
     }
@@ -49,6 +55,11 @@ export async function managePlugins(client, home, daemonStatus) {
     if ((await git(['rev-parse', 'HEAD'])).stdout.trim() !== installation.currentRevision
         || (await git(['status', '--porcelain', '--untracked-files=normal'])).stdout) {
       throw new Error('plugin checkout drift');
+    }
+    const contractPaths = Object.keys(settingsContract);
+    const blobs = (await git(['rev-parse', ...contractPaths.map(path => `HEAD:${path}`)])).stdout.trim().split('\n');
+    if (contractPaths.some((path, index) => blobs[index] !== settingsContract[path])) {
+      throw new Error('plugin settings contract changed');
     }
     const settings = {};
     for (const name of blocks) {
@@ -71,7 +82,7 @@ export async function managePlugins(client, home, daemonStatus) {
   const { plugin } = before;
   switch (request.action) {
     case 'install':
-      if (plugin || before.residue || !refs.includes(request.ref)) throw new Error('invalid install');
+      if (plugin || before.residue || !/^[0-9a-f]{40}$/.test(request.ref)) throw new Error('invalid install');
       await client.installPluginSource({ id, source: url, ref: request.ref });
       break;
     case 'update': {

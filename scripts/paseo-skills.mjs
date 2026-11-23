@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
-import { managePlugins } from './paseo-plugins.mjs';
+import { assertPluginSdk, managePlugins } from './paseo-plugins.mjs';
 
 const run = promisify(execFile);
 const [action, executable, home] = process.argv.slice(2);
@@ -26,7 +26,7 @@ function packageRoot(entry, name) {
 }
 async function main() {
 try {
-  if (!['probe', 'install', 'status', 'inspect', 'plugins'].includes(action) || !executable || !home?.startsWith('/')) throw new Error();
+  if (!['probe', 'probe-plugins', 'install', 'status', 'inspect', 'plugins'].includes(action) || !executable || !home?.startsWith('/')) throw new Error();
   const { root, metadata } = packageRoot(executable, '@getpaseo/cli');
   if (typeof metadata.version !== 'string' || !metadata.version) throw new Error();
   const require = createRequire(join(root, 'package.json'));
@@ -38,14 +38,18 @@ try {
   const { readDaemonInstance, waitForDaemonReady, readLocalCredentialForTarget,
     isSameDaemonInstance, stopDaemonInstance } = await import(pathToFileURL(serverEntry));
   if ([createHostClient, readDaemonInstance, waitForDaemonReady, readLocalCredentialForTarget,
-    isSameDaemonInstance, ...(['probe', 'install'].includes(action) ? [stopDaemonInstance] : [])]
+    isSameDaemonInstance, ...(['probe', 'probe-plugins', 'install'].includes(action) ? [stopDaemonInstance] : [])]
     .some(fn => typeof fn !== 'function')) throw new Error();
-  if (action === 'probe') {
+  if (action === 'probe' || action === 'probe-plugins') {
     const client = createHostClient('127.0.0.1:1', { clientId: `pennix-${randomUUID()}`,
       clientType: 'cli', appVersion: metadata.version, reconnect: { enabled: false } });
     try {
       if (['connect', 'close', 'getLastServerInfoMessage', 'getAgentSkillsStatus', 'saveAgentSkillsSelection']
         .some(name => typeof client[name] !== 'function')) throw new Error();
+      if (action === 'probe-plugins') {
+        stage = 'plugin-sdk';
+        assertPluginSdk(client);
+      }
     } finally { await client.close(); }
     stage = 'skill-catalog';
     const bundled = join(serverRoot, 'dist/server/skills');

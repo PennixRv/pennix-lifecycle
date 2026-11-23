@@ -291,7 +291,8 @@ def _sdk(paseo: Path, home: Path, action: str, *, environment: dict | None = Non
         result = subprocess.run([node, str(Path(__file__).with_name("paseo-skills.mjs")), action, str(paseo), str(home)],
                                 capture_output=True, text=True, timeout=150, check=False, env=environment)
         value = json.loads(result.stdout)
-        expected = {"probe": "compatible", "inspect": "inspected", "install": "current", "status": "current"}
+        expected = {"probe": "compatible", "probe-plugins": "compatible", "inspect": "inspected",
+                    "install": "current", "status": "current"}
         if result.returncode or not isinstance(value, dict) or value.get("state") != expected.get(action):
             raise ValueError()
         return value
@@ -299,7 +300,7 @@ def _sdk(paseo: Path, home: Path, action: str, *, environment: dict | None = Non
         raise PaseoServiceError(f"Paseo 原生 SDK {action} 未完成；保留现场") from error
 
 
-def preflight_candidate(candidate: dict) -> None:
+def preflight_candidate(candidate: dict, *, plugins_required: bool = False) -> None:
     if not isinstance(candidate.get("version"), str) or not candidate["version"] or not isinstance(candidate.get("path"), str):
         raise PaseoServiceError("Paseo 候选缺少版本或载荷身份")
     npm = shutil.which("npm")
@@ -318,7 +319,8 @@ def preflight_candidate(candidate: dict) -> None:
                 timeout=600, check=False)
             if result.returncode:
                 raise PaseoServiceError("Paseo 候选依赖暂存失败；未修改用户安装")
-            observed = skills(root / "bin/paseo", root / "paseo", "probe", environment=environment)
+            observed = skills(root / "bin/paseo", root / "paseo",
+                              "probe-plugins" if plugins_required else "probe", environment=environment)
             if observed.get("version") != candidate["version"]:
                 raise PaseoServiceError("Paseo 候选 SDK 与已冻结载荷身份不一致")
         except (OSError, subprocess.TimeoutExpired) as error:

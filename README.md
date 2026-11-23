@@ -174,10 +174,14 @@ npm 组件可用 `pennix update trellis-cli --version 0.7.1-beta.0` 选择精确
 恢复设置并校验。Phone notify 的同源同提交可原位接管。新安装和已声明设置变更使用
 `apply`，外部漂移用 `repair <插件 ID>`。修改声明中的启用状态可暂停或恢复插件。
 
-升级或回退先在声明中指定经 catalog 审核的提交，再用 `update <插件 ID>`。
-`reconcile <插件 ID>` 只接受已严格达到共同声明的外部版本变化。当前适配核验
-Paseo v0.17.1 和 catalog 中的 schema v1 提交。更新支持范围前需验证插件设置迁移和回退，
-因为 Paseo 的读设置接口可能持久化迁移。单个插件暂停时，由已核验的本机设置文档提供读取，
+通用 `pennix updates` 在 `paseo_plugins` 中展示登记 GitHub 源的稳定发行 tag、精确提交、
+已装提交和声明目标。`pennix update --all` 显示同一信息，Git 插件仍沿单项确认执行。目标由操作者写入共享
+声明，使用 `pennix update <插件 ID> --json` 预览，随后用 `--confirm <摘要>` 逐台执行。
+原来的 `pennix paseo-plugins update` 入口等价。候选和回退提交均从登记 Git 源取得，
+核验原生插件 ID 及受管设置实现，使用 Paseo 原生预览和更新。设置实现变化时需要重新验证
+迁移和回退。Paseo CLI 升级会对已配置插件声明预检公开插件 SDK。
+`reconcile <插件 ID>` 只接受已严格达到共同声明的外部版本变化。单个插件暂停时，
+由已核验的本机设置文档提供读取，
 恢复后用 Paseo 原生设置接口校验。设置写入均走原生接口和 revision 校验。
 
 从共享声明移除某项后，可用 `detach <插件 ID>` 释放归属并保留安装。

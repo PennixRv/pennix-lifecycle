@@ -82,7 +82,7 @@ class PaseoPluginsTests(unittest.TestCase):
             path = Path(directory) / "paseo.json"
             key = "phone-notify"
             spec = catalog[key]
-            profile = {"schema": 1, "plugins": {key: {"ref": spec["schema_1_refs"][0], "enabled": True,
+            profile = {"schema": 1, "plugins": {key: {"ref": "a" * 40, "enabled": True,
                        "settings": {"notify": {name: True for name in spec["settings"]["notify"]}}}}}
             path.write_bytes(owned_files.json_bytes(profile))
             self.assertEqual(paseo_plugins.load_profile(path, catalog)[1], profile["plugins"])
@@ -90,3 +90,11 @@ class PaseoPluginsTests(unittest.TestCase):
             path.write_bytes(owned_files.json_bytes(profile))
             with self.assertRaises(paseo_plugins.PluginError):
                 paseo_plugins.load_profile(path, catalog)
+
+    def test_published_annotated_tag_resolves_to_commit(self):
+        spec = {"url": "https://github.com/organisation/plugin.git"}
+        tag, commit = "f" * 40, "c" * 40
+        release = SimpleNamespace(stdout="https://github.com/organisation/plugin/releases/tag/v1.2.3")
+        result = SimpleNamespace(stdout=f"{tag}\trefs/tags/v1.2.3\n{commit}\trefs/tags/v1.2.3^{{}}\n")
+        with patch.object(paseo_plugins.subprocess, "run", side_effect=[release, result]):
+            self.assertEqual(paseo_plugins.latest_release(spec), {"tag": "v1.2.3", "ref": commit})

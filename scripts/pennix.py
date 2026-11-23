@@ -630,7 +630,7 @@ def _emit(value: Any, as_json: bool) -> None:
     if as_json:
         print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
         return
-    if isinstance(value, dict) and "components" in value:
+    if isinstance(value, dict) and "components" in value and "config" in value:
         print(f"配置: {value['config']}")
         print(f"Codex: {value['codex_home']}")
         for key, item in value["components"].items():
@@ -1163,7 +1163,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
             with tempfile.TemporaryDirectory(prefix="pennix-paseo-preflight-") as directory:
                 candidate = candidates.resolve(component, Path(directory), target)
                 candidate_target = candidates.lock_entry(candidate)
-                paseo_service.preflight_candidate(candidate)
+                paseo_service.preflight_candidate(candidate, plugins_required=bool(paseo_plugins.profile_path(args.kconf)))
         except candidates.CandidateError as error:
             raise CliError(f"Paseo CLI 来源或摘要预检失败；未执行组件变更：{error}") from error
         if target and not candidates.matches(candidate_target, target):
@@ -1655,6 +1655,7 @@ def _updates(args):
     report = update_inventory.inspect(catalog, config_model.selected_components(kconf),
         args.component_lock['components'], value,
         system_upgrade=config_model.config_value(kconf, 'PENNIX_SYSTEM_UPGRADE') == 'y')
+    report['paseo_plugins'] = paseo_plugins.inventory(kconf, catalog, args.component_lock['components'])
     return report, value, catalog
 
 
@@ -1662,7 +1663,8 @@ def cmd_updates(args):
     report, _, _ = _updates(args)
     _emit(report, args.json)
     return 2 if report['system']['state'] != 'current' or any(
-        item['state'] == 'unknown' for item in report['components'].values()) else 0
+        item['state'] == 'unknown' for group in (report['components'], report['paseo_plugins'])
+        for item in group.values()) else 0
 
 
 def _verify_update_candidates(args, catalog):
@@ -1741,14 +1743,21 @@ def cmd_update_all(args):
 
 def cmd_update(args: argparse.Namespace) -> int:
     if getattr(args, 'all', False):
-        if args.component or args.version:
-            raise CliError('--all 不接受 component 或 --version')
+        if args.component or args.version or getattr(args, "confirm", None):
+            raise CliError('--all 不接受 component、--version 或 --confirm')
         return cmd_update_all(args)
     if not args.component:
         raise CliError('必须指定组件或 --all')
     if getattr(args, 'review_system_changes', False):
         raise CliError('--review-system-changes 仅用于 --all 的已完成系统升级重审')
     kconf, config_path, catalog = _load(args)
+    if args.component in catalog.get("paseo_plugins", {}):
+        if getattr(args, "version", None):
+            raise CliError("Paseo 插件的目标提交来自共享声明")
+        args.plugin_action = "update"
+        return cmd_paseo_plugins(args)
+    if getattr(args, "confirm", None):
+        raise CliError("--confirm 仅用于 Paseo 插件的更新摘要")
     args.kconf = kconf
     args.codex_home = Path(os.path.expanduser(config_model.config_value(kconf, "PENNIX_CODEX_HOME")))
     component = catalog["components"].get(args.component)
@@ -1836,7 +1845,7 @@ def cmd_update(args: argparse.Namespace) -> int:
             raise CliError(str(error)) from error
         target = candidates.lock_entry(candidate)
         if args.component == "paseo-cli":
-            paseo_service.preflight_candidate(candidate)
+            paseo_service.preflight_candidate(candidate, plugins_required=bool(paseo_plugins.profile_path(kconf)))
         if active and target != active["steps"][0]["target"]:
             raise CliError("恢复候选与 journal 中已确认目标不一致")
         upgrade_step_id = f"{args.component}:upgrade"
@@ -2524,6 +2533,7 @@ def parser() -> argparse.ArgumentParser:
     update.add_argument('--all', action='store_true', help='统一审阅并在同一 native journal 更新所选组件')
     update.add_argument('--review-system-changes', action='store_true', help='重审同一 --all 事务中已证实系统升级的额外变化；不释放 unknown')
     update.add_argument("--version", help="指定 npm 组件的精确版本；默认仍跟踪登记通道")
+    update.add_argument("--confirm", help="确认 Paseo 插件更新预览返回的摘要")
     update.add_argument("--config")
     update.add_argument("--json", action="store_true")
     update.set_defaults(function=cmd_update)
@@ -2617,7 +2627,7 @@ def main(argv: list[str] | None = None) -> int:
                     raise CliError("存在未完成 lifecycle 事务；先从原入口或 recover 恢复")
                 return args.function(args)
         return args.function(args)
-    except (CliError, update_inventory.UpdateError, base_environment.BaseError, candidates.CandidateError, apply_journal.JournalError, connection_owners.ConnectionError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, relay_owner.RelayError, release_owner.ReleaseError, skill_collections.CollectionError, owner_engine.local_clients.ClientError, secret_store.SecretError, owned_files.OwnershipError, native_integrations.NativeIntegrationError, native_integrations.hook_integrations.HookError, OSError) as error:
+    except (CliError, update_inventory.UpdateError, base_environment.BaseError, candidates.CandidateError, apply_journal.JournalError, connection_owners.ConnectionError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, paseo_plugins.PluginError, relay_owner.RelayError, release_owner.ReleaseError, skill_collections.CollectionError, owner_engine.local_clients.ClientError, secret_store.SecretError, owned_files.OwnershipError, native_integrations.NativeIntegrationError, native_integrations.hook_integrations.HookError, OSError) as error:
         print(f"pennix: {error}", file=sys.stderr)
         try:
             active = apply_journal.read()

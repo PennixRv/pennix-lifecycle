@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -17,6 +18,13 @@ import owned_files
 
 class PluginError(ValueError):
     pass
+
+
+COMMIT = re.compile(r"[0-9a-f]{40}")
+
+
+def exact_ref(ref):
+    return isinstance(ref, str) and COMMIT.fullmatch(ref) is not None
 
 
 def sources(catalog):
@@ -46,9 +54,9 @@ def load_profile(path, catalog):
     for key, desired in profile["plugins"].items():
         spec = catalog[key]
         if (not isinstance(desired, dict) or set(desired) != {"ref", "enabled", "settings"}
-                or desired["ref"] not in spec["schema_1_refs"] or type(desired["enabled"]) is not bool
+                or not exact_ref(desired["ref"]) or type(desired["enabled"]) is not bool
                 or not valid_values(desired["settings"], spec["settings"])):
-            raise PluginError(f"{key} 的提交或设置超出已审核合同")
+            raise PluginError(f"{key} 须指定完整 Git 提交及受管设置")
     return raw, profile["plugins"]
 
 
@@ -64,7 +72,7 @@ class Native:
             raise PluginError("缺少 Paseo 或 Node 原生入口")
         spec = self.catalog[key]
         request = {"id": key, "action": action, "url": spec["url"],
-                   "refs": spec["schema_1_refs"], "blocks": list(spec["settings"]), **data}
+                   "settingsContract": spec["settings_contract"], "blocks": list(spec["settings"]), **data}
         if before is not None:
             request.update(before=before, server=before["server"])
         try:
@@ -103,7 +111,27 @@ def matches(plugin, desired):
                 and values(plugin) == desired["settings"])
 
 
-def preflight_install(spec, ref):
+def latest_release(spec):
+    url = spec["url"]
+    repo = url.removesuffix(".git")
+    release = subprocess.run(["curl", "--disable", "--proto", "=https", "--proto-redir", "=https",
+                              "--connect-timeout", "8", "--max-time", "20", "-fsSIL",
+                              "-o", "/dev/null", "-w", "%{url_effective}", f"{repo}/releases/latest"],
+                             check=True, capture_output=True, text=True, timeout=24).stdout.strip()
+    tag = release.removeprefix(f"{repo}/releases/tag/")
+    if not re.fullmatch(r"v?[0-9]+\.[0-9]+\.[0-9]+", tag):
+        raise PluginError("登记的 GitHub Release 缺少稳定版本")
+    ref = f"refs/tags/{tag}"
+    result = subprocess.run(["git", "ls-remote", "--exit-code", url, ref, f"{ref}^{{}}"],
+                            check=True, capture_output=True, text=True, timeout=20)
+    records = {name: sha for sha, name in (line.split() for line in result.stdout.splitlines())}
+    commit = records.get(f"{ref}^{{}}", records.get(ref))
+    if not exact_ref(commit):
+        raise PluginError("发行 tag 缺少精确 Git 提交")
+    return {"ref": commit, "tag": tag}
+
+
+def preflight_install(key, spec, ref):
     if not shutil.which("git") or ("adopt_registry" in spec and not shutil.which("npm")):
         raise PluginError("安装前缺少 Git 或 Chat Polish 所需的 npm")
     with tempfile.TemporaryDirectory(prefix="pennix-paseo-candidate-") as directory:
@@ -115,10 +143,16 @@ def preflight_install(spec, ref):
             git("fetch", "--quiet", "--depth=1", "--no-tags", spec["url"], ref)
             if git("rev-parse", "FETCH_HEAD") != ref:
                 raise PluginError("Git 候选提交不匹配")
-            git("cat-file", "-e", "FETCH_HEAD:paseo-plugin.json")
+            manifest = json.loads(git("show", "FETCH_HEAD:paseo-plugin.json"))
+            if not isinstance(manifest, dict) or manifest.get("id") != key:
+                raise PluginError("候选的 Paseo 插件 ID 与登记不符")
+            files = list(spec["settings_contract"])
+            blobs = git("rev-parse", *(f"FETCH_HEAD:{name}" for name in files)).splitlines()
+            if blobs != list(spec["settings_contract"].values()):
+                raise PluginError(f"{key} 候选改变了受管设置实现，需要重新验证迁移和回退")
             if "adopt_registry" in spec:
                 git("cat-file", "-e", "FETCH_HEAD:package-lock.json")
-        except subprocess.SubprocessError as error:
+        except (subprocess.SubprocessError, json.JSONDecodeError) as error:
             raise PluginError("固定 Git 候选或必需文件不可用，保留现有安装") from error
 
 
@@ -160,7 +194,7 @@ def inspect(key, desired, state, receipt, lock, spec, home):
             or receipt["home"] != str(home)
             or not isinstance(receipt["accepted"], dict)
             or set(receipt["accepted"]) != {"ref", "enabled", "settings"}
-            or receipt["accepted"]["ref"] not in spec["schema_1_refs"]
+            or not exact_ref(receipt["accepted"]["ref"])
             or type(receipt["accepted"]["enabled"]) is not bool
             or not valid_values(receipt["accepted"]["settings"], spec["settings"])
             or lock != {"source": f"paseo-git:{spec['url']}", "ref": receipt["accepted"]["ref"]}):
@@ -305,6 +339,44 @@ def profile_digest(raw):
     return hashlib.sha256(raw).hexdigest() if raw is not None else None
 
 
+def profile_path(kconf):
+    configured = config_model.config_value(kconf, "PENNIX_PASEO_PLUGIN_PROFILE")
+    if not configured:
+        return None
+    path = Path(configured).expanduser()
+    if not path.is_absolute():
+        raise PluginError("PENNIX_PASEO_PLUGIN_PROFILE 须指向共享声明的绝对路径")
+    return path
+
+
+def inventory(kconf, catalog, locks):
+    path = profile_path(kconf)
+    if path is None:
+        return {}
+    registered = catalog["paseo_plugins"]
+    _, profile = load_profile(path, registered)
+    home = Path(config_model.config_value(kconf, "PENNIX_PASEO_HOME"))
+    native = Native(home, registered)
+    result = {}
+    for key, desired in profile.items():
+        item = {"selected_ref": desired["ref"], "locked": locks.get(key),
+                "execution": f"pennix update {key}", "daemon": "paseo-cli"}
+        try:
+            available = latest_release(registered[key])
+            item["available"] = available
+            before = native(key)
+            installed = before["plugin"]
+            item["installed_ref"] = installed["ref"] if installed else None
+            item["profile_state"] = inspect(key, desired, before, owned_files.read_json(_receipt_path(key)),
+                                            locks.get(key), registered[key], home)
+            item["state"] = "update_available" if available["ref"] != item["installed_ref"] else "current"
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            item.update(state="unknown", detail=str(error) if isinstance(error, PluginError)
+                        else "登记的 GitHub 候选或本机状态不可核验")
+        result[key] = item
+    return result
+
+
 READ_ACTIONS = {"plan", "status", "check", "capture"}
 MUTATION_STATES = {
     "apply": {"install", "configure"},
@@ -347,9 +419,9 @@ def command(args, load, verify, write_lock, start, emit):
         emit({"schema": 1, "plugins": profile}, True)
         return 0
 
-    path = Path(config_model.config_value(kconf, "PENNIX_PASEO_PLUGIN_PROFILE")).expanduser()
-    if not path.is_absolute():
-        raise PluginError("PENNIX_PASEO_PLUGIN_PROFILE 须指向共享声明的绝对路径")
+    path = profile_path(kconf)
+    if path is None:
+        raise PluginError("请在 workflow.config 指定 Paseo 插件共享声明")
     raw, profile = load_profile(path, registered)
     args.plugin_profile_path = path
     args.plugin_profile_digest = profile_digest(raw)
@@ -406,7 +478,8 @@ def command(args, load, verify, write_lock, start, emit):
     if args.confirm != fingerprint:
         raise PluginError("插件操作确认摘要不同，重新预览")
     for key, item in preview.items():
-        if item["state"] in {"current", "unselected"} and action == "apply":
+        if (item["state"] in {"current", "unselected"} and action == "apply"
+                or item["state"] == "current" and action == "update"):
             targets.pop(key, None)
             continue
         if item["state"] not in MUTATION_STATES[action]:
@@ -422,9 +495,9 @@ def command(args, load, verify, write_lock, start, emit):
             raise PluginError(f"{key} 归属不明，停止卸载")
         if action not in {"detach", "uninstall", "reconcile"} and (
                 not plugin or plugin["registry"] or plugin["ref"] != desired["ref"]):
-            preflight_install(registered[key], desired["ref"])
+            preflight_install(key, registered[key], desired["ref"])
             if plugin and plugin["ref"] != desired["ref"]:
-                preflight_install(registered[key], plugin["ref"])
+                preflight_install(key, registered[key], plugin["ref"])
     for key, target in targets.items():
         execute(args, key, action, target, native, verify, write_lock, start)
     emit({"operation": action, "plugins": dict.fromkeys(targets, "verified"),

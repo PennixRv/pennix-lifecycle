@@ -424,7 +424,8 @@ class LifecycleStateTests(unittest.TestCase):
              patch.object(pennix.candidates, "lock_entry", return_value=target), \
              patch.object(config_model, "config_value", side_effect=lambda _kconf, key:
                           {"PENNIX_CODEX_HOME": "/tmp/codex", "PENNIX_PASEO_HOME": "/tmp/paseo",
-                           "PENNIX_PASEO_RUN": "y", "PENNIX_PASEO_LISTEN": "127.0.0.1:6767"}[key]), \
+                           "PENNIX_PASEO_PLUGIN_PROFILE": "", "PENNIX_PASEO_RUN": "y",
+                           "PENNIX_PASEO_LISTEN": "127.0.0.1:6767"}[key]), \
              patch.object(config_model, "choice_value", return_value="login"), \
              patch.object(pennix.shutil, "which", return_value="/tmp/paseo-cli"), \
              patch.object(pennix.paseo_service, "runtime", return_value={
@@ -468,11 +469,12 @@ class LifecycleStateTests(unittest.TestCase):
              patch.object(pennix.candidates, "lock_entry", return_value=target), \
              patch.object(config_model, "config_value", side_effect=lambda _kconf, key:
                           {"PENNIX_CODEX_HOME": "/tmp/codex", "PENNIX_PASEO_HOME": "/tmp/paseo",
-                           "PENNIX_PASEO_RUN": "y", "PENNIX_PASEO_LISTEN": "127.0.0.1:6767"}[key]), \
+                           "PENNIX_PASEO_PLUGIN_PROFILE": "/tmp/plugin-profile.json", "PENNIX_PASEO_RUN": "y",
+                           "PENNIX_PASEO_LISTEN": "127.0.0.1:6767"}[key]), \
              patch.object(config_model, "choice_value", return_value="login"), \
              patch.object(pennix.shutil, "which", return_value="/tmp/paseo-cli"), \
              patch.object(pennix.paseo_service, "runtime", side_effect=[old_runtime, old_runtime]), \
-             patch.object(pennix.paseo_service, "preflight_candidate"), \
+             patch.object(pennix.paseo_service, "preflight_candidate") as candidate_preflight, \
              patch.object(pennix.paseo_service, "preflight") as preflight, \
              patch.object(pennix.paseo_service, "assert_no_active_work") as busy_check, \
              patch.object(pennix.paseo_service, "restart", return_value={
@@ -483,6 +485,7 @@ class LifecycleStateTests(unittest.TestCase):
              patch.object(pennix, "_emit") as emit:
             self.assertEqual(pennix.cmd_update(args), 0)
 
+        candidate_preflight.assert_called_once_with(candidate, plugins_required=True)
         preflight.assert_called_once()
         busy_check.assert_called_once()
         restart.assert_called_once_with(Path("/tmp/paseo-cli"), Path("/tmp/paseo"), "login")
