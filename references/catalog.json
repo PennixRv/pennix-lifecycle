@@ -1,5 +1,24 @@
 {
   "schema": 3,
+  "paseo_plugins": {
+    "paseo-chat-polish": {
+      "url": "https://github.com/lthieu96/paseo-chat-polish.git",
+      "adopt_registry": {"url": "https://plugins.paseo.sh", "id": "lthieu96/chat-polish"},
+      "adopt_ref": "5fb31cbdb3cbaeb1c49568d64feaa468d0c1813d",
+      "schema_1_refs": ["5fb31cbdb3cbaeb1c49568d64feaa468d0c1813d"],
+      "settings": {
+        "theme": {"name": "text", "appearance": "text", "colors": {"background": "text", "foreground": "text", "raised": "text", "control": "text", "border": "text", "accent": "text", "mutedForeground": "text", "ring": "text"}, "sidebar": "text", "syntax": "text"},
+        "timeline": {"reasoning": "text", "toolDetails": "text", "commandColors": "text", "diffWrap": "text", "hidden": "strings", "userMessages": "text", "steps": "text", "selectionCopy": "text", "density": "text", "rowIcons": {"steps": "text", "tool": "text", "thought": "text"}, "merge": "text", "phoneChat": "text", "iconSet": "text", "loader": "text", "loaderSize": "text", "nativeStyle": "text", "windowStyle": "text", "recap": "text", "diagrams": "text", "html": "text", "images": "text", "imageStacks": "text", "imageStackOpen": "text", "richText": {"quote": "text", "table": "text", "code": "text", "inline": "text", "heading": "text", "list": "text", "callout": "text", "rule": "text"}}
+      }
+    },
+    "phone-notify": {
+      "url": "https://github.com/PennixRv/paseo-phone-notify.git",
+      "schema_1_refs": ["36a56c0041e575d3e253d643964a033013f21414"],
+      "settings": {
+        "notify": {"enabled": "bool", "onCompleted": "bool", "onFailed": "bool", "onPermission": "bool", "onCanceled": "bool", "includeSubagents": "bool"}
+      }
+    }
+  },
   "aur_helper": {"repo": "https://aur.archlinux.org/yay-bin.git", "ref": "13e0a4754d106a9252b7479bf1b370fbe454fc48"},
   "configuration_targets": {
     "copilot-context-mode": {

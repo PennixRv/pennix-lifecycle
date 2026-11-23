@@ -28,6 +28,7 @@ import config_model
 import credential_import
 import path_env
 import paseo_service
+import paseo_plugins
 import relay_owner
 import release_owner
 import skill_collections
@@ -80,7 +81,7 @@ def _load(args: argparse.Namespace) -> tuple[config_model.StrictKconfig, Path, d
     owned_files.bind_target(args.codex_home)
     os.environ["CODEX_HOME"] = str(args.codex_home)
     active = apply_journal.read()
-    if active is not None and getattr(args, "command", None) in {"apply", "update", "reconcile", "repair", "uninstall"}:
+    if active is not None and getattr(args, "command", None) in {"apply", "update", "reconcile", "repair", "uninstall", "paseo-plugins"}:
         expected = {"home": str(Path.home()), "codex_home": str(args.codex_home), "state_root": str(owned_files.state_root())}
         if active.get("identity") != expected:
             raise CliError("事务目标身份缺失或不匹配；保留旧 journal，不自动重放")
@@ -104,6 +105,7 @@ def _load(args: argparse.Namespace) -> tuple[config_model.StrictKconfig, Path, d
                      if value.get("lock_source_aliases") else value["lock_source"])
                for key, value in catalog["components"].items()
                if value.get("delivery") in {"package", "plugin", "client", "collection"}}
+    sources.update(paseo_plugins.sources(catalog))
     try:
         lock_path = component_lock.path_for(path)
         lock_before = owned_files.read(lock_path, private=True)
@@ -125,6 +127,8 @@ def _verify_inputs(args: argparse.Namespace) -> None:
         raise CliError("确认后 workflow.config 已变化；未执行旧计划")
     if hasattr(args, "component_lock_snapshot") and owned_files.read(args.component_lock_path, private=True) != args.component_lock_snapshot:
         raise CliError("确认后 components.lock.json 已变化；未执行旧计划")
+    if hasattr(args, "plugin_profile_digest") and apply_journal.digest(args.plugin_profile_path) != args.plugin_profile_digest:
+        raise CliError("确认后 Paseo 插件声明已变化；未执行旧计划")
     if hasattr(args, 'update_review'):
         review = args.update_review
         secret_path = Path(config_model.config_value(args.kconf, 'PENNIX_SECRETS_FILE'))
@@ -1939,6 +1943,10 @@ def _reverse_uninstall_order(catalog: dict[str, Any]) -> list[str]:
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
     kconf, _, catalog = _load(args)
+    registered_plugins = paseo_plugins.sources(catalog)
+    if registered_plugins and (args.all or args.component == "paseo-cli") and (
+            registered_plugins.keys() & args.component_lock["components"].keys()):
+        raise CliError("先通过 pennix paseo-plugins 解除接管或卸载插件，再卸载 Paseo CLI")
     args.kconf = kconf
     args.codex_home = Path(os.path.expanduser(config_model.config_value(kconf, "PENNIX_CODEX_HOME")))
     if args.component == "paseo-relay":
@@ -2464,9 +2472,17 @@ def cmd_recover(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_paseo_plugins(args: argparse.Namespace) -> int:
+    try:
+        return paseo_plugins.command(args, _load, _verify_inputs, _write_lock, _start_transaction, _emit)
+    except paseo_plugins.PluginError as error:
+        raise CliError(str(error)) from error
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="pennix", description="Pennix 工作流生命周期工具")
     sub = p.add_subparsers(dest="command", required=True)
+    paseo_plugins.add_parser(sub, cmd_paseo_plugins)
     recover = sub.add_parser("recover", help="只读展示或按 owner 证据恢复当前事务")
     recover.add_argument("--transaction")
     recover.add_argument("--step")
@@ -2589,14 +2605,15 @@ def main(argv: list[str] | None = None) -> int:
             or args.command == "recover" and args.resolve is not None
             or (args.command == "config" and args.config_command in {"init", "edit"})
             or (args.command == "cache" and args.cache_command == "clean" and args.yes)
+            or args.command == "paseo-plugins" and bool(getattr(args, "confirm", None))
         )
         if mutating:
             with owned_files.locked():
-                if args.command in {"apply", "repair", "update", "reconcile", "uninstall"} or args.command == "tool" and args.tool_command in {"install", "update"}:
+                if args.command in {"apply", "repair", "update", "reconcile", "uninstall", "paseo-plugins"} or args.command == "tool" and args.tool_command in {"install", "update"}:
                     current_host = owner_engine.host.detect_host()
                     if not current_host["supported"]:
                         raise CliError(str(current_host["reason"]))
-                if args.command not in {"apply", "repair", "uninstall", "update", "reconcile", "recover"} and apply_journal.read() is not None:
+                if args.command not in {"apply", "repair", "uninstall", "update", "reconcile", "recover", "paseo-plugins"} and apply_journal.read() is not None:
                     raise CliError("存在未完成 lifecycle 事务；先从原入口或 recover 恢复")
                 return args.function(args)
         return args.function(args)

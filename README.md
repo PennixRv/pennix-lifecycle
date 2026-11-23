@@ -161,6 +161,31 @@ npm 组件可用 `pennix update trellis-cli --version 0.7.1-beta.0` 选择精确
 替换；不修改组件的默认通道。此参数不接受 tag 或版本范围，也不适用于非 npm 组件。
 恢复未完成的 update 时，指定版本必须与事务已确认目标一致；省略参数仍恢复原目标。
 
+#### Paseo 插件
+
+`pennix paseo-plugins` 管理 Chat Polish 与 Phone notify。设置
+`CONFIG_PENNIX_PASEO_PLUGIN_PROFILE` 为共享声明的绝对路径后，以同一份 JSON 声明
+在每台主机运行 `plan` 和 `check`。可从已审核的基线主机用
+`pennix paseo-plugins capture` 提取声明。声明仅保存已审核的 Git 提交、插件启用状态和
+受管的主机级设置。组件锁、本机回执、配对、凭据和事务仍由各台分别保存。
+
+写入命令先预览并返回确认摘要，再用 `--confirm <摘要>` 执行同一操作。已有插件使用
+`adopt <插件 ID>`。Chat Polish 的注册表来源切换会先记录原设置，再以同一提交原生复装、
+恢复设置并校验。Phone notify 的同源同提交可原位接管。新安装和已声明设置变更使用
+`apply`，外部漂移用 `repair <插件 ID>`。修改声明中的启用状态可暂停或恢复插件。
+
+升级或回退先在声明中指定经 catalog 审核的提交，再用 `update <插件 ID>`。
+`reconcile <插件 ID>` 只接受已严格达到共同声明的外部版本变化。当前适配核验
+Paseo v0.17.1 和 catalog 中的 schema v1 提交。更新支持范围前需验证插件设置迁移和回退，
+因为 Paseo 的读设置接口可能持久化迁移。单个插件暂停时，由已核验的本机设置文档提供读取，
+恢复后用 Paseo 原生设置接口校验。设置写入均走原生接口和 revision 校验。
+
+从共享声明移除某项后，可用 `detach <插件 ID>` 释放归属并保留安装。
+`uninstall <插件 ID>` 需要当时仍有归属证据，Paseo 会同时删除该插件设置。
+使用 `pennix recover --json` 看未完成事务，用
+`pennix paseo-plugins recover --confirm <事务 ID>` 按已记录状态继续。
+命令作用范围限定在两个登记的 Git 插件。
+
 启用 `PENNIX_SYSTEM_UPGRADE` 时，`apply` 会在完整计划中显示并确认
 `sudo pacman -Syu --noconfirm`；缺少或更新 Arch/AUR 组件时，必须沿这条同次确认的
 路径执行。Lifecycle 变更会在私有状态目录写入 journal，步骤只有完成后置核验才标记

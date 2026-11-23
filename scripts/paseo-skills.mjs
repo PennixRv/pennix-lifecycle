@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
+import { managePlugins } from './paseo-plugins.mjs';
 
 const run = promisify(execFile);
 const [action, executable, home] = process.argv.slice(2);
@@ -25,7 +26,7 @@ function packageRoot(entry, name) {
 }
 async function main() {
 try {
-  if (!['probe', 'install', 'status', 'inspect'].includes(action) || !executable || !home?.startsWith('/')) throw new Error();
+  if (!['probe', 'install', 'status', 'inspect', 'plugins'].includes(action) || !executable || !home?.startsWith('/')) throw new Error();
   const { root, metadata } = packageRoot(executable, '@getpaseo/cli');
   if (typeof metadata.version !== 'string' || !metadata.version) throw new Error();
   const require = createRequire(join(root, 'package.json'));
@@ -82,6 +83,13 @@ try {
         connectTimeoutMs: 15000, reconnect: { enabled: false } });
       await client.connect();
       if (client.getLastServerInfoMessage()?.serverId !== instance.serverId) throw new Error();
+      if (action === 'plugins') {
+        stage = 'plugin-operation';
+        const result = await managePlugins(client, home, status);
+        if (!isSameDaemonInstance(instance, await readDaemonInstance(home))) throw new Error();
+        process.stdout.write(`${JSON.stringify(result)}\n`);
+        return;
+      }
       if (action === 'inspect') {
         stage = 'delegations';
         const { createPaseoApi } = await import(pathToFileURL(require.resolve('@getpaseo/client')));
@@ -138,7 +146,7 @@ try {
     }
   }
 } catch {
-  process.stderr.write(`Paseo native Skills ${stage} failed; preserve owner state for inspection\n`);
+  process.stderr.write(`Paseo native ${action === 'plugins' ? 'plugins' : 'Skills'} ${stage} failed; preserve owner state for inspection\n`);
   process.exitCode = 2;
 }
 }
