@@ -830,6 +830,21 @@ config PENNIX_PASEO_PLUGIN_PROFILE
 	help
 		填写共享 JSON 声明的绝对路径。留空时由 Paseo 自行管理插件。
 
+config PENNIX_PASEO_SESSION_INSIGHTS_CCHP
+	bool "允许会话指标插件读取 CCHP 用量"
+	depends on PENNIX_COMPONENT_PASEO_CLI
+	default n
+
+config PENNIX_PASEO_SESSION_INSIGHTS_CCHP_URL
+	string "CCHP 控制面的 HTTPS 地址"
+	depends on PENNIX_PASEO_SESSION_INSIGHTS_CCHP
+	default ""
+
+config PENNIX_PASEO_SESSION_INSIGHTS_CCHP_KEY_ID
+	string "CCHP 推理密钥 ID"
+	depends on PENNIX_PASEO_SESSION_INSIGHTS_CCHP
+	default ""
+
 config PENNIX_PASEO_RUN
 	bool "在本次 apply 显式启动 Paseo daemon"
 	default n

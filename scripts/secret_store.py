@@ -15,6 +15,7 @@ FIELDS = {
     "codex": {"api_key"},
     "siyuan": {"api_token"},
     "cch": {"admin_token"},
+    "cchp": {"usage_token"},
     "windsurf": {"api_key"},
 }
 

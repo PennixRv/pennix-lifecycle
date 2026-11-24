@@ -163,7 +163,7 @@ npm 组件可用 `pennix update trellis-cli --version 0.7.1-beta.0` 选择精确
 
 #### Paseo 插件
 
-`pennix paseo-plugins` 管理 Chat Polish 与 Phone notify。设置
+`pennix paseo-plugins` 管理 Chat Polish、Phone notify 和 Paseo 会话指标。设置
 `CONFIG_PENNIX_PASEO_PLUGIN_PROFILE` 为共享声明的绝对路径后，以同一份 JSON 声明
 在每台主机运行 `plan` 和 `check`。可从已审核的基线主机用
 `pennix paseo-plugins capture` 提取声明。声明仅保存已审核的 Git 提交、插件启用状态和
@@ -188,7 +188,9 @@ npm 组件可用 `pennix update trellis-cli --version 0.7.1-beta.0` 选择精确
 `uninstall <插件 ID>` 需要当时仍有归属证据，Paseo 会同时删除该插件设置。
 使用 `pennix recover --json` 看未完成事务，用
 `pennix paseo-plugins recover --confirm <事务 ID>` 按已记录状态继续。
-命令作用范围限定在两个登记的 Git 插件。
+命令作用范围限定在已登记的 Git 插件。
+
+会话指标插件的 ID 为 `paseo-session-insights`，声明中的 `settings` 为 `{}`。接入 CCHP 时，在配置菜单的 Paseo 选项中启用会话指标 CCHP 取数，并填写控制面 HTTPS 源地址和推理密钥 ID。通过 `pennix secrets edit` 在私有 `secrets.toml` 的 `[cchp]` 中填写 `usage_token`。令牌需要目标组织的 `usage:read` 权限。切换令牌后，符合目标 `PENNIX_PASEO_HOME` 的插件服务端会在下一次配置刷新中取得新值。
 
 启用 `PENNIX_SYSTEM_UPGRADE` 时，`apply` 会在完整计划中显示并确认
 `sudo pacman -Syu --noconfirm`；缺少或更新 Arch/AUR 组件时，必须沿这条同次确认的

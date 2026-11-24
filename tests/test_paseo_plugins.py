@@ -12,9 +12,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import apply_journal
 import owned_files
 import paseo_plugins
+import pennix
 
 
 class PaseoPluginsTests(unittest.TestCase):
+    def test_catalog_plugin_can_be_updated_and_is_optional_when_capturing(self):
+        catalog = json.loads((Path(__file__).resolve().parents[1] / "references/catalog.json").read_bytes())
+        specs = catalog["paseo_plugins"]
+        key = "paseo-session-insights"
+        args = pennix.parser().parse_args(["paseo-plugins", "update", key])
+        self.assertEqual(args.component, key)
+        self.assertFalse(specs[key]["capture_required"])
+        states = {name: {"plugin": {"ref": "a" * 40, "enabled": True, "status": "running",
+                                    "settings": {}}} for name in specs if name != key}
+        states[key] = {"plugin": None}
+        outputs = []
+        with patch.object(paseo_plugins, "Native", return_value=lambda name: states[name]), \
+                patch.object(paseo_plugins.config_model, "config_value", return_value="/fixture"):
+            paseo_plugins.command(SimpleNamespace(plugin_action="capture"),
+                                  lambda _: (None, None, catalog), None, None, None,
+                                  lambda data, _: outputs.append(data))
+        self.assertEqual(set(outputs[0]["plugins"]), set(specs) - {key})
+
     def test_cutover_recovers_after_native_remove_without_replaying_remove(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

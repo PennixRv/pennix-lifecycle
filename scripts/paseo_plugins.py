@@ -397,7 +397,7 @@ def add_parser(subcommands, handler):
         child.add_argument("--config")
         child.add_argument("--json", action="store_true")
         if action in MUTATION_STATES and action != "apply":
-            child.add_argument("component", choices=["paseo-chat-polish", "phone-notify"])
+            child.add_argument("component")
         if action not in READ_ACTIONS:
             child.add_argument("--confirm", help="预览返回的摘要，或 recover 的事务 ID")
         child.set_defaults(function=handler)
@@ -407,12 +407,17 @@ def command(args, load, verify, write_lock, start, emit):
     kconf, _, catalog = load(args)
     registered = catalog["paseo_plugins"]
     action = args.plugin_action
+    component = getattr(args, "component", None)
+    if component is not None and component not in registered:
+        raise PluginError(f"未登记的 Paseo Git 插件: {component}")
     home = Path(config_model.config_value(kconf, "PENNIX_PASEO_HOME"))
     native = Native(home, registered)
     if action == "capture":
         profile = {}
         for key in registered:
             plugin = native(key)["plugin"]
+            if not plugin and not registered[key].get("capture_required", True):
+                continue
             if not plugin or plugin["status"] != "running":
                 raise PluginError(f"{key} 未运行，无法提取基线")
             profile[key] = {"ref": plugin["ref"], "enabled": plugin["enabled"], "settings": values(plugin)}
@@ -443,7 +448,6 @@ def command(args, load, verify, write_lock, start, emit):
 
     targets = {}
     preview = {}
-    component = getattr(args, "component", None)
     for key in [component] if component else registered:
         lock = args.component_lock["components"].get(key)
         desired = profile.get(key)

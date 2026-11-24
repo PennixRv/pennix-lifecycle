@@ -1,6 +1,12 @@
 {
   "schema": 3,
   "paseo_plugins": {
+    "paseo-session-insights": {
+      "url": "https://github.com/PennixRv/paseo-session-insights.git",
+      "capture_required": false,
+      "settings_contract": {},
+      "settings": {}
+    },
     "paseo-chat-polish": {
       "url": "https://github.com/lthieu96/paseo-chat-polish.git",
       "adopt_registry": {"url": "https://plugins.paseo.sh", "id": "lthieu96/chat-polish"},

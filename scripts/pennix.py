@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 import tomllib
+from urllib.parse import urlsplit
 
 import _engine as owner_engine
 import apply_journal
@@ -2167,6 +2168,39 @@ def cmd_secrets_codex_token(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_secrets_paseo_session_insights(args: argparse.Namespace) -> int:
+    if not args.private_stdout or sys.stdout.isatty():
+        raise CliError("会话指标配置只能通过私有子进程管道读取")
+    config, _ = config_model.load(args.config)
+    def value(key):
+        return config_model.config_value(config, key)
+
+    home = Path(args.paseo_home)
+    if not home.is_absolute() or home != Path(value("PENNIX_PASEO_HOME")):
+        raise CliError("Paseo 家目录与 Lifecycle 配置不一致")
+    if value("PENNIX_PASEO_SESSION_INSIGHTS_CCHP") != "y":
+        return 0
+
+    url = value("PENNIX_PASEO_SESSION_INSIGHTS_CCHP_URL")
+    key_id = value("PENNIX_PASEO_SESSION_INSIGHTS_CCHP_KEY_ID")
+    try:
+        endpoint = urlsplit(url)
+        port = endpoint.port
+    except ValueError as error:
+        raise CliError("CCHP 控制面地址无效") from error
+    if (len(url) > 2048 or re.search(r"[\s\\?#]", url)
+            or endpoint.scheme != "https" or not endpoint.hostname or endpoint.username is not None
+            or endpoint.path not in ("", "/") or port == 0):
+        raise CliError("CCHP 控制面地址必须是 HTTPS 源地址")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key_id):
+        raise CliError("CCHP 推理密钥 ID 无效")
+    token = secret_store.get(Path(value("PENNIX_SECRETS_FILE")), "cchp", "usage_token")
+    if not re.fullmatch(r"[!-~]{1,4096}", token):
+        raise CliError("CCHP 用量令牌格式无效")
+    json.dump({"baseUrl": url, "apiKeyId": key_id, "token": token}, sys.stdout, separators=(",", ":"))
+    return 0
+
+
 def cmd_secrets_import_ssh(args: argparse.Namespace) -> int:
     kconf, config_path = config_model.load(args.config)
     before = kconf.snapshot
@@ -2578,6 +2612,11 @@ def parser() -> argparse.ArgumentParser:
     secret_token = secrets_sub.add_parser("codex-token", help="供 Codex auth command 安全读取静态 API Key")
     secret_token.add_argument("--secrets-file", required=True)
     secret_token.set_defaults(function=cmd_secrets_codex_token)
+    insights_secret = secrets_sub.add_parser("paseo-session-insights", help="供 Paseo 插件服务端通过私有管道读取 CCHP 配置")
+    insights_secret.add_argument("--config")
+    insights_secret.add_argument("--paseo-home", required=True)
+    insights_secret.add_argument("--private-stdout", action="store_true")
+    insights_secret.set_defaults(function=cmd_secrets_paseo_session_insights)
     secret_import = secrets_sub.add_parser("import-ssh", help="从既有 SSH 别名读取已登记凭据文件")
     secret_import.add_argument("--alias", required=True)
     secret_import.add_argument("--service", action="append", choices=sorted(credential_import.SOURCES))

@@ -23,6 +23,45 @@ from contextlib import redirect_stdout
 
 
 class SecretStoreTests(unittest.TestCase):
+    def test_session_insights_uses_private_pipe_and_matching_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            path = workspace / "secrets.toml"
+            home = workspace / "paseo"
+            enabled = "n"
+            settings = {
+                "PENNIX_PASEO_HOME": str(home),
+                "PENNIX_SECRETS_FILE": str(path),
+                "PENNIX_PASEO_SESSION_INSIGHTS_CCHP_URL": "https://gateway.invalid:9999",
+                "PENNIX_PASEO_SESSION_INSIGHTS_CCHP_KEY_ID": "fixture-id",
+            }
+            args = pennix.parser().parse_args([
+                "secrets", "paseo-session-insights", "--paseo-home", str(home), "--private-stdout",
+            ])
+            with patch.object(config_model, "load", return_value=(None, None)), \
+                    patch.object(config_model, "config_value", side_effect=lambda _, key:
+                        enabled if key == "PENNIX_PASEO_SESSION_INSIGHTS_CCHP" else settings[key]):
+                with redirect_stdout(io.StringIO()) as stdout:
+                    args.function(args)
+                    self.assertEqual(stdout.getvalue(), "")
+                enabled = "y"
+                with self.assertRaises(secret_store.SecretError):
+                    args.function(args)
+                secret_store.update(path, {"cchp": {"usage_token": "fixture-credential"}})
+                with redirect_stdout(io.StringIO()) as stdout:
+                    args.function(args)
+                    self.assertEqual(json.loads(stdout.getvalue()), {
+                        "baseUrl": "https://gateway.invalid:9999", "apiKeyId": "fixture-id",
+                        "token": "fixture-credential",
+                    })
+                with self.assertRaisesRegex(pennix.CliError, "家目录"):
+                    args.function(SimpleNamespace(**{**vars(args), "paseo_home": str(workspace / "other")}))
+                with self.assertRaisesRegex(pennix.CliError, "私有"):
+                    args.function(SimpleNamespace(**{**vars(args), "private_stdout": False}))
+                settings["PENNIX_PASEO_SESSION_INSIGHTS_CCHP_URL"] = "https://gateway.invalid/v1"
+                with self.assertRaisesRegex(pennix.CliError, "HTTPS 源地址"):
+                    args.function(args)
+
     def test_owner_import_uses_sftp_login_home_without_tilde_extension(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
