@@ -16,6 +16,7 @@ FIELDS = {
     "siyuan": {"api_token"},
     "cch": {"admin_token"},
     "cchp": {"usage_token"},
+    "sub2api": {"account_read_key"},
     "windsurf": {"api_key"},
 }
 

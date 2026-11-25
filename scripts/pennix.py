@@ -2178,23 +2178,40 @@ def cmd_secrets_paseo_session_insights(args: argparse.Namespace) -> int:
     home = Path(args.paseo_home)
     if not home.is_absolute() or home != Path(value("PENNIX_PASEO_HOME")):
         raise CliError("Paseo 家目录与 Lifecycle 配置不一致")
-    if value("PENNIX_PASEO_SESSION_INSIGHTS_CCHP") != "y":
+    is_sub2api = args.source == "sub2api"
+    source = "Sub2API" if is_sub2api else "CCHP"
+    option = f"PENNIX_PASEO_SESSION_INSIGHTS_{args.source.upper()}"
+    if value(option) != "y":
         return 0
 
-    url = value("PENNIX_PASEO_SESSION_INSIGHTS_CCHP_URL")
-    key_id = value("PENNIX_PASEO_SESSION_INSIGHTS_CCHP_KEY_ID")
+    url = value(f"{option}_URL")
     try:
         endpoint = urlsplit(url)
         port = endpoint.port
     except ValueError as error:
-        raise CliError("CCHP 控制面地址无效") from error
+        raise CliError(f"{source} 控制面地址无效") from error
     if (len(url) > 2048 or re.search(r"[\s\\?#]", url)
             or endpoint.scheme != "https" or not endpoint.hostname or endpoint.username is not None
             or endpoint.path not in ("", "/") or port == 0):
-        raise CliError("CCHP 控制面地址必须是 HTTPS 源地址")
+        raise CliError(f"{source} 控制面地址必须是 HTTPS 源地址")
+    secrets_path = Path(value("PENNIX_SECRETS_FILE"))
+    if is_sub2api:
+        account_id = int(value(f"{option}_ACCOUNT_ID"))
+        if not 0 < account_id <= 9007199254740991:
+            raise CliError("Sub2API 账号 ID 必须为正整数")
+        key = secret_store.load(secrets_path).get("sub2api", {}).get("account_read_key") if secrets_path.exists() else None
+        if not key:
+            json.dump({"state": "missing-key"}, sys.stdout)
+            return 0
+        if not re.fullmatch(r"adm_sc_[A-Za-z0-9_-]{1,256}", key):
+            raise CliError("Sub2API 受限管理员 Key 格式无效")
+        json.dump({"baseUrl": url, "accountId": account_id, "token": key}, sys.stdout, separators=(",", ":"))
+        return 0
+
+    key_id = value(f"{option}_KEY_ID")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key_id):
         raise CliError("CCHP 推理密钥 ID 无效")
-    token = secret_store.get(Path(value("PENNIX_SECRETS_FILE")), "cchp", "usage_token")
+    token = secret_store.get(secrets_path, "cchp", "usage_token")
     if not re.fullmatch(r"[!-~]{1,4096}", token):
         raise CliError("CCHP 用量令牌格式无效")
     json.dump({"baseUrl": url, "apiKeyId": key_id, "token": token}, sys.stdout, separators=(",", ":"))
@@ -2612,7 +2629,8 @@ def parser() -> argparse.ArgumentParser:
     secret_token = secrets_sub.add_parser("codex-token", help="供 Codex auth command 安全读取静态 API Key")
     secret_token.add_argument("--secrets-file", required=True)
     secret_token.set_defaults(function=cmd_secrets_codex_token)
-    insights_secret = secrets_sub.add_parser("paseo-session-insights", help="供 Paseo 插件服务端通过私有管道读取 CCHP 配置")
+    insights_secret = secrets_sub.add_parser("paseo-session-insights", help="供 Paseo 插件服务端通过私有管道读取来源配置")
+    insights_secret.add_argument("--source", choices=("cchp", "sub2api"), default="cchp")
     insights_secret.add_argument("--config")
     insights_secret.add_argument("--paseo-home", required=True)
     insights_secret.add_argument("--private-stdout", action="store_true")

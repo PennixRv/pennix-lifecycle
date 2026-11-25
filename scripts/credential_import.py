@@ -110,6 +110,8 @@ def required_fields(kconf, catalog: dict) -> list[str]:
     fields = set()
     if config_model.config_value(kconf, "PENNIX_PASEO_SESSION_INSIGHTS_CCHP") == "y":
         fields.add("cchp.usage_token")
+    if config_model.config_value(kconf, "PENNIX_PASEO_SESSION_INSIGHTS_SUB2API") == "y":
+        fields.add("sub2api.account_read_key")
     selected = config_model.selected_components(kconf)
     if "codex-config" in selected and config_model.config_value(kconf, "PENNIX_CODEX_AUTH_API_KEY") == "y":
         fields.add("codex.api_key")

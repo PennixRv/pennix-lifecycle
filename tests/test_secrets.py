@@ -23,6 +23,42 @@ from contextlib import redirect_stdout
 
 
 class SecretStoreTests(unittest.TestCase):
+    def test_sub2api_account_requires_opt_in_and_a_scoped_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "secrets.toml"
+            home = Path(directory) / "paseo"
+            settings = {
+                "PENNIX_PASEO_HOME": str(home),
+                "PENNIX_SECRETS_FILE": str(path),
+                "PENNIX_PASEO_SESSION_INSIGHTS_SUB2API": "n",
+                "PENNIX_PASEO_SESSION_INSIGHTS_SUB2API_URL": "https://sub2api.invalid",
+                "PENNIX_PASEO_SESSION_INSIGHTS_SUB2API_ACCOUNT_ID": "17",
+            }
+            args = pennix.parser().parse_args(["secrets", "paseo-session-insights", "--source", "sub2api",
+                                              "--paseo-home", str(home), "--private-stdout"])
+            with patch.object(config_model, "load", return_value=(None, None)), \
+                    patch.object(config_model, "config_value", side_effect=lambda _, key: settings[key]):
+                with redirect_stdout(io.StringIO()) as output:
+                    args.function(args)
+                    self.assertEqual(output.getvalue(), "")
+                settings["PENNIX_PASEO_SESSION_INSIGHTS_SUB2API"] = "y"
+                with redirect_stdout(io.StringIO()) as output:
+                    args.function(args)
+                    self.assertEqual(json.loads(output.getvalue()), {"state": "missing-key"})
+                with patch.object(secret_store, "load", return_value={"sub2api": {"account_read_key": "global-token"}}), \
+                        patch.object(Path, "exists", return_value=True):
+                    with self.assertRaisesRegex(pennix.CliError, "受限管理员"):
+                        args.function(args)
+                secret_store.update(path, {"sub2api": {"account_read_key": "adm_sc_synthetic"}})
+                with redirect_stdout(io.StringIO()) as output:
+                    args.function(args)
+                    self.assertEqual(json.loads(output.getvalue()), {
+                        "baseUrl": "https://sub2api.invalid", "accountId": 17, "token": "adm_sc_synthetic",
+                    })
+                settings["PENNIX_PASEO_SESSION_INSIGHTS_SUB2API_ACCOUNT_ID"] = "0"
+                with self.assertRaisesRegex(pennix.CliError, "正整数"):
+                    args.function(args)
+
     def test_session_insights_uses_private_pipe_and_matching_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
