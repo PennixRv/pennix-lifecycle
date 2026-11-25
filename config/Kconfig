@@ -256,6 +256,12 @@ config PENNIX_COMPONENT_PENNIX_SKILLS
 	help
 		取消选择只撤回本工具拥有的部署；外部包和原生数据保留。
 
+config PENNIX_COMPONENT_PENNIX_SYSTEM_DEVEL_SKILLS
+	bool "pennix-system-devel-skills"
+	default n
+	help
+		可选的系统软件开发 Skill 集合。取消选择不删除共享集合；卸载须显式执行。
+
 endmenu
 menu "Codex provider 与模型"
 

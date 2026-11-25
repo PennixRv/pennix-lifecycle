@@ -648,6 +648,34 @@
         }
       }
     },
+    "pennix-system-devel-skills": {
+      "delivery": "collection",
+      "lock_source": "git:PennixRv/pennix-system-devel-skills:collection.json",
+      "source": "fixed GitHub documentation-only systems development skills collection",
+      "owner": "pennix",
+      "scope": "global",
+      "verify_key": "skills/pennix-system-devel-skills exact entries, source identity and private integrity receipt",
+      "actions": {
+        "install": "managed",
+        "configure": "not-applicable",
+        "upgrade": "managed",
+        "uninstall": "managed",
+        "verify": "managed",
+        "reconcile": "not-applicable"
+      },
+      "project_init": "not-applicable",
+      "adapter": "skill-collection",
+      "collection_contract": {
+        "directory": "pennix-system-devel-skills",
+        "documentation_only": true,
+        "archive_sha256": "8c4c54e6e3ad6057dbb31a76fcb260a16682ba9a16caadeaa8b1f19f82492695",
+        "source": {
+          "repo": "PennixRv/pennix-system-devel-skills",
+          "ref": "773ba4e35aaa01d32c3e259f6cb1162c02d11906",
+          "manifest": "collection.json"
+        }
+      }
+    },
     "pennix-skills": {
       "delivery": "collection",
       "lock_source": "git:PennixRv/pennix-skills:collection.json",

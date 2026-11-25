@@ -304,7 +304,8 @@ trust_level = "trusted"
         catalog = owner_engine.load_catalog(Path(__file__).resolve().parents[1] / "references/catalog.json")
         dynamic = {key: value for key, value in catalog["components"].items()
                    if value["delivery"] in {"package", "plugin", "client", "collection"}}
-        self.assertEqual(len(dynamic), 24)
+        self.assertEqual(len(dynamic), 25)
+        self.assertIn("pennix-system-devel-skills", dynamic)
         self.assertNotIn("peon-ping", dynamic)
         self.assertEqual(len({value["lock_source"] for value in dynamic.values()}), len(dynamic))
         for component in catalog["components"].values():

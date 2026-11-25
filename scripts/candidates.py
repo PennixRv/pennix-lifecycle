@@ -459,14 +459,19 @@ def resolve_client(component: dict, workspace: Path, target: dict | None = None)
 
 
 def resolve_collection(component: dict, workspace: Path, target: dict | None = None) -> dict:
-    source = component["collection_contract"]["source"]
+    contract = component["collection_contract"]
+    source = contract["source"]
     ref = target.get("ref") if target else source.get("ref") or _git_head(source["repo"])
     archive, sha256 = _download_archive(source["repo"], ref, workspace, "collection.tar.gz")
+    if ref == source.get("ref") and "archive_sha256" in contract and sha256 != contract["archive_sha256"]:
+        raise CandidateError("collection archive digest differs from its catalog pin")
     checkout = owned_files.extract(archive, workspace / "collection-source")
-    manifest = json.loads((checkout / source["manifest"]).read_bytes())
+    manifest = json.loads((checkout / source["manifest"]).read_bytes(), object_pairs_hook=owned_files.unique_pairs)
     expected = component["collection_contract"]["directory"]
     if manifest.get("schema") != 1 or manifest.get("name") != expected:
         raise CandidateError("Skill collection manifest identity mismatch")
+    if contract.get("documentation_only") and (manifest.get("commands") != {} or manifest.get("materialized") != {}):
+        raise CandidateError("文档型集合不能包含命令或物化动作")
     candidate = {"source": component["lock_source"], "repo": source["repo"], "ref": ref, "sha256": sha256,
                  "path": str(archive), "checkout": str(checkout),
                  "impact": f"Skill collection {source['repo']} at {ref}"}
@@ -502,6 +507,7 @@ RESOLVERS = {
     "noto-fonts-cjk": resolve_arch,
     "pennix-skills": resolve_collection,
     "pennix-skills-extra": resolve_collection,
+    "pennix-system-devel-skills": resolve_collection,
 }
 
 

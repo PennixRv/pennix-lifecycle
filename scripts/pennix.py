@@ -43,12 +43,13 @@ import update_inventory
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "references" / "catalog.json"
+SCOPED_COLLECTION = "pennix-system-devel-skills"
 APPLY_ORDER = [
     "codex-cli", "copilot-cli", "trellis-cli", "pnpm", "context-mode", "codegraph-cli", "paseo-cli", "trellis-paseo-adapter",
     "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "uv", "yazi",
     "markitdown", "pandoc", "libreoffice", "poppler", "tesseract-eng", "tesseract-chi-sim", "tesseract", "noto-fonts-cjk",
     "codex-config", "codex-agents", "pennix-skills-extra",
-    "pennix-skills",
+    "pennix-skills", SCOPED_COLLECTION,
     "base-environment",
 ]
 DEPENDENCIES = {
@@ -795,7 +796,93 @@ def cmd_config_edit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scoped_collection_plan(args: argparse.Namespace) -> tuple[dict, dict, dict]:
+    kconf, config, catalog = _load(args)
+    args.kconf = kconf
+    key = args.component
+    if key != SCOPED_COLLECTION or key not in config_model.selected_components(kconf):
+        raise CliError("定向首装仅用于已选择的 pennix-system-devel-skills")
+    component = catalog["components"][key]
+    contract = component.get("collection_contract", {})
+    ref = contract.get("source", {}).get("ref", "")
+    sha = contract.get("archive_sha256", "")
+    if (component.get("delivery") != "collection" or component.get("adapter") != "skill-collection"
+            or component.get("native_config") or DEPENDENCIES.get(key) or not contract.get("documentation_only")
+            or contract.get("directory") != key or not candidates.SHA.fullmatch(ref)
+            or not re.fullmatch(r"[0-9a-f]{64}", sha)):
+        raise CliError("定向首装没有可核验的文档型集合来源、提交与归档摘要")
+    target = {"source": component["lock_source"], "ref": ref, "sha256": sha}
+    step = {"id": f"{key}:install", "component": key, "action": "install", "target": target}
+    active = apply_journal.read()
+    if active is not None:
+        _check_scoped_collection_transaction(args, active, step)
+    state, detail = skill_collections.inspect({**component, "_lock_target": target}, args.codex_home)
+    locked = args.component_lock["components"].get(key)
+    if state == "missing" and locked is None:
+        action = "install"
+    elif state == "match" and locked == target:
+        action = "none"
+    else:
+        raise CliError(f"定向首装拒绝 {key} 的现有状态 {state} 或不匹配的锁；保留现场，不升级或修复（{detail}）")
+    return ({"operation": "plan", "scope": "component", "component": key, "config": str(config),
+             "codex_home": str(args.codex_home),
+             "components": {key: {"selected": True, "state": state, "action": action, "target": target}},
+             "side_effects": {"system_upgrade": False}}, catalog, step)
+
+
+def _check_scoped_collection_transaction(args: argparse.Namespace, active: dict, step: dict) -> None:
+    identity = {"home": str(Path.home()), "codex_home": str(args.codex_home),
+                "state_root": str(owned_files.state_root())}
+    steps = [{key: item.get(key) for key in step} for item in active["steps"]]
+    if (active.get("identity") != identity or active["command"] != "apply"
+            or active["component"] != step["component"] or steps != [step]
+            or active["config_digest"] != apply_journal.digest(args.config_path)
+            or active["lock_digest"] != apply_journal.digest(args.component_lock_path)):
+        raise CliError("存在不同范围、目标或输入的生命周期事务；保留现场")
+    if active["steps"][0]["status"] in {"started", "unknown"}:
+        raise CliError("定向首装结果未知；请在原事务使用 recover 核验")
+
+
+def _apply_scoped_collection(args: argparse.Namespace) -> int:
+    value, catalog, step = _scoped_collection_plan(args)
+    key, target = step["component"], step["target"]
+    if value["components"][key]["action"] == "none":
+        _verify_inputs(args)
+        active = apply_journal.read()
+        if active is not None:
+            _check_scoped_collection_transaction(args, active, step)
+            if not apply_journal.complete(active):
+                raise CliError("集合已存在但事务未完结；请先使用 recover")
+            apply_journal.clear()
+        _emit({"operation": "apply", "scope": "component", "results": {key: "no-op"}}, args.json)
+        return 0
+    component = catalog["components"][key]
+    with tempfile.TemporaryDirectory(prefix="pennix-collection-candidate-") as directory:
+        candidate = candidates.resolve(component, Path(directory), target)
+        if candidates.lock_entry(candidate) != target or _scoped_collection_plan(args)[0] != value:
+            raise CliError("定向首装候选或计划在暂存期间改变；未执行安装")
+        active = _open_transaction(args, "apply", key, [step])
+        _check_scoped_collection_transaction(args, active, step)
+        if apply_journal.complete(active):
+            raise CliError("事务已完结但目标仍缺失；保留现场")
+        component["_candidate_target"] = target
+
+        def install():
+            result = _run_component(args, catalog, key, "install", candidate=candidate)
+            args.component_lock = component_lock.set_entry(args.component_lock, key, target, args.component_lock_sources)
+            _write_lock(args)
+            return result
+
+        _, result = _journal_mutate(active, step["id"], install)
+    apply_journal.clear()
+    _emit({"operation": "apply", "scope": "component", "results": {key: result}}, args.json)
+    return 0
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
+    if getattr(args, "component", None):
+        _emit(_scoped_collection_plan(args)[0], True)
+        return 0
     value = _plan(args)
     _emit(value, args.json)
     return 0
@@ -931,7 +1018,7 @@ def _journal_for_apply(args: argparse.Namespace, value: dict[str, Any], steps: l
         raise CliError("workflow.config 在 apply 前消失")
     if active is not None:
         if active["command"] != ('update-all' if getattr(args, 'all', False) else 'apply') or active["component"] is not None:
-            raise CliError("存在未完成的单组件更新 journal；请使用相同的 update 入口恢复")
+            raise CliError("存在不同范围的生命周期事务；请使用原入口或 recover")
         if active["config_digest"] != config_digest:
             raise CliError("workflow.config 已改变；未完成 apply 保留现场，不能猜测续跑")
         if apply_journal.digest(args.component_lock_path) != active["lock_digest"]:
@@ -1072,6 +1159,8 @@ def _preflight_pending_owners(args: argparse.Namespace, value: dict, catalog: di
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
+    if getattr(args, "component", None):
+        return _apply_scoped_collection(args)
     value = _plan(args)
     if _finish_observed_paseo_apply(args, value):
         _emit({"operation": "apply", "results": {"paseo-autostart": "verified-current"}}, args.json)
@@ -2569,7 +2658,10 @@ def parser() -> argparse.ArgumentParser:
         child = sub.add_parser(name)
         child.add_argument("--config")
         child.add_argument("--json", action="store_true")
-        child.add_argument("--scope", choices=["base"], help="仅处理基础能力和共享依赖，不撤回范围外组件")
+        scope = child.add_mutually_exclusive_group()
+        scope.add_argument("--scope", choices=["base"], help="仅处理基础能力和共享依赖，不撤回范围外组件")
+        if name in {"plan", "apply"}:
+            scope.add_argument("--component", choices=[SCOPED_COLLECTION], help="只计划或首装指定文档型集合")
         child.set_defaults(function=function)
 
     repair = sub.add_parser("repair")

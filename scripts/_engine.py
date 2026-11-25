@@ -99,11 +99,17 @@ def load_catalog(path: Path) -> dict[str, Any]:
                 raise BootstrapError(f"catalog lock source aliases are invalid: {key}")
         if component.get("delivery") == "collection":
             contract = component.get("collection_contract")
-            if not isinstance(contract, dict) or set(contract) != {"directory", "source"}:
+            if not isinstance(contract, dict) or set(contract) not in (
+                    {"directory", "source"}, {"directory", "source", "documentation_only", "archive_sha256"}):
                 raise BootstrapError(f"collection manifest contract is invalid: {key}")
             source = contract["source"]
             if not isinstance(source, dict) or set(source) not in ({"repo", "manifest"}, {"repo", "ref", "manifest"}):
                 raise BootstrapError(f"collection source contract is invalid: {key}")
+            if ("documentation_only" in contract
+                    and (contract["documentation_only"] is not True or contract["directory"] != key
+                         or not re.fullmatch(r"[0-9a-f]{40}", str(source.get("ref", "")))
+                         or not re.fullmatch(r"[0-9a-f]{64}", str(contract["archive_sha256"])))):
+                raise BootstrapError(f"documentation collection requires an exact source and archive pin: {key}")
         package = component.get("package", {})
         if not isinstance(package, dict):
             raise BootstrapError(f"catalog package is invalid: {key}")

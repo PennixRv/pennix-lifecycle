@@ -368,7 +368,10 @@ def _stage(component: dict, workspace: Path, candidate: dict | None = None, *, e
         checkout = files.extract(archive, workspace / "source")
     import json
     manifest = json.loads((checkout / source["manifest"]).read_bytes(), object_pairs_hook=files.unique_pairs)
-    validate_manifest(manifest, component["collection_contract"]["directory"])
+    contract = component["collection_contract"]
+    validate_manifest(manifest, contract["directory"])
+    if contract.get("documentation_only") and (manifest["commands"] or manifest["materialized"]):
+        raise CollectionError("文档型集合不能包含命令或物化动作")
     staging = workspace / "collection"
     staging.mkdir(mode=0o700)
     for name, entry in manifest["skills"].items():
@@ -457,6 +460,12 @@ def operate(component: dict, codex_home: Path, operation: str, *, candidate: dic
                     os.replace(backup, path)
                 if receipt_changed:
                     files.replace(receipt, old_raw, after_raw)
+                if component["collection_contract"].get("documentation_only"):
+                    # Recovery may only release a journal step after observing the original owner state.
+                    if ((path.exists() and _verified(path) or None) != old
+                            or files.read(receipt, private=True) != old_raw):
+                        raise CollectionError("集合恢复后状态无法确认")
+                    original.effect = "restored"
             except BaseException as rollback:
                 recoverable = True
                 raise CollectionError(f"集合恢复未完成，可恢复资产保留于 {workspace}") from rollback

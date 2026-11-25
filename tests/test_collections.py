@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import shutil
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -306,6 +309,183 @@ class CollectionTests(unittest.TestCase):
                 collections.validate_members(staging, self.manifest)
         with self.assertRaises(collections.CollectionError):
             collections.relative("../escape")
+
+
+class ScopedCollectionTests(unittest.TestCase):
+    key = pennix.SCOPED_COLLECTION
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        env = {"HOME": str(self.root), "XDG_STATE_HOME": str(self.root / "state"),
+               "XDG_CONFIG_HOME": str(self.root / "config"), "CODEX_HOME": str(self.root / ".codex")}
+        environment = patch.dict(os.environ, env)
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.config = pennix.config_model.init(str(self.root / "workflow.config"))
+        self.catalog = pennix.owner_engine.load_catalog(pennix.CATALOG)
+        self.catalog_path = self.root / "catalog.json"
+        catalog = patch.object(pennix, "CATALOG", self.catalog_path)
+        catalog.start()
+        self.addCleanup(catalog.stop)
+        self.archives = {}
+        self.archive("a" * 40, "First")
+        resolver = patch.object(pennix.candidates, "_download_archive", side_effect=self.download)
+        self.download_mock = resolver.start()
+        self.addCleanup(resolver.stop)
+        emitter = patch.object(pennix, "_emit")
+        self.emit = emitter.start()
+        self.addCleanup(emitter.stop)
+        self.target = self.root / ".agents/skills" / self.key
+
+    def archive(self, ref, text, *, commands=None):
+        manifest = {"schema": 1, "name": self.key, "skills": {
+            "sample": {"path": "skills/sample", "license": "LICENSE"}},
+            "commands": commands or {}, "materialized": {}}
+        path = self.root / (ref + ".tar.gz")
+        with tarfile.open(path, "w:gz") as archive:
+            for name, value in {"collection.json": json.dumps(manifest), "skills/sample/LICENSE": "test",
+                                "skills/sample/SKILL.md": f"---\nname: sample\ndescription: test\n---\n{text}\n"}.items():
+                raw = value.encode()
+                member = tarfile.TarInfo("collection/" + name)
+                member.size = len(raw)
+                member.mode = 0o644
+                archive.addfile(member, io.BytesIO(raw))
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.archives[ref] = path
+        contract = self.catalog["components"][self.key]["collection_contract"]
+        contract["source"]["ref"], contract["archive_sha256"] = ref, digest
+        self.catalog_path.write_text(json.dumps(self.catalog))
+
+    def download(self, _, ref, workspace, name):
+        out = Path(workspace) / name
+        shutil.copyfile(self.archives[ref], out)
+        return out, hashlib.sha256(out.read_bytes()).hexdigest()
+
+    def select(self, value):
+        kconf, path = pennix.config_model.load(str(self.config))
+        kconf.syms["PENNIX_SYSTEM_UPGRADE"].set_value("y")
+        kconf.syms["PENNIX_COMPONENT_PENNIX_SYSTEM_DEVEL_SKILLS"].set_value(value)
+        pennix.config_model.write(kconf, path)
+
+    def cmd(self, name, *words, scoped=True):
+        options = ["--component", self.key] if scoped and name in {"plan", "apply"} else []
+        args = pennix.parser().parse_args([name, *options, *words, "--config", str(self.config), "--json"])
+        return args.function(args)
+
+    def test_default_off_and_native_scoped_install_is_idempotent(self):
+        with self.assertRaisesRegex(pennix.CliError, "已选择"):
+            self.cmd("plan")
+        self.download_mock.assert_not_called()
+        self.select("y")
+        other = self.target.parent / "unmanaged"
+        other.mkdir(parents=True)
+        (other / "keep").write_text("untouched")
+        with patch.object(pennix, "_plan", side_effect=AssertionError("no global preflight")):
+            self.cmd("plan")
+            plan = self.emit.call_args.args[0]
+            self.assertEqual(set(plan["components"]), {self.key})
+            self.assertFalse(plan["side_effects"]["system_upgrade"])
+            self.download_mock.assert_not_called()
+            self.cmd("apply")
+            self.assertIn("First", (self.target / "sample/SKILL.md").read_text())
+            self.assertEqual("a" * 40, collections.read_receipt(self.target)["source"]["ref"])
+            self.assertIsNone(pennix.apply_journal.read())
+            self.cmd("apply")
+            self.assertEqual(self.download_mock.call_count, 1)
+            self.assertEqual(self.emit.call_args.args[0]["results"], {self.key: "no-op"})
+        self.assertEqual((other / "keep").read_text(), "untouched")
+        self.select("n")
+        self.assertTrue(self.target.exists())
+        self.cmd("uninstall", self.key, "--confirm", self.key)
+        self.assertFalse(self.target.exists())
+        self.assertEqual((other / "keep").read_text(), "untouched")
+
+    def test_rejects_unmanaged_directory_and_foreign_transaction(self):
+        self.select("y")
+        self.target.mkdir(parents=True)
+        with self.assertRaisesRegex(pennix.CliError, "拒绝"):
+            self.cmd("apply")
+        self.target.rmdir()
+        config_digest = pennix.apply_journal.digest(self.config)
+        pending = pennix.apply_journal.start("apply", None, config_digest, None, [
+            {"id": "system-upgrade", "component": "system", "action": "upgrade", "target": {}}])
+        with self.assertRaisesRegex(pennix.CliError, "不同范围"):
+            self.cmd("apply")
+        self.assertEqual(pennix.apply_journal.read(), pending)
+        self.download_mock.assert_not_called()
+
+    def test_mutated_archive_never_starts_transaction(self):
+        self.select("y")
+        self.archives["a" * 40].write_bytes(b"not the reviewed archive")
+        with self.assertRaisesRegex(pennix.candidates.CandidateError, "catalog pin"):
+            self.cmd("apply")
+        self.assertIsNone(pennix.apply_journal.read())
+        self.assertFalse(self.target.exists())
+
+    def test_documentation_archive_rejects_commands(self):
+        self.select("y")
+        self.archive("b" * 40, "Second", commands={"unwanted": "sample/bin/unwanted"})
+        with self.assertRaisesRegex(pennix.candidates.CandidateError, "不能包含命令"):
+            self.cmd("apply")
+        self.assertIsNone(pennix.apply_journal.read())
+        self.assertFalse(self.target.exists())
+        self.assertFalse((self.root / ".local/bin/unwanted").exists())
+
+    def test_recover_proven_restore_and_preserve_unknown(self):
+        self.select("y")
+        replace = collections.os.replace
+        for fail_rollback in (False, True):
+            with self.subTest(fail_rollback=fail_rollback):
+                def interrupt(source, target):
+                    if Path(target) == collections.receipt_path(self.target):
+                        raise OSError("simulated receipt commit failure")
+                    if fail_rollback and Path(source) == self.target:
+                        raise OSError("simulated rollback failure")
+                    return replace(source, target)
+                with patch.object(collections.os, "replace", side_effect=interrupt):
+                    with self.assertRaises(pennix.CliError):
+                        self.cmd("apply")
+                j = pennix.apply_journal.read()
+                step = j["steps"][0]
+                self.assertEqual(step["observed"]["effect"], "unknown" if fail_rollback else "restored")
+                args = ["--transaction", j["transaction"], "--step", step["id"], "--resolve", "restored"]
+                if fail_rollback:
+                    with self.assertRaisesRegex(pennix.CliError, "不能释放 unknown"):
+                        self.cmd("recover", *args)
+                    self.assertEqual(pennix.apply_journal.read(), j)
+                    self.assertTrue(self.target.exists())
+                else:
+                    self.assertFalse(self.target.exists())
+                    self.cmd("recover", *args)
+                    self.assertIsNone(pennix.apply_journal.read())
+
+    def test_fixed_source_changes_only_by_update_not_scoped_or_global_apply(self):
+        self.select("y")
+        self.cmd("apply")
+        self.archive("b" * 40, "Second")
+        with self.assertRaisesRegex(pennix.CliError, "不升级"):
+            self.cmd("apply")
+        self.cmd("plan", scoped=False)
+        plan = self.emit.call_args.args[0]
+        self.assertEqual(plan["components"][self.key]["action"], "keep")
+        self.assertEqual(collections.read_receipt(self.target)["source"]["ref"], "a" * 40)
+        with patch.object(sys.stdin, "isatty", return_value=True), \
+                patch.object(sys.stdout, "isatty", return_value=True), patch("builtins.input", return_value="yes") as confirm:
+            self.cmd("update", self.key)
+            confirm.assert_called_once()
+            self.assertEqual("b" * 40, collections.read_receipt(self.target)["source"]["ref"])
+            self.assertIn("Second", (self.target / "sample/SKILL.md").read_text())
+            confirm.reset_mock()
+            self.cmd("update", self.key)
+            self.assertEqual(self.emit.call_args.args[0]["status"], "no-op")
+            confirm.assert_not_called()
+        self.select("n")
+        self.cmd("plan", scoped=False)
+        self.assertEqual(self.emit.call_args.args[0]["components"][self.key]["action"], "keep")
+        with self.assertRaisesRegex(pennix.CliError, "未在"):
+            self.cmd("update", self.key)
 
 
 if __name__ == "__main__":
