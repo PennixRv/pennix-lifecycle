@@ -11,6 +11,15 @@
       "url": "https://github.com/lthieu96/paseo-chat-polish.git",
       "adopt_registry": {"url": "https://plugins.paseo.sh", "id": "lthieu96/chat-polish"},
       "adopt_ref": "5fb31cbdb3cbaeb1c49568d64feaa468d0c1813d",
+      "user_markdown_migration": {
+        "from": "ceb74fb6408b6636109fed635a5dafd3cb2b59de",
+        "to": "308b3e4f401222b797cec6a37ff4bbc2c2f81e9e",
+        "settings_contract": {
+          "index.server.ts": "e3c886e87a84960556052e04008e439faac7d025",
+          "shared/theme.ts": "c119d3804719cf7c2f813256c07cbd6a1918847f",
+          "shared/timeline.ts": "059c0176a568b2275326717170a0f9bff66addd3"
+        }
+      },
       "settings_contract": {
         "index.server.ts": "e80e7d9fa39c9d17dac12aa2d81d59336706996d",
         "shared/theme.ts": "c119d3804719cf7c2f813256c07cbd6a1918847f",

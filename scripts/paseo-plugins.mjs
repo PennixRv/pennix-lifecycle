@@ -31,7 +31,7 @@ function storedSettings(home, id, name) {
 export async function managePlugins(client, home, daemonStatus) {
   assertPluginSdk(client);
   const request = JSON.parse(readFileSync(0, 'utf8'));
-  const { id, url, blocks, settingsContract, server } = request;
+  const { id, url, blocks, settingsContract, settingsUpgrade, server } = request;
   if (!/^[a-z0-9-]+$/.test(id) || !blocks.every(name => /^[a-z]+$/.test(name))
       || (server !== undefined && server !== daemonStatus.serverId)) throw new Error('invalid target');
   if ((await client.getDaemonConfig()).config.pluginsEnabled !== true) {
@@ -56,9 +56,10 @@ export async function managePlugins(client, home, daemonStatus) {
         || (await git(['status', '--porcelain', '--untracked-files=normal'])).stdout) {
       throw new Error('plugin checkout drift');
     }
-    const contractPaths = Object.keys(settingsContract);
+    const contract = settingsUpgrade?.ref === installation.currentRevision ? settingsUpgrade.contract : settingsContract;
+    const contractPaths = Object.keys(contract);
     const blobs = (await git(['rev-parse', ...contractPaths.map(path => `HEAD:${path}`)])).stdout.trim().split('\n');
-    if (contractPaths.some((path, index) => blobs[index] !== settingsContract[path])) {
+    if (contractPaths.some((path, index) => blobs[index] !== contract[path])) {
       throw new Error('plugin settings contract changed');
     }
     const settings = {};

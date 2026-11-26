@@ -30,6 +30,7 @@ import credential_import
 import path_env
 import paseo_service
 import paseo_plugins
+import copilot_takeover
 import relay_owner
 import release_owner
 import skill_collections
@@ -1832,6 +1833,18 @@ def cmd_update_all(args):
 
 
 def cmd_update(args: argparse.Namespace) -> int:
+    if getattr(args, "takeover", False):
+        if (args.component != copilot_takeover.COMPONENT or args.version
+                or args.all or args.review_system_changes):
+            raise CliError("--takeover 仅用于已登记的 Copilot CLI 精确接管")
+        args.kconf, _, catalog = _load(args)
+        if args.component not in config_model.selected_components(args.kconf):
+            raise CliError("Copilot CLI 未在 workflow.config 中选择")
+        try:
+            return copilot_takeover.command(args, catalog["components"][args.component], _emit, _verify_inputs,
+                                            _start_transaction, _journal_mutate, _write_lock)
+        except owner_engine.BootstrapError as error:
+            raise CliError(str(error)) from error
     if getattr(args, 'all', False):
         if args.component or args.version or getattr(args, "confirm", None):
             raise CliError('--all 不接受 component、--version 或 --confirm')
@@ -2676,7 +2689,8 @@ def parser() -> argparse.ArgumentParser:
     update.add_argument('--all', action='store_true', help='统一审阅并在同一 native journal 更新所选组件')
     update.add_argument('--review-system-changes', action='store_true', help='重审同一 --all 事务中已证实系统升级的额外变化；不释放 unknown')
     update.add_argument("--version", help="指定 npm 组件的精确版本；默认仍跟踪登记通道")
-    update.add_argument("--confirm", help="确认 Paseo 插件更新预览返回的摘要")
+    update.add_argument("--takeover", action="store_true", help="仅预览或确认接管已审阅的外部 Copilot CLI 安装")
+    update.add_argument("--confirm", help="确认 Paseo 插件更新或 Copilot 接管预览返回的摘要")
     update.add_argument("--config")
     update.add_argument("--json", action="store_true")
     update.set_defaults(function=cmd_update)

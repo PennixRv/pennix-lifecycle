@@ -226,20 +226,29 @@ fi
     remote += 'printf "nas:%s\\n" "$nas_id"; exec ' + shlex.join([
         "ssh", "-o", "BatchMode=yes", router_ssh, "sh", "-s", "--", action, server_id,
         expected["router_id"] if expected else "-"])
-    result = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", nas_ssh, remote],
-        input=script,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=60,
-    )
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", nas_ssh, remote],
+            input=script, text=True, capture_output=True, check=False, timeout=60,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RelayError("远端 relay 管理查询超时；失败跳点和远端操作结果未确认") from error
+    except OSError as error:
+        raise RelayError("无法启动本地 SSH；未访问远端 relay 管理入口") from error
     lines = result.stdout.strip().splitlines()
     output = lines[-1] if lines else ""
     if result.returncode:
         if output == "duplicate":
             raise RelayError("远端 relay 登记包含重复身份")
-        raise RelayError("远端 NAS/router relay owner 不可用")
+        nas_reply = bool(lines and re.fullmatch(r"nas:[a-f0-9]{64}", lines[0]))
+        router_reply = bool(nas_reply and len(lines) >= 2 and re.fullmatch(r"router:[a-f0-9]{64}:0", lines[1]))
+        if router_reply:
+            reason = {(43, "missing"): "登记表缺失或不安全",
+                      (47, "busy"): "登记表正被其他操作占用"}.get((result.returncode, output), "登记操作失败或结果未确认")
+            raise RelayError(f"远端 relay 管理失败：收到 router 回执，{reason}")
+        if nas_reply:
+            raise RelayError("远端 relay 管理失败：已收到 NAS 回执，未确认 router")
+        raise RelayError("远端 relay 管理失败：未收到可核验的 NAS 回执，失败跳点未知")
     if len(lines) != 3 or not lines[0].startswith("nas:") or not lines[1].startswith("router:"):
         raise RelayError("远端 relay 身份回执无效")
     router = lines[1].split(":")

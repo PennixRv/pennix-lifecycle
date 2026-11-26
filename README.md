@@ -161,6 +161,12 @@ npm 组件可用 `pennix update trellis-cli --version 0.7.1-beta.0` 选择精确
 替换；不修改组件的默认通道。此参数不接受 tag 或版本范围，也不适用于非 npm 组件。
 恢复未完成的 update 时，指定版本必须与事务已确认目标一致；省略参数仍恢复原目标。
 
+当前外部 Copilot CLI 的单项接管：`pennix update copilot-cli --takeover --json`。
+只支持经过审查的 HomeWSL AUR `1.0.114-1 → 1.0.116-1`；预览核验两个固定提交的载荷、
+现役文件、单包事务及 Hook。使用原摘要加 `--confirm` 才替换，替换通过后才记录回执和锁。
+遇未知结果先用 `pennix recover --json` 核验；相同摘要仅能在已证明目标载荷全部实装时
+完成记录，不重放包管理事务。已核验退回工件留在本机私有状态目录。
+
 #### Paseo 插件
 
 `pennix paseo-plugins` 管理 Chat Polish、Phone notify 和 Paseo 会话指标。设置

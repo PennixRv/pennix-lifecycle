@@ -16,6 +16,29 @@ import pennix
 
 
 class PaseoPluginsTests(unittest.TestCase):
+    def test_chat_polish_transition_accepts_only_reviewed_ref_pair_and_preserved_settings(self):
+        catalog = json.loads((Path(__file__).resolve().parents[1] / "references/catalog.json").read_bytes())
+        spec = catalog["paseo_plugins"]["paseo-chat-polish"]
+        old, new = (spec["user_markdown_migration"][key] for key in ("from", "to"))
+        forward = paseo_plugins.migration_direction(spec, old, new)
+        rollback = paseo_plugins.migration_direction(spec, new, old)
+        old_settings = {"timeline": {"userMessages": "full"}, "theme": {"name": "fixture"}}
+        new_settings = paseo_plugins.migrated_settings(old_settings, forward)
+        self.assertEqual(new_settings["timeline"], {"userMessages": "full", "userMarkdown": "on"})
+        self.assertEqual(paseo_plugins.migrated_settings(new_settings, rollback), old_settings)
+        self.assertNotIn("userMarkdown", old_settings["timeline"])
+        with self.assertRaisesRegex(paseo_plugins.PluginError, "不支持这一对提交"):
+            paseo_plugins.migration_direction(spec, "f" * 40, new)
+
+        def observed(ref, settings):
+            return {"plugin": {"ref": ref, "registry": None, "enabled": True, "status": "running",
+                               "settings": {key: {"values": value} for key, value in settings.items()}}}
+
+        self.assertTrue(paseo_plugins._satisfies("update", observed(new, new_settings),
+                        {"ref": new, "migration": forward}, observed(old, old_settings)))
+        new_settings["theme"]["name"] = "altered"
+        self.assertFalse(paseo_plugins._satisfies("update", observed(new, new_settings),
+                         {"ref": new, "migration": forward}, observed(old, old_settings)))
     def test_catalog_plugin_can_be_updated_and_is_optional_when_capturing(self):
         catalog = json.loads((Path(__file__).resolve().parents[1] / "references/catalog.json").read_bytes())
         specs = catalog["paseo_plugins"]

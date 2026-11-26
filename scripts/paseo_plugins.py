@@ -37,7 +37,41 @@ def valid_values(value, shape):
                 and all(valid_values(value[key], field) for key, field in shape.items()))
     if shape == "strings":
         return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    if shape == "on-off":
+        return value in ("on", "off")
     return type(value) is (bool if shape == "bool" else str)
+
+
+def settings_shape(spec, ref):
+    migration = spec.get("user_markdown_migration", {})
+    if migration.get("to") == ref and ref is not None:
+        return {**spec["settings"], "timeline": {**spec["settings"]["timeline"], "userMarkdown": "on-off"}}
+    return spec["settings"]
+
+
+def migration_direction(spec, source_ref, target_ref):
+    migration = spec.get("user_markdown_migration", {})
+    if not migration or source_ref == target_ref or migration["to"] not in (source_ref, target_ref):
+        return None
+    if (source_ref, target_ref) == (migration["from"], migration["to"]):
+        return "introduce-user-markdown"
+    if (source_ref, target_ref) == (migration["to"], migration["from"]):
+        return "remove-user-markdown"
+    raise PluginError("Chat Polish 设置迁移不支持这一对提交；未更改插件")
+
+
+def migrated_settings(settings, direction, *, new_value="on"):
+    if direction is None:
+        return settings
+    result = deepcopy(settings)
+    timeline = result["timeline"]
+    if direction == "introduce-user-markdown":
+        timeline["userMarkdown"] = new_value
+    elif direction == "remove-user-markdown":
+        del timeline["userMarkdown"]
+    else:
+        raise PluginError("未知的 Chat Polish 设置迁移")
+    return result
 
 
 def load_profile(path, catalog):
@@ -55,7 +89,7 @@ def load_profile(path, catalog):
         spec = catalog[key]
         if (not isinstance(desired, dict) or set(desired) != {"ref", "enabled", "settings"}
                 or not exact_ref(desired["ref"]) or type(desired["enabled"]) is not bool
-                or not valid_values(desired["settings"], spec["settings"])):
+                or not valid_values(desired["settings"], settings_shape(spec, desired["ref"]))):
             raise PluginError(f"{key} 须指定完整 Git 提交及受管设置")
     return raw, profile["plugins"]
 
@@ -73,6 +107,9 @@ class Native:
         spec = self.catalog[key]
         request = {"id": key, "action": action, "url": spec["url"],
                    "settingsContract": spec["settings_contract"], "blocks": list(spec["settings"]), **data}
+        migration = spec.get("user_markdown_migration")
+        if migration:
+            request["settingsUpgrade"] = {"ref": migration["to"], "contract": migration["settings_contract"]}
         if before is not None:
             request.update(before=before, server=before["server"])
         try:
@@ -87,7 +124,8 @@ class Native:
             if (plugin["registry"] is not None
                     and (plugin["registry"] != spec.get("adopt_registry") or plugin["ref"] != spec.get("adopt_ref"))):
                 raise PluginError(f"{key} 原生注册表身份与已审核来源不符")
-            if any(field["values"] is not None and not valid_values(field["values"], spec["settings"][block])
+            shape = settings_shape(spec, plugin["ref"])
+            if any(field["values"] is not None and not valid_values(field["values"], shape[block])
                    for block, field in plugin["settings"].items()):
                 raise PluginError(f"{key} 出现未知设置字段")
         return state
@@ -146,9 +184,11 @@ def preflight_install(key, spec, ref):
             manifest = json.loads(git("show", "FETCH_HEAD:paseo-plugin.json"))
             if not isinstance(manifest, dict) or manifest.get("id") != key:
                 raise PluginError("候选的 Paseo 插件 ID 与登记不符")
-            files = list(spec["settings_contract"])
+            migration = spec.get("user_markdown_migration", {})
+            contract = migration["settings_contract"] if migration.get("to") == ref else spec["settings_contract"]
+            files = list(contract)
             blobs = git("rev-parse", *(f"FETCH_HEAD:{name}" for name in files)).splitlines()
-            if blobs != list(spec["settings_contract"].values()):
+            if blobs != list(contract.values()):
                 raise PluginError(f"{key} 候选改变了受管设置实现，需要重新验证迁移和回退")
             if "adopt_registry" in spec:
                 git("cat-file", "-e", "FETCH_HEAD:package-lock.json")
@@ -196,7 +236,7 @@ def inspect(key, desired, state, receipt, lock, spec, home):
             or set(receipt["accepted"]) != {"ref", "enabled", "settings"}
             or not exact_ref(receipt["accepted"]["ref"])
             or type(receipt["accepted"]["enabled"]) is not bool
-            or not valid_values(receipt["accepted"]["settings"], spec["settings"])
+            or not valid_values(receipt["accepted"]["settings"], settings_shape(spec, receipt["accepted"]["ref"]))
             or lock != {"source": f"paseo-git:{spec['url']}", "ref": receipt["accepted"]["ref"]}):
         raise PluginError(f"{key} 本机归属与锁记录不一致")
     if receipt is None and lock is not None:
@@ -230,8 +270,20 @@ def _satisfies(action, state, data, previous):
     if not plugin or plugin["registry"]:
         return False
     if action in {"install", "update"}:
-        return (plugin["ref"] == data["ref"] and plugin["status"] in {"running", "disabled"}
-                and (action == "install" or (values(plugin) == values(old) and plugin["enabled"] == old["enabled"])))
+        if plugin["ref"] != data["ref"] or plugin["status"] not in {"running", "disabled"}:
+            return False
+        if action == "install":
+            return True
+        if plugin["enabled"] != old["enabled"]:
+            return False
+        direction = data.get("migration")
+        observed = values(plugin)
+        if observed == migrated_settings(values(old), direction):
+            return True
+        # The old version may leave an unsupported field on disk on rollback;
+        # re-upgrade can reveal it, but only the now-approved value is accepted.
+        return (direction == "introduce-user-markdown" and data.get("intro_value") in {"on", "off"}
+                and observed == migrated_settings(values(old), direction, new_value=data["intro_value"]))
     if plugin["path"] != old["path"] or plugin["ref"] != old["ref"]:
         return False
     if action in {"enable", "disable"}:
@@ -296,7 +348,11 @@ def execute(args, key, action, target, native, verify, write_lock, start):
         if plugin is None:
             mutate("install", ref=desired["ref"])
         elif plugin["ref"] != desired["ref"]:
-            mutate("update", ref=desired["ref"])
+            migration = target.get("migration")
+            transition = {"migration": migration} if migration else {}
+            if migration == "introduce-user-markdown":
+                transition["intro_value"] = desired["settings"]["timeline"]["userMarkdown"]
+            mutate("update", ref=desired["ref"], **transition)
         plugin = state["plugin"]
         if not plugin["enabled"] and (desired["enabled"] or values(plugin) != desired["settings"]):
             mutate("enable")
@@ -462,12 +518,22 @@ def command(args, load, verify, write_lock, start, emit):
         plugin = before["plugin"]
         targets[key] = {"fingerprint": args.plugin_profile_digest, "desired": desired, "before": before,
                         "previous_lock": lock, "previous_receipt": receipt_digest}
+        if state == "update" and plugin and desired:
+            migration = migration_direction(registered[key], plugin["ref"], desired["ref"])
+            if migration:
+                expected = migrated_settings(values(plugin), migration,
+                    new_value=desired["settings"]["timeline"].get("userMarkdown"))
+                if (not plugin["enabled"] or not desired["enabled"] or not matches(plugin, receipt["accepted"])
+                        or expected != desired["settings"]):
+                    raise PluginError("Chat Polish 迁移须保留已验收的旧设置和启用状态，不能同时更改普通设置")
+                targets[key]["migration"] = migration
         preview[key] = {
             "state": state, "installed_ref": plugin["ref"] if plugin else None,
             "selected_ref": desired["ref"] if desired else None, "enabled": plugin["enabled"] if plugin else None,
             "target_enabled": desired["enabled"] if desired else None,
             "source_switch": bool(plugin and plugin["registry"] and state == "adopt"),
             "settings_drift": changed_fields(values(plugin), desired["settings"]) if desired and plugin else [],
+            **({"settings_migration": targets[key]["migration"]} if "migration" in targets[key] else {}),
         }
     fingerprint = profile_digest(owned_files.json_bytes(
         {"action": action, "config": apply_journal.digest(args.config_path), "targets": targets}))

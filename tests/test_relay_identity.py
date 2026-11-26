@@ -74,6 +74,23 @@ class RelayIdentityTests(unittest.TestCase):
             p = self.bin / name;p.write_text('#!/bin/sh\n' + body);p.chmod(0o700)
         return script.replace(relay.MAP_PATH, str(self.map)).replace('/etc/ssh/ssh_host_ed25519_key.pub', str(public))
 
+    def test_management_errors_report_only_observed_hops_and_do_not_echo_stderr(self):
+        nas = f"nas:{self.target['nas_id']}\n"
+        router = f"router:{self.target['router_id']}:0\n"
+        for status, output, detail in [(255, "", "失败跳点未知"),
+                                        (255, nas, "未确认 router"),
+                                        (47, nas + router + "busy\n", "登记表正被其他操作占用"),
+                                        (44, nas + router + "duplicate\n", "重复身份")]:
+            with self.subTest(status=status, output=bool(output)), patch.object(
+                relay.subprocess, 'run', return_value=subprocess.CompletedProcess([], status, output, 'private error')
+            ):
+                with self.assertRaisesRegex(relay.RelayError, detail) as raised:
+                    relay.inspect(self.home)
+                self.assertNotIn('private error', str(raised.exception))
+        with patch.object(relay.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ssh', 60)):
+            with self.assertRaisesRegex(relay.RelayError, '管理查询超时'):
+                relay.inspect(self.home)
+
     def run_script(self, script, action, **environment):
         return subprocess.run(['sh', '-s', '--', action, 'fixture-server', self.target['router_id']],
             input=script, capture_output=True, text=True, timeout=20,

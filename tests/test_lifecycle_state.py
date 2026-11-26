@@ -545,7 +545,93 @@ class LifecycleStateTests(unittest.TestCase):
             self.assertEqual(engine._plugin_operation("ponytail-plugin", component, Path("/tmp/codex"), "upgrade"), "changed")
             self.assertEqual(run.call_args_list[2].args[0][:5],
                              ["codex", "plugin", "marketplace", "remove", "ponytail"])
+            self.assertEqual(run.call_args_list[1].args[0],
+                             ["codex", "plugin", "list", "--marketplace", "ponytail", "--json"])
             receipt.assert_called_once()
+
+    def test_marketplace_scope_blocks_foreign_results_and_shared_removal(self):
+        market = {"name": "ponytail", "source": "https://example.test/plugin", "managed_plugin": "ponytail@ponytail"}
+        native = {**market, "root": "/tmp/marketplace", "marketplaceSource": {"source": market["source"]}}
+        for plugin, detail in [("other@other", "超出指定 Marketplace"), ("other@ponytail", "禁止移除共享登记")]:
+            with self.subTest(plugin=plugin), patch.object(engine, "_plugin_tree_clean", return_value=True), \
+                 patch.object(engine.subprocess, "run", side_effect=[
+                     SimpleNamespace(returncode=0, stdout=json.dumps({"marketplaces": [native]})),
+                     SimpleNamespace(returncode=0, stdout=json.dumps({"installed": [{"pluginId": plugin}]}))
+                 ]) as run:
+                with self.assertRaisesRegex(engine.BootstrapError, detail):
+                    engine._prepare_plugin_marketplace("codex", Path("/tmp/codex"), market)
+                self.assertEqual(run.call_count, 2)
+
+    def test_only_copilot_update_accepts_takeover(self):
+        parsed = pennix.parser().parse_args(["update", "copilot-cli", "--takeover", "--confirm", "review"])
+        self.assertTrue(parsed.takeover)
+        with patch.object(pennix, "_load") as load:
+            for argv in (["update", "codex-cli", "--takeover"], ["update", "--all", "--takeover"],
+                         ["update", "copilot-cli", "--takeover", "--version", "1.0.116"]):
+                with self.subTest(argv=argv), self.assertRaisesRegex(pennix.CliError, "仅用于"):
+                    pennix.cmd_update(pennix.parser().parse_args(argv))
+            load.assert_not_called()
+
+    def test_copilot_takeover_never_starts_without_current_confirmation_and_rollback(self):
+        takeover = pennix.copilot_takeover
+        args = SimpleNamespace(confirm=None, json=True, config_path=Path("/tmp/config"),
+                               component_lock_path=Path("/tmp/lock"), component_lock={"components": {}})
+        component = {"lock_source": takeover.SOURCE, "package": {"source": "aur", "name": takeover.PACKAGE}}
+        with patch.object(takeover.apply_journal, "read", return_value=None), \
+             patch.object(takeover.apply_journal, "digest", side_effect=lambda path: str(path)), \
+             patch.object(takeover.owned_files, "target_identity", return_value={"fixture": True}), \
+             patch.object(engine, "_package_receipt", return_value=None), \
+             patch.object(engine, "package_identity", return_value={"version": takeover.OLD["version"]}), \
+             patch.object(takeover, "staged", return_value=(Path("/not-used"), {"/usr/bin/copilot": "fixture"}, [])), \
+             patch.object(takeover, "installed", return_value=True) as installed, \
+             patch.object(takeover, "hooks", return_value={}), patch.object(takeover, "run") as run, \
+             patch.object(pennix, "_start_transaction") as start, patch.object(pennix, "_emit") as emit:
+            def command():
+                return takeover.command(args, component, emit, pennix._verify_inputs, start,
+                                        pennix._journal_mutate, pennix._write_lock)
+            self.assertEqual(command(), 0)
+            self.assertRegex(emit.call_args.args[0]["confirm"], r"^[0-9a-f]{64}$")
+            args.confirm = "stale"
+            with self.assertRaisesRegex(engine.BootstrapError, "重新预览"):
+                command()
+            installed.return_value = False
+            with self.assertRaisesRegex(engine.BootstrapError, "退回载荷"):
+                command()
+            start.assert_not_called()
+            run.assert_not_called()
+
+    def test_copilot_takeover_recovery_checks_other_locks_and_never_replays(self):
+        import hashlib
+
+        takeover = pennix.copilot_takeover
+        config = Path("/tmp/config")
+        lock = {"schema": 1, "components": {"other": {"ref": "reviewed"}}}
+        plan = {"candidate": takeover.NEW, "previous": takeover.OLD, "identity": {"fixture": True},
+                "config": "config", "lock": "original",
+                "other_locks": hashlib.sha256(takeover.owned_files.json_bytes(lock)).hexdigest(),
+                "target_files": {}}
+        args = SimpleNamespace(config_path=config, json=True,
+                               component_lock={"schema": 1, "components": {**lock["components"],
+                                                                           takeover.COMPONENT: takeover.NEW}},
+                               confirm=hashlib.sha256(takeover.owned_files.json_bytes(plan)).hexdigest())
+        step = {"target": plan, "status": "unknown"}
+        active = {"command": "update", "component": takeover.COMPONENT, "steps": [step]}
+        with tempfile.TemporaryDirectory() as db, \
+             patch.object(takeover.apply_journal, "step", return_value=step), \
+             patch.object(takeover.apply_journal, "read", return_value=active), \
+             patch.object(takeover.apply_journal, "digest", return_value="config"), \
+             patch.object(takeover.apply_journal, "verified"), patch.object(takeover.apply_journal, "clear") as clear, \
+             patch.object(takeover.owned_files, "target_identity", return_value={"fixture": True}), \
+             patch.object(takeover, "installed", return_value=True), patch.object(takeover, "run", return_value=db) as run, \
+             patch.object(takeover, "reserve_record") as reserve, patch.object(pennix, "_emit") as emit:
+            self.assertEqual(takeover.resume(args, {}, active, emit, lambda _: None, None), 0)
+            run.assert_called_once_with(["pacman-conf", "DBPath"], text=True)
+            reserve.assert_called_once()
+            clear.assert_called_once()
+            args.component_lock["components"]["other"] = {"ref": "drifted"}
+            with self.assertRaisesRegex(engine.BootstrapError, "锁已变化"):
+                takeover.resume(args, {}, active, emit, lambda _: None, None)
+            self.assertEqual(run.call_count, 1)
 
     def test_plugin_uninstall_uses_the_requested_codex_home(self):
         component = {"lock_source": "codex-marketplace:example",

@@ -374,6 +374,25 @@ def _operate_collection(component: dict[str, Any], codex_home: Path, operation: 
         raise BootstrapError(str(error)) from error
 
 
+def _marketplace_installed(codex: str, home: Path, marketplace: str) -> list[dict]:
+    try:
+        result = subprocess.run([codex, "plugin", "list", "--marketplace", marketplace, "--json"],
+                                capture_output=True, text=True, check=False,
+                                env={**os.environ, "CODEX_HOME": str(home)}, timeout=30)
+        if result.returncode:
+            raise BootstrapError(f"Codex 无法查询指定 Marketplace：{marketplace}")
+        entries = json.loads(result.stdout)["installed"]
+    except subprocess.TimeoutExpired as error:
+        raise BootstrapError(f"Codex 查询指定 Marketplace 超时：{marketplace}") from error
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        raise BootstrapError(f"Codex 未返回可核验的 Marketplace 清单：{marketplace}") from error
+    if not isinstance(entries, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("pluginId"), str)
+            or not item["pluginId"].endswith("@" + marketplace) for item in entries):
+        raise BootstrapError(f"Codex 返回的插件清单超出指定 Marketplace：{marketplace}")
+    return entries
+
+
 def _plugin_snapshot(component: dict[str, Any], codex_home: Path, *, installed_only: bool = False) -> dict[str, str] | None:
     plugin = component.get("plugin")
     if not isinstance(plugin, dict):
@@ -381,13 +400,9 @@ def _plugin_snapshot(component: dict[str, Any], codex_home: Path, *, installed_o
     codex = shutil.which("codex")
     if not codex:
         return None
-    result = subprocess.run([codex, "plugin", "list", "--json"], capture_output=True, text=True, check=False,
-                            env={**os.environ, "CODEX_HOME": str(codex_home)}, timeout=30)
-    if result.returncode:
-        return None
+    entries = _marketplace_installed(codex, codex_home, plugin["marketplace"]["name"])
     try:
-        installed = [item for item in json.loads(result.stdout).get("installed", [])
-                     if isinstance(item, dict) and item.get("pluginId") == plugin.get("id")]
+        installed = [item for item in entries if item["pluginId"] == plugin["id"]]
         if len(installed) != 1:
             return None
         item = installed[0]
@@ -407,10 +422,7 @@ def _plugin_snapshot(component: dict[str, Any], codex_home: Path, *, installed_o
         root = Path(market.get("root", ""))
         if installed_only:
             # Marketplace replacement may affect every plugin registered from that source.
-            if (not _plugin_tree_clean(root) or any(
-                    other.get("pluginId") != plugin["id"]
-                    and other.get("pluginId", "").endswith("@" + plugin["marketplace"]["name"])
-                    for other in json.loads(result.stdout).get("installed", []))):
+            if (not _plugin_tree_clean(root) or any(other["pluginId"] != plugin["id"] for other in entries)):
                 return None
             name, marketplace = plugin["id"].split("@")
             version = item.get("version")
@@ -487,14 +499,11 @@ def plugin_absent(component_id: str, component: dict, codex_home: Path) -> bool:
     codex = shutil.which("codex")
     if not codex:
         return False
-    result = subprocess.run([codex, "plugin", "list", "--json"], capture_output=True, text=True,
-                            timeout=30, check=False, env={**os.environ, "CODEX_HOME": str(codex_home)})
     try:
-        entries = json.loads(result.stdout)["installed"]
-        return result.returncode == 0 and isinstance(entries, list) and all(
-            isinstance(item, dict) and isinstance(item.get("pluginId"), str)
-            and item["pluginId"] != component["plugin"]["id"] for item in entries)
-    except (ValueError, KeyError, TypeError):
+        plugin = component["plugin"]
+        entries = _marketplace_installed(codex, codex_home, plugin["marketplace"]["name"])
+        return all(item["pluginId"] != plugin["id"] for item in entries)
+    except BootstrapError:
         return False
 
 
@@ -528,15 +537,8 @@ def _plugin_status(component: dict[str, Any], codex_home: Path) -> tuple[str, st
         codex = shutil.which("codex")
         if not codex:
             return "missing", None
-        result = subprocess.run([codex, "plugin", "list", "--json"], capture_output=True, text=True, check=False,
-                                env={**os.environ, "CODEX_HOME": str(codex_home)}, timeout=30)
-        if result.returncode:
-            return "blocked", None
-        try:
-            installed = [item for item in json.loads(result.stdout).get("installed", [])
-                         if isinstance(item, dict) and item.get("pluginId") == plugin.get("id")]
-        except (json.JSONDecodeError, TypeError):
-            return "blocked", None
+        entries = _marketplace_installed(codex, codex_home, plugin["marketplace"]["name"])
+        installed = [item for item in entries if item["pluginId"] == plugin["id"]]
         return ("blocked", str(installed[0].get("version", ""))) if installed else ("missing", None)
     target = component.get("_candidate_target") or component.get("_lock_target")
     if not isinstance(target, dict):
@@ -592,19 +594,9 @@ def _prepare_plugin_marketplace(codex: str, home: Path, marketplace: dict[str, A
         root = Path(configured.get("root", ""))
         if not root.is_absolute() or not _plugin_tree_clean(root):
             raise BootstrapError("refusing dirty or unknown Marketplace checkout")
-        listing = subprocess.run([codex, "plugin", "list", "--json"], capture_output=True,
-                                 text=True, check=False, env=env)
-        try:
-            plugins = json.loads(listing.stdout)["installed"]
-            if listing.returncode or not isinstance(plugins, list):
-                raise ValueError()
-            expected_id = marketplace.get("managed_plugin")
-            if any(not isinstance(item, dict) or not isinstance(item.get("pluginId"), str)
-                   or item["pluginId"].endswith("@" + marketplace["name"]) and item["pluginId"] != expected_id
-                   for item in plugins):
-                raise ValueError()
-        except (ValueError, KeyError, TypeError) as error:
-            raise BootstrapError("Marketplace 包含其他插件或无法核验；禁止移除共享登记") from error
+        plugins = _marketplace_installed(codex, home, marketplace["name"])
+        if any(item["pluginId"] != marketplace.get("managed_plugin") for item in plugins):
+            raise BootstrapError("Marketplace 包含其他插件；禁止移除共享登记")
         result = subprocess.run([codex, "plugin", "marketplace", "remove", marketplace["name"], "--json"],
                                 check=False, env=env)
         if result.returncode:
@@ -1086,6 +1078,29 @@ def _plugin_operation(component_id: str, component: dict[str, Any], codex_home: 
     return "changed"
 
 
+def build_aur_package(key: str, name: str, expected: str, source_tree: Path, *,
+                      syncdeps: bool = False, environment=None) -> Path:
+    command = ["makepkg", "--cleanbuild", "--force", "--noconfirm"]
+    if syncdeps:
+        command.append("--syncdeps")
+    build = subprocess.run(command, cwd=source_tree,
+        env={**(os.environ if environment is None else environment), "BUILDDIR": str(source_tree), "PKGDEST": str(source_tree),
+             "SRCDEST": str(source_tree / "sources")},
+        capture_output=True, text=True, timeout=1800, check=False)
+    if build.returncode:
+        raise BootstrapError(f"fixed AUR candidate build failed: {key} (makepkg exit {build.returncode})")
+    artifacts = []
+    for artifact in sorted(source_tree.glob(f"{name}-*.pkg.tar.*")):
+        if artifact.is_symlink() or not artifact.is_file() or artifact.name.endswith('.sig'):
+            continue
+        identity = subprocess.run(["pacman", "-Qp", str(artifact)], capture_output=True, text=True, timeout=30, check=False)
+        if identity.returncode == 0 and identity.stdout.split() == [name, expected]:
+            artifacts.append(artifact)
+    if len(artifacts) != 1:
+        raise BootstrapError(f"fixed AUR candidate did not produce one matching package identity: {key}")
+    return artifacts[0]
+
+
 def component_operation(args: Any, catalog: dict[str, Any], key: str, component: dict[str, Any], operation: str) -> str:
     codex_home = args.codex_home
     candidate = getattr(args, "candidate", None)
@@ -1173,30 +1188,9 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
                 installer = "pacman"
                 package_file = Path(candidate["path"])
             elif metadata.get("source") == "aur":
-                source_tree = Path(candidate["path"])
-                build_command = ["makepkg", "--cleanbuild", "--force", "--noconfirm"]
-                if getattr(args, 'arch_dependencies_allowed', False):
-                    build_command.append('--syncdeps')
-                build = subprocess.run(
-                    build_command, cwd=source_tree,
-                    env={**os.environ, "BUILDDIR": str(source_tree), "PKGDEST": str(source_tree),
-                         "SRCDEST": str(source_tree / "sources")},
-                    capture_output=True, text=True, timeout=1800, check=False,
-                )
-                if build.returncode:
-                    raise BootstrapError(f"fixed AUR candidate build failed: {key} (makepkg exit {build.returncode})")
-                artifacts = []
-                for artifact in sorted(source_tree.glob(f"{metadata['name']}-*.pkg.tar.*")):
-                    if artifact.is_symlink() or not artifact.is_file() or artifact.name.endswith('.sig'):
-                        continue
-                    identity = subprocess.run(["pacman", "-Qp", str(artifact)], capture_output=True,
-                                              text=True, timeout=30, check=False)
-                    if identity.returncode == 0 and identity.stdout.split() == [metadata['name'], expected]:
-                        artifacts.append(artifact)
-                if len(artifacts) != 1:
-                    raise BootstrapError(f"fixed AUR candidate did not produce one matching package identity: {key}")
                 installer = "pacman"
-                package_file = artifacts[0]
+                package_file = build_aur_package(key, metadata["name"], expected, Path(candidate["path"]),
+                                                 syncdeps=getattr(args, 'arch_dependencies_allowed', False))
         asset = metadata.get("asset")
         if asset and not candidate:
             path = Path(directory) / "package.tgz"
