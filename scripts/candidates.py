@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import tarfile
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -20,6 +21,7 @@ class CandidateError(ValueError):
 
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
+STABLE_VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 
 
 def _filename(value: object, *, arch_package: bool = False) -> str:
@@ -180,12 +182,14 @@ def _gh_release(repo: str, tag: str | None) -> dict:
     return value
 
 
-def _archive_json(archive: Path, suffix: str) -> dict:
+def _archive_json(archive: Path, suffix: str, *, git_commit: str | None = None) -> dict:
     try:
         with tarfile.open(archive, "r:*") as source:
             matches = []
             total = 0
             for count, item in enumerate(source, 1):
+                if count == 1 and git_commit is not None and source.pax_headers.get("comment") != git_commit:
+                    raise CandidateError("Git 归档不证明目标提交")
                 total += item.size
                 if count > 100000 or total > 1024 * 1024 * 1024:
                     raise CandidateError("archive member budget exceeded")
@@ -412,21 +416,79 @@ def resolve_arch(component: dict, workspace: Path, target: dict | None = None) -
     return _verify_arch_package(component, workspace, filename, version, url, target)
 
 
+def plugin_release(component: dict, target: dict | None = None) -> dict:
+    url = component["plugin"]["marketplace"]["source"]
+    match = re.fullmatch(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\.git", url)
+    if not match:
+        raise CandidateError("插件正式发行必须来自已登记的 GitHub 仓库")
+    version = (target or {}).get("version")
+    if target and (not isinstance(version, str) or not STABLE_VERSION.fullmatch(version)):
+        raise CandidateError("插件锁定目标缺少正式版本")
+    endpoint = f"tags/v{version}" if version else "latest"
+    api_path = f"repos/{match[1]}/releases/{endpoint}"
+    try:
+        release = _json(f"https://api.github.com/{api_path}")
+    except urllib.error.HTTPError as error:
+        if error.code not in {403, 429}:
+            raise
+        error.close()
+        # GitHub's anonymous quota may be exhausted on shared WSL egress.
+        response = _run(["gh", "api", api_path])
+        if response.returncode:
+            raise CandidateError("GitHub 正式发行查询受限；未选择候选") from error
+        try:
+            release = json.loads(response.stdout)
+        except ValueError as malformed:
+            raise CandidateError("GitHub 正式发行响应无效") from malformed
+        if not isinstance(release, dict):
+            raise CandidateError("GitHub 正式发行响应无效")
+        visibility = _run(["gh", "api", f"repos/{match[1]}", "--jq", ".visibility"])
+        if visibility.returncode or visibility.stdout.strip() != "public":
+            raise CandidateError("插件发行仓库不再公开；未选择候选")
+    tag = release.get("tag_name")
+    if (not isinstance(tag, str) or not tag.startswith("v") or not STABLE_VERSION.fullmatch(tag[1:])
+            or (version and tag != f"v{version}") or release.get("draft") is not False
+            or release.get("prerelease") is not False or not release.get("published_at")):
+        raise CandidateError("没有可核验的插件正式发行")
+    full_tag = f"refs/tags/{tag}"
+    result = _run(["git", "ls-remote", "--exit-code", url, full_tag, full_tag + "^{}"], timeout=45)
+    refs = {}
+    for line in result.stdout.splitlines():
+        fields = line.split("\t")
+        if (len(fields) != 2 or not SHA.fullmatch(fields[0])
+                or fields[1] not in {full_tag, full_tag + "^{}"} or fields[1] in refs):
+            raise CandidateError("正式发行 Git 引用无效或不唯一")
+        refs[fields[1]] = fields[0]
+    if result.returncode or full_tag not in refs:
+        raise CandidateError("正式发行标签无法解析")
+    identity = {"source": component["lock_source"], "version": tag[1:],
+                "ref": refs.get(full_tag + "^{}", refs[full_tag])}
+    return _check_target(identity, {k: v for k, v in (target or {}).items() if k != "sha256"})
+
+
 def resolve_plugin(component: dict, workspace: Path, target: dict | None = None) -> dict:
+    release = plugin_release(component, target)
     plugin = component["plugin"]
     repo = urllib.parse.urlparse(plugin["marketplace"]["source"]).path.strip("/").removesuffix(".git")
-    ref = target.get("ref") if target else _git_head(repo)
-    archive, sha256 = _download_archive(repo, ref, workspace, "plugin.tar.gz")
-    checkout = owned_files.extract(archive, workspace / "plugin-source")
-    manifest = json.loads((checkout / ".codex-plugin/plugin.json").read_bytes())
-    name, marketplace = plugin["id"].split("@", 1)
-    version = manifest.get("version")
-    if manifest.get("name") != name or not isinstance(version, str):
-        raise CandidateError("Codex plugin manifest identity mismatch")
-    candidate = {"source": component["lock_source"], "version": version, "ref": ref,
-                 "sha256": sha256, "path": str(archive), "checkout": str(checkout),
-                 "impact": f"Codex plugin {name}@{marketplace} {version} at {ref}"}
+    archive, sha256 = _download_archive(repo, release["ref"], workspace, "plugin.tar.gz")
+    manifest = _archive_json(archive, ".codex-plugin/plugin.json", git_commit=release["ref"])
+    name = plugin["id"].split("@", 1)[0]
+    if manifest.get("name") != name or manifest.get("version") != release["version"]:
+        raise CandidateError("正式发行标签与插件清单的名称或版本不一致")
+    candidate = {**release, "sha256": sha256, "path": str(archive), "tag": f"v{release['version']}",
+                 "impact": f"Codex 原生安装 {plugin['id']} 的正式提交 {release['ref']}"}
     return _check_target(candidate, target)
+
+
+def verify_plugin_upgrade(previous: dict | None, candidate: dict) -> None:
+    if previous and "sha256" in previous:
+        if not all(isinstance(item.get("version"), str) and STABLE_VERSION.fullmatch(item["version"])
+                   for item in (previous, candidate)):
+            raise CandidateError("正式锁或候选版本无效")
+        old = tuple(map(int, previous["version"].split(".")))
+        new = tuple(map(int, candidate["version"].split(".")))
+        if new < old or (new == old and not matches(previous, candidate)):
+            raise CandidateError("正式发行降级或同名标签／归档改变；未选择候选")
 
 
 def resolve_client(component: dict, workspace: Path, target: dict | None = None) -> dict:

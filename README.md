@@ -150,11 +150,21 @@ receipt 会先回填锁。已有安装缺少可信 receipt 时，`apply` 会阻�
 
 Arch/AUR 在外部升级后，使用 `pennix reconcile <component>` 显式接受当前精确身份。
 它核对既有 receipt、旧锁、包名和可执行文件 owner，只同步记录，不安装、升级或降级。
-Codex 插件亦可沿该入口保留当前已启用版本，以原生 Marketplace API 对齐相同源的精确
-提交；脏树、未知归属、其他插件受影响或确认后候选变化均阻断。receipt 与锁部分写入
-失败时保留 journal；相同入口只在实际身份仍吻合时恢复，不盲目重放未知原生副作用。
 `outdated` 保留兼容字段，表示实际身份与锁不相等，不代表实际版本更旧；输出另列实际
 身份、锁定身份及既有受管记录。
+
+Ponytail 只接受原上游的公开正式发行。Lifecycle 生成专用的本机 Marketplace 清单，
+以完整提交固定 `ponytail@ponytail`；安装仍由 Codex 执行。`status` 分别显示登记、
+实际载荷、锁和正式发行标签。同名标签改变、归档摘要冲突、共享或未知登记、用户禁用
+均停止；不使用 `reconcile` 接受未发行载荷，也不以相同版本号判定安装成功。
+
+旧受管 Git Marketplace 必须先执行 `pennix update ponytail-plugin --json`，审阅旧登记，
+实际旧载荷、正式候选和 `review_sha256`。确认时使用
+`pennix update ponytail-plugin --confirm <review_sha256>`；普通 `apply`、`repair`
+和 `update --all` 不隐式迁移。中断后用 `pennix recover --json` 查事务，再传入
+同一 `--transaction`、`--step` 与 `--resolve completed`（续接）或
+`--resolve restored`（精确回退）。找不到已验证的前后值时保留现场。Lifecycle 不改
+Hook 信任；需要复审时由使用者在 Codex 原生界面处理。
 
 npm 组件可用 `pennix update trellis-cli --version 0.7.1-beta.0` 选择精确版本，仍由
 登记的 registry 校验版本、包名和完整性，并沿同一次确认、事务、锁及 receipt 完成

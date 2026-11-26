@@ -20,6 +20,7 @@ import host
 import skill_collections
 import owned_files
 import local_clients
+import ponytail
 
 
 SCRIPT_ROOT = Path(__file__).resolve().parent
@@ -463,6 +464,8 @@ def _plugin_receipt_path(component_id: str) -> Path:
 
 
 def _plugin_receipt(component_id: str, component: dict[str, Any]) -> dict[str, str] | None:
+    if ponytail.selected(component):
+        return ponytail.receipt_entry(ponytail.receipt(component)[0])
     value = owned_files.read_json(_plugin_receipt_path(component_id))
     if value is None:
         return None
@@ -478,6 +481,9 @@ def _plugin_receipt(component_id: str, component: dict[str, Any]) -> dict[str, s
 
 
 def plugin_lock_migration(component_id: str, component: dict[str, Any], codex_home: Path) -> dict[str, str] | None:
+    if ponytail.selected(component):
+        return (_plugin_receipt(component_id, component)
+                if ponytail.owned(component, codex_home) else None)
     snapshot = _plugin_snapshot(component, codex_home)
     if snapshot is None:
         return None
@@ -488,11 +494,15 @@ def plugin_lock_migration(component_id: str, component: dict[str, Any], codex_ho
 
 
 def _plugin_owned(component_id: str, component: dict[str, Any], codex_home: Path) -> bool:
+    if ponytail.selected(component):
+        return ponytail.owned(component, codex_home)
     receipt = _plugin_receipt(component_id, component)
     return receipt is not None and receipt == _plugin_snapshot(component, codex_home)
 
 
 def plugin_absent(component_id: str, component: dict, codex_home: Path) -> bool:
+    if ponytail.selected(component):
+        return ponytail.status(component, codex_home)[0] == "missing"
     record = owned_files.read_json(_plugin_receipt_path(component_id))
     if not record or record.get("target") != owned_files.target_identity():
         return False
@@ -523,6 +533,8 @@ def _remove_plugin_receipt(component_id: str) -> None:
 
 
 def _plugin_status(component: dict[str, Any], codex_home: Path) -> tuple[str, str | None]:
+    if ponytail.selected(component):
+        return ponytail.status(component, codex_home)
     plugin = component.get("plugin")
     if not isinstance(plugin, dict):
         return "blocked", None
@@ -1109,6 +1121,8 @@ def component_operation(args: Any, catalog: dict[str, Any], key: str, component:
             adopt=bool(getattr(args, "kconf", None) and args.kconf.syms["PENNIX_ADOPT_EXISTING_PACKAGES"].tri_value),
             expected_sha256=getattr(args, "expected_sha256", None), candidate=candidate)
     if isinstance(component.get("plugin"), dict):
+        if ponytail.selected(component):
+            return ponytail.operate(component, codex_home, operation, candidate)
         return _plugin_operation(key, component, codex_home, operation)
     if component.get("delivery") == "collection":
         return _operate_collection(component, codex_home, operation, candidate=candidate)

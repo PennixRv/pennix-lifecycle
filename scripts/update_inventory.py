@@ -124,8 +124,7 @@ def available(component, locked, system):
             raise UpdateError('固定发行 tag 与资产身份不一致')
         return {**identity, 'version': version, 'ref': release['tagName']}
     if component.get('delivery') == 'plugin':
-        repo = urllib.parse.urlparse(component['plugin']['marketplace']['source']).path.strip('/').removesuffix('.git')
-        return {**identity, 'ref': candidates._git_head(repo)}
+        return candidates.plugin_release(component)
     if component.get('delivery') == 'collection':
         spec = component['collection_contract']['source']
         return {**identity, 'ref': spec.get('ref') or candidates._git_head(spec['repo'])}
@@ -148,7 +147,15 @@ def inspect(catalog, selected, locks, plan, *, system_upgrade):
         try:
             target = available(component, locked, system)
             external = component.get('package', {}).get('external_satisfies') and plan['components'][name].get('ownership') == 'external'
-            state = 'external' if external else 'unmanaged' if not locked else 'current' if candidates.matches(locked, target) else 'update'
+            installed = item['installed']['state']
+            if component.get('delivery') == 'plugin' and installed == 'plugin-migration-required':
+                state = 'migration-required'
+            elif component.get('delivery') == 'plugin' and installed == 'blocked':
+                state = 'unknown'
+            else:
+                if component.get('delivery') == 'plugin':
+                    candidates.verify_plugin_upgrade(locked, target)
+                state = 'external' if external else 'unmanaged' if not locked else 'current' if candidates.matches(locked, target) else 'update'
             return name, {**item, 'state': state, 'available': target}
         except (OSError, ValueError, subprocess.TimeoutExpired) as error:
             return name, {**item, 'state': 'unknown', 'available': None, 'query_error': type(error).__name__,

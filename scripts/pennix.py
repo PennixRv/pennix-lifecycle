@@ -36,6 +36,7 @@ import release_owner
 import skill_collections
 import base_environment
 import pnpm_migration
+import ponytail
 import owned_files
 import secret_store
 import native_integrations
@@ -208,6 +209,8 @@ def _component_status(args: argparse.Namespace, component_id: str, component: di
         except (native_integrations.NativeIntegrationError, native_integrations.hook_integrations.HookError) as error:
             return {"state": "blocked", "owned": False, "detail": str(error)}
     try:
+        if ponytail.selected(component):
+            return ponytail.inspect(component, args.codex_home)
         state, detail = owner_engine.probe_component(
             component, args.codex_home, home_directory=Path.home()
         )
@@ -424,8 +427,12 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
                     status["detail"] = "已安装但非生命周期归属；需显式开启接管"
             else:
                 action = "keep" if status["state"] in {"match", "current", "present"} else "install"
-            if status["state"] == "upgrade-required":
+            if status["state"] in {"upgrade-required", "plugin-migration-required"}:
                 action = "blocked"
+            if (ponytail.selected(component) and status["state"] == "missing" and lock_target
+                    and not ponytail.formal(lock_target, component)):
+                action = "blocked"
+                status.update(state="blocked", detail="旧 Ponytail 锁且无可信旧载荷，不能隐式首装或迁移")
             if status["state"] == "migration-required":
                 action = "install" if component_id == "tmux-config" else "repair"
             if status["state"] in {"drifted", "blocked"}:
@@ -1629,6 +1636,8 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     component = catalog["components"].get(args.component)
     if component is None or args.component not in config_model.selected_components(kconf):
         raise CliError("reconcile 仅接受已选择的登记组件")
+    if ponytail.selected(component):
+        raise CliError("Ponytail 不接受当前分支载荷；请用 pennix update ponytail-plugin 核验正式发行和旧登记")
     plugin = component.get("delivery") == "plugin"
     if not plugin and (component.get("delivery") != "package" or component.get("package", {}).get("source") not in {"official", "aur"}):
         raise CliError("reconcile 仅支持 Arch/AUR 包和 Codex plugin")
@@ -1804,6 +1813,8 @@ def cmd_update_all(args):
         raise CliError('没有可重审的统一更新事务')
     report, value, catalog = _updates(args)
     _emit(report, args.json)
+    if report['components'].get(ponytail.KEY, {}).get('state') == 'migration-required':
+        raise CliError('Ponytail 旧登记必须先经专用单项更新迁移；未执行统一更新')
     if report['system']['state'] != 'current':
         raise CliError('完整 Arch 影响尚不可核验；未执行统一更新')
     unknown = [key for key, item in report['components'].items() if item['state'] in {'unknown', 'unmanaged'}]
@@ -1830,6 +1841,134 @@ def cmd_update_all(args):
         'system': report['system'], 'catalog_digest': apply_journal.digest(CATALOG),
         'secrets_digest': apply_journal.digest(Path(config_model.config_value(args.kconf, 'PENNIX_SECRETS_FILE')))}
     return cmd_apply(args)
+
+
+def _ponytail_update(args, component):
+    if args.version:
+        raise CliError("Ponytail 只从已登记的正式发行选择候选，不接受 --version")
+    if apply_journal.read() is not None:
+        raise CliError("存在未完成事务；Ponytail 只能使用同一事务的 recover，不重放 update")
+    native = ponytail.Native(component, args.codex_home)
+    before = native.observe()
+    record, raw = ponytail.receipt(component)
+    previous = args.component_lock["components"].get(ponytail.KEY)
+    if (not ponytail.matches_receipt(previous, record) or raw != owned_files.json_bytes(record)
+            or args.component_lock_snapshot != owned_files.json_bytes(args.component_lock)
+            or not before["payload"] or not before["market"]):
+        raise CliError("Ponytail 当前锁、载荷或可信回执不完整；未开始更新")
+    if record["schema"] == 1:
+        if before["market"] != {"kind": "legacy", "ref": record["ref"]} or before["file"] is not None:
+            raise CliError("Ponytail 旧外层登记与锁定登记不同；保留现场")
+    elif not native.matches(before, previous):
+        raise CliError("Ponytail 正式登记或实际载荷发生漂移；保留现场")
+    with tempfile.TemporaryDirectory(prefix="pennix-ponytail-review-") as directory:
+        workspace = Path(directory)
+        target = candidates.lock_entry(candidates.resolve(component, workspace))
+        if record["schema"] == 2:
+            candidates.verify_plugin_upgrade(previous, target)
+        if record["schema"] == 2 and previous == target:
+            if args.confirm:
+                raise CliError("预览所对应的 Ponytail 更新已完成或不存在；不重放确认")
+            _emit({"operation": "update", "component": ponytail.KEY, "status": "no-op", "target": target}, args.json)
+            return 0
+        ponytail.prove_retrievable(native, workspace / 'previous.git',
+                                   before["market"]["ref"], before["payload"]["ref"])
+    next_lock = component_lock.set_entry(args.component_lock, ponytail.KEY, target, args.component_lock_sources)
+    frozen = {"before": before, "previous": previous, "receipt_before": record, "desired": target,
+              "lock_before": apply_journal.digest(args.component_lock_path),
+              "lock_after": hashlib.sha256(owned_files.json_bytes(next_lock)).hexdigest()}
+    digest = hashlib.sha256(owned_files.json_bytes({
+        **frozen, "config_digest": apply_journal.digest(args.config_path)
+    })).hexdigest()
+    _verify_inputs(args)
+    if not args.confirm:
+        _emit({"operation": "update", "component": ponytail.KEY, "current": previous,
+               "actual": before["payload"], "candidate": target, "tag": f"v{target['version']}",
+               "review_sha256": digest, "status": "review-required"}, args.json)
+        return 0
+    if args.confirm != digest:
+        raise CliError("Ponytail 审阅摘要不匹配；重新审阅实际载荷和正式候选")
+    if native.observe() != before or ponytail.receipt(component)[1] != raw:
+        raise CliError("Ponytail 预览期间原生登记、载荷或回执改变")
+    step_id = f"{ponytail.KEY}:release"
+    active = _start_transaction(args, "update", ponytail.KEY, [
+        {"id": step_id, "component": ponytail.KEY, "action": "pin-release", "target": frozen}])
+    active, _ = _journal_mutate(active, step_id, lambda: _ponytail_apply(args, component, frozen, restore=False))
+    apply_journal.clear()
+    _emit({"operation": "update", "component": ponytail.KEY, "status": "changed", "target": target}, args.json)
+    return 0
+
+
+def _ponytail_apply(args, component, frozen, *, restore):
+    _verify_inputs(args)
+    native = ponytail.Native(component, args.codex_home)
+    before, desired = frozen["before"], frozen["desired"]
+    old_record = owned_files.json_bytes(frozen["receipt_before"])
+    new_record = owned_files.json_bytes(ponytail.receipt_record(component, desired))
+    _, current_receipt = ponytail.receipt(component)
+    if current_receipt not in {old_record, new_record}:
+        raise CliError("Ponytail 回执脱离事务记录；保留现场")
+    previous = frozen["previous"]
+    lock_before = component_lock.set_entry(args.component_lock, ponytail.KEY, previous, args.component_lock_sources)
+    lock_after = component_lock.set_entry(args.component_lock, ponytail.KEY, desired, args.component_lock_sources)
+    if (hashlib.sha256(owned_files.json_bytes(lock_before)).hexdigest() != frozen["lock_before"]
+            or hashlib.sha256(owned_files.json_bytes(lock_after)).hexdigest() != frozen["lock_after"]
+            or apply_journal.digest(args.component_lock_path) not in {frozen["lock_before"], frozen["lock_after"]}):
+        raise CliError("Ponytail 锁不匹配全部冻结检查点；未继续事务")
+    if restore:
+        ponytail.restore(native, before, desired)
+    else:
+        ponytail.move(native, before, desired)
+    _verify_inputs(args)
+    owned_files.replace(ponytail.receipt_path(), old_record if restore else new_record, current_receipt)
+    args.component_lock = lock_before if restore else lock_after
+    _write_lock(args)
+
+
+def _ponytail_recover(args, component, active, step):
+    frozen = step["target"]
+    if step["status"] == "verified":
+        expected = (step["observed"] or {}).get("resolution") or "completed"
+        if args.resolve != expected:
+            raise CliError("Ponytail 事务已经核验为不同结果；保留现场")
+        native = ponytail.Native(component, args.codex_home)
+        state = native.observe()
+        record, raw = ponytail.receipt(component)
+        completed = expected == "completed"
+        same_native = native.matches(state, frozen["desired"]) if completed else state == frozen["before"]
+        expected_record = (ponytail.receipt_record(component, frozen["desired"])
+                           if completed else frozen["receipt_before"])
+        expected_lock = frozen["lock_after" if completed else "lock_before"]
+        if (not same_native or record != expected_record or raw != owned_files.json_bytes(expected_record)
+                or apply_journal.digest(args.component_lock_path) != expected_lock):
+            raise CliError("Ponytail 已验证结果与现场不符；保留事务")
+    elif args.resolve == "not-started":
+        if (step["status"] != "pending" or frozen.get("restoring")
+                or apply_journal.digest(args.component_lock_path) != frozen["lock_before"]
+                or ponytail.receipt(component)[0] != frozen["receipt_before"]
+                or ponytail.Native(component, args.codex_home).observe() != frozen["before"]):
+            raise CliError("Ponytail 缺少未执行的完整证据；保留事务")
+        active = apply_journal.verified(active, step["id"], {"resolution": "not-started", "desired_applied": False})
+    else:
+        restore = args.resolve == "restored"
+        if frozen.get("restoring") and not restore:
+            raise CliError("Ponytail 已开始精确回退，只能沿同一事务继续回退")
+        if restore and not frozen.get("restoring"):
+            frozen = {**frozen, "restoring": True}
+            active = apply_journal.set_target(active, step["id"], frozen)
+        if step["status"] == "pending":
+            active = apply_journal.started(active, step["id"])
+        try:
+            _ponytail_apply(args, component, frozen, restore=restore)
+        except BaseException:
+            apply_journal.unknown(apply_journal.read(), step["id"])
+            raise
+        active = apply_journal.verified(apply_journal.read(), step["id"],
+                                        {"resolution": args.resolve, "desired_applied": not restore})
+    apply_journal.clear()
+    _emit({"operation": "recover", "transaction": args.transaction, "step": args.step,
+           "resolution": args.resolve, "complete": True}, args.json)
+    return 0
 
 
 def cmd_update(args: argparse.Namespace) -> int:
@@ -1859,6 +1998,10 @@ def cmd_update(args: argparse.Namespace) -> int:
             raise CliError("Paseo 插件的目标提交来自共享声明")
         args.plugin_action = "update"
         return cmd_paseo_plugins(args)
+    if args.component == ponytail.KEY:
+        if args.component not in config_model.selected_components(kconf):
+            raise CliError("Ponytail 未在 workflow.config 中选择")
+        return _ponytail_update(args, catalog["components"][args.component])
     if getattr(args, "confirm", None):
         raise CliError("--confirm 仅用于 Paseo 插件的更新摘要")
     args.kconf = kconf
@@ -2436,9 +2579,13 @@ def cmd_recover(args: argparse.Namespace) -> int:
     expected = {"home": str(Path.home()), "codex_home": str(home), "state_root": str(owned_files.state_root())}
     if active["identity"] != expected or active["config_digest"] != apply_journal.digest(config):
         raise CliError("恢复目标或配置与原事务不同；保留现场")
+    step = apply_journal.step(active, args.step)
+    if (active["command"] == "update" and active["component"] == ponytail.KEY
+            and len(active["steps"]) == 1 and step["component"] == ponytail.KEY
+            and step["id"] == f"{ponytail.KEY}:release" and step["action"] == "pin-release"):
+        return _ponytail_recover(args, catalog["components"][ponytail.KEY], active, step)
     if active["lock_digest"] != apply_journal.digest(args.component_lock_path):
         raise CliError("锁文件与事务最后已证实的检查点不同；保留现场，不推断外部修改归属")
-    step = apply_journal.step(active, args.step)
     if args.resolve in {"not-started", "restored"}:
         required = "none" if args.resolve == "not-started" else "restored"
         if step['component'] == 'pnpm' and args.resolve == 'restored' and step['status'] != 'verified' and pnpm_migration.pending():
@@ -2690,7 +2837,7 @@ def parser() -> argparse.ArgumentParser:
     update.add_argument('--review-system-changes', action='store_true', help='重审同一 --all 事务中已证实系统升级的额外变化；不释放 unknown')
     update.add_argument("--version", help="指定 npm 组件的精确版本；默认仍跟踪登记通道")
     update.add_argument("--takeover", action="store_true", help="仅预览或确认接管已审阅的外部 Copilot CLI 安装")
-    update.add_argument("--confirm", help="确认 Paseo 插件更新或 Copilot 接管预览返回的摘要")
+    update.add_argument("--confirm", help="确认 Ponytail、Paseo 插件更新或 Copilot 接管预览返回的摘要")
     update.add_argument("--config")
     update.add_argument("--json", action="store_true")
     update.set_defaults(function=cmd_update)
@@ -2790,7 +2937,7 @@ def main(argv: list[str] | None = None) -> int:
                     raise CliError("存在未完成 lifecycle 事务；先从原入口或 recover 恢复")
                 return args.function(args)
         return args.function(args)
-    except (CliError, update_inventory.UpdateError, base_environment.BaseError, candidates.CandidateError, apply_journal.JournalError, connection_owners.ConnectionError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, paseo_plugins.PluginError, relay_owner.RelayError, release_owner.ReleaseError, skill_collections.CollectionError, owner_engine.local_clients.ClientError, secret_store.SecretError, owned_files.OwnershipError, native_integrations.NativeIntegrationError, native_integrations.hook_integrations.HookError, OSError) as error:
+    except (CliError, update_inventory.UpdateError, base_environment.BaseError, candidates.CandidateError, apply_journal.JournalError, connection_owners.ConnectionError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, paseo_plugins.PluginError, ponytail.PonytailError, relay_owner.RelayError, release_owner.ReleaseError, skill_collections.CollectionError, owner_engine.local_clients.ClientError, secret_store.SecretError, owned_files.OwnershipError, native_integrations.NativeIntegrationError, native_integrations.hook_integrations.HookError, OSError) as error:
         print(f"pennix: {error}", file=sys.stderr)
         try:
             active = apply_journal.read()
