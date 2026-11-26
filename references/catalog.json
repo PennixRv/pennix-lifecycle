@@ -677,10 +677,10 @@
       "collection_contract": {
         "directory": "pennix-system-devel-skills",
         "documentation_only": true,
-        "archive_sha256": "a59d6ebc93ec83e520248275908374a3a8d2c61688dad792779fac4a7c729bd5",
+        "archive_sha256": "dc79558ef699f4b121046646864e94a3441eedf75517fe9b00fe19f4e7a6652b",
         "source": {
           "repo": "PennixRv/pennix-system-devel-skills",
-          "ref": "ad5ea435bda1c4fe88a503e677780ab56aeeded8",
+          "ref": "8a9278ca0a9f02575c86c8272be985b54bb417b6",
           "manifest": "collection.json"
         }
       }
