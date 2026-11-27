@@ -135,6 +135,10 @@ def runtime(paseo: Path, home: Path, mode: str, run: bool) -> dict:
             raise PaseoServiceError("Paseo daemon PID 回执无效")
         result["running"] = pid is not None and value.get("home") == str(home)
         result["pid"] = pid
+        result["stopped_verified"] = (
+            "pid" in value and pid is None and value.get("home") == str(home)
+            and value.get("localDaemon") == "stopped" and value.get("connectedDaemon") == "not_probed"
+        )
         result["healthy"] = (
             result["running"] and value.get("localDaemon") == "running"
             and isinstance(value.get("listen"), str) and bool(value["listen"])
@@ -306,24 +310,33 @@ def preflight_candidate(candidate: dict, *, plugins_required: bool = False) -> N
     npm = shutil.which("npm")
     if not npm:
         raise PaseoServiceError("Paseo 候选预检需要 npm")
-    with tempfile.TemporaryDirectory(prefix="pennix-paseo-sdk-") as directory:
+    # The full npm dependency tree and cache can exceed a tmpfs /tmp.
+    with tempfile.TemporaryDirectory(prefix=".pennix-paseo-sdk-", dir=Path.home()) as directory:
         root = Path(directory)
-        environment = {"HOME": directory, "PATH": os.environ.get("PATH", ""),
+        environment = {"HOME": directory, "TMPDIR": directory, "PATH": os.environ.get("PATH", ""),
                        "XDG_CONFIG_HOME": str(root / "config"), "XDG_STATE_HOME": str(root / "state"),
                        "XDG_DATA_HOME": str(root / "data"), "XDG_CACHE_HOME": str(root / "cache"),
                        "CODEX_HOME": str(root / "codex"), "NPM_CONFIG_USERCONFIG": "/dev/null"}
         try:
             result = subprocess.run([npm, "install", "--global", "--prefix", directory, "--ignore-scripts",
-                "--include=optional", "--cache", str(root / "npm-cache"), "--registry", "https://registry.npmjs.org/",
-                candidate["path"]], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                "--include=optional", "--no-audit", "--cache", str(root / "npm-cache"),
+                "--registry", "https://registry.npmjs.org/", candidate["path"]],
+                env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
                 timeout=600, check=False)
             if result.returncode:
-                raise PaseoServiceError("Paseo 候选依赖暂存失败；未修改用户安装")
+                codes = set(re.findall(r"^npm (?:ERR!|error) code ([A-Z][A-Z0-9_]{1,31})[ \t\r]*$", result.stderr, re.M))
+                if re.search(r"^npm warn tar TAR_ENTRY_ERROR ENOSPC:", result.stderr, re.M):
+                    codes.add("ENOSPC")
+                detail = ("（暂存空间不足，ENOSPC）" if "ENOSPC" in codes else
+                          f"（npm 错误码：{', '.join(sorted(codes))}）" if codes else f"（npm 退出码：{result.returncode}）")
+                raise PaseoServiceError(f"Paseo 候选依赖暂存失败{detail}；未修改用户安装")
             observed = skills(root / "bin/paseo", root / "paseo",
                               "probe-plugins" if plugins_required else "probe", environment=environment)
             if observed.get("version") != candidate["version"]:
                 raise PaseoServiceError("Paseo 候选 SDK 与已冻结载荷身份不一致")
-        except (OSError, subprocess.TimeoutExpired) as error:
+        except subprocess.TimeoutExpired as error:
+            raise PaseoServiceError("Paseo 候选依赖暂存超时；未修改用户安装") from error
+        except OSError as error:
             raise PaseoServiceError("Paseo 候选原生接口预检未完成；未修改用户安装") from error
 
 

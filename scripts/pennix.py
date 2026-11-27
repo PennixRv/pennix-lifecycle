@@ -21,6 +21,8 @@ from urllib.parse import urlsplit
 
 import _engine as owner_engine
 import apply_journal
+import arch_recovery
+import aur_build
 import codex_config
 import component_lock
 import candidates
@@ -532,6 +534,9 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
     for key, target in getattr(args, 'update_targets', {}).items():
         item = components[key]
         locked = args.component_lock['components'].get(key, {})
+        if item['selected'] and item['action'] == 'install' and item.get('package_state', item['state']) == 'missing':
+            item["candidate_target"] = target
+            continue
         if candidates.matches(locked, target):
             continue
         if not item['selected'] or item['action'] not in {'keep', 'system-refresh'} or not locked:
@@ -560,12 +565,16 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
     paseo_home = Path(config_model.config_value(kconf, "PENNIX_PASEO_HOME"))
     service_selected = mode != "off" or run
     service_state = paseo_service.inspect(paseo, paseo_home)
-    runtime = ({"state": "missing", "running": False, "healthy": False, "enabled": False,
-                "linger": False, "daemon_version": None} if service_selected and components.get("paseo-cli", {}).get("state") == "missing" else paseo_service.runtime(paseo, paseo_home, mode, run)
-               if service_selected or service_state in {"current", "migration-required"}
-               or config_model.config_value(kconf, "PENNIX_PASEO_RELAY") == "y"
-               else {"state": "current", "running": False, "enabled": False,
-                     "linger": False, "daemon_version": None})
+    review_paseo = ("paseo-cli" in getattr(args, "update_targets", {})
+                    and getattr(args, "update_review", {}).get("mode") == "noninteractive-v1")
+    if service_selected and components.get("paseo-cli", {}).get("state") == "missing":
+        runtime = {"state": "missing", "running": False, "healthy": False, "enabled": False,
+                   "linger": False, "daemon_version": None}
+    elif (review_paseo or service_selected or service_state in {"current", "migration-required"}
+          or config_model.config_value(kconf, "PENNIX_PASEO_RELAY") == "y"):
+        runtime = paseo_service.runtime(paseo, paseo_home, mode, run)
+    else:
+        runtime = {"state": "current", "running": False, "enabled": False, "linger": False, "daemon_version": None}
     cli_lock = args.component_lock["components"].get("paseo-cli", {})
     paseo_config = (paseo_service.observe(paseo, paseo_home, listen, cli_lock.get("version"), runtime)
                     if service_selected else None)
@@ -1181,7 +1190,7 @@ def _journal_for_apply(args: argparse.Namespace, value: dict[str, Any], steps: l
     return _start_transaction(args, 'update-all' if getattr(args, 'all', False) else 'apply', None, steps), False
 
 
-def _journal_mutate(value: dict, step_id: str, action):
+def _journal_mutate(value: dict, step_id: str, action, *, observed=None):
     step = apply_journal.step(value, step_id)
     if step["status"] == "verified":
         return value, "resumed"
@@ -1199,7 +1208,7 @@ def _journal_mutate(value: dict, step_id: str, action):
         except BaseException:
             pass
         raise
-    return apply_journal.verified(apply_journal.read() or value, step_id), result
+    return apply_journal.verified(apply_journal.read() or value, step_id, observed), result
 
 
 def _retry_unknown_update(active: dict, step_id: str, state: str) -> dict:
@@ -1208,40 +1217,103 @@ def _retry_unknown_update(active: dict, step_id: str, state: str) -> dict:
     raise CliError("update 的副作用未知；版本相同不能证明完整恢复，需使用 recover 核验后置条件")
 
 
-def _refresh_arch_receipts(args: argparse.Namespace, catalog: dict[str, Any], *, changed=None) -> None:
+def _refresh_arch_receipts(args: argparse.Namespace, catalog: dict[str, Any], *, changed=None, entries=None) -> None:
     updates = []
     for component_id, component in catalog["components"].items():
+        if entries is not None and component_id not in entries:
+            continue
         if getattr(args, "scope", None) == "base" and component_id not in base_environment.SCOPE:
             continue
         if component_id == "pnpm" and pnpm_migration.needed():
             continue
         package = component.get("package") if component else None
-        if not isinstance(package, dict) or package.get("source") != "official":
+        if not isinstance(package, dict) or (package.get("source") != "official" and
+                (entries is None or package.get("source") != "aur")):
             continue
         if changed is not None and package["name"] not in changed:
             continue
         receipt = owner_engine._package_receipt(component_id, component)
-        if receipt is None:
+        if receipt is None and entries is None:
             continue
         identity = owner_engine.package_identity(component)
         if changed is not None:
             before, after = changed[package["name"]]
-            locked = args.component_lock["components"].get(component_id, {})
-            if (identity["version"] != after or receipt["version"] not in {before, after}
-                    or locked.get("source") != component["lock_source"] or locked.get("version") not in {before, after}):
+            locked = args.component_lock["components"].get(component_id)
+            receipt_version = receipt["version"] if receipt else None
+            lock_version = locked["version"] if locked else None
+            if (identity["version"] != after or receipt_version not in {before, after}
+                    or lock_version not in {before, after} or locked and locked["source"] != component["lock_source"]):
                 raise CliError(f"{component_id} 的原生包回执或锁与已审阅事务不一致；不确认归属")
-            if receipt["version"] == after and locked["version"] == after:
+            if receipt_version == after and lock_version == after and (entries is None or locked == entries[component_id]):
                 continue
         updates.append((component_id, component, identity["version"]))
     for component_id, component, version in updates:
         owner_engine._write_package_receipt(component_id, component, version)
         args.component_lock = component_lock.set_entry(
             args.component_lock, component_id,
-            {"source": component["lock_source"], "version": version},
+            entries[component_id] if entries is not None else {"source": component["lock_source"], "version": version},
             args.component_lock_sources,
         )
     if updates:
         _write_lock(args)
+
+
+def _arch_owner_changes(args, catalog, target, new_owners, *, recorded=False):
+    rows = {row["name"]: row for row in target["native_review"]["transaction"]}
+    changes = {}
+    for key, component in sorted(catalog["components"].items()):
+        package = component.get("package", {})
+        row = rows.get(package.get("name"))
+        if row is None or package.get("source") != ("aur" if row["repo"] is None else "official"):
+            continue
+        receipt = owner_engine._package_receipt(key, component)
+        locked = args.component_lock["components"].get(key)
+        before, after = row["installed"], row["target"]
+        versions = {before, after} if recorded else {before}
+        if key not in new_owners and receipt is None and locked is None:
+            continue  # Only a selected, explicitly requested install may gain a new owner.
+        if ((before is None) != (key in new_owners)
+                or (receipt["version"] if receipt else None) not in versions
+                or (locked["version"] if locked else None) not in versions
+                or locked and locked["source"] != component["lock_source"]
+                or key == "pnpm" and pnpm_migration.needed()):
+            raise CliError(f"{key} 的 Arch 归属或锁不能绑定到该事务；未确认组件归属")
+        changes[key] = package["name"]
+    return changes
+
+
+def _arch_lock_entries(catalog, target, owners):
+    versions = {row["name"]: row["target"] for row in target["native_review"]["transaction"]}
+    local = target["native_review"].get("local", {})
+    return {key: {"source": catalog["components"][key]["lock_source"], "version": versions[name],
+                  **({field: local[name][field] for field in ("ref", "sha256")} if name in local else {})}
+            for key, name in owners.items()}
+
+
+def _arch_record_target(args, catalog, target, owners):
+    lock = args.component_lock
+    for key, entry in _arch_lock_entries(catalog, target, owners).items():
+        lock = component_lock.set_entry(lock, key, entry, args.component_lock_sources)
+    return {"owners": owners, "lock_after": hashlib.sha256(owned_files.json_bytes(lock)).hexdigest()}
+
+
+def _record_reviewed_arch(args, catalog, target, expected):
+    _verify_inputs(args)
+    try:
+        new = {key for key, name in expected["owners"].items() if name not in target["installed"]}
+        owners = _arch_owner_changes(args, catalog, target, new, recorded=True)
+        if not owners or _arch_record_target(args, catalog, target, owners) != expected:
+            raise CliError("Arch 组件归属集合或目标锁与冻结记录不一致；保留事务")
+        changed = {row["name"]: (row["installed"], row["target"]) for row in target["native_review"]["transaction"]
+                   if row["name"] in owners.values()}
+        _refresh_arch_receipts(args, catalog, changed=changed, entries=_arch_lock_entries(catalog, target, owners))
+    except owner_engine.BootstrapError as error:
+        raise CliError("Arch 包归属回执或实装身份无法核验；保留事务") from error
+    if apply_journal.digest(args.component_lock_path) != expected["lock_after"]:
+        raise CliError("Arch 组件归属的目标锁未写入；保留事务")
+    if apply_journal.read()["lock_digest"] != expected["lock_after"]:
+        apply_journal.checkpoint_lock(expected["lock_after"])
+    return "current"
 
 
 def _finish_observed_paseo_apply(args: argparse.Namespace, value: dict[str, Any]) -> bool:
@@ -1367,7 +1439,8 @@ def cmd_apply(args: argparse.Namespace) -> int:
             raise CliError(f"Codex API Key 预检失败：{error}") from error
     if value["components"]["paseo-autostart"]["run"] and "paseo-cli" not in selected:
         raise CliError("Paseo daemon 运行需要选择 paseo-cli")
-    steps = _apply_steps(value, args, catalog)
+    reviewed = getattr(args, "noninteractive_review", None)
+    steps = _apply_steps(value, args, catalog) if reviewed is None else _reviewed_update_steps(value, args, catalog)
     active, resumed = _journal_for_apply(args, value, steps, create=False)
     if active is None:
         _preflight_pending_owners(args, value, catalog, steps)
@@ -1383,6 +1456,12 @@ def cmd_apply(args: argparse.Namespace) -> int:
     paseo = prefix / "bin" / "paseo"
     if not paseo.is_file():
         paseo = Path(shutil.which("paseo") or paseo)
+    reviewed_paseo = getattr(args, "update_review", {}).get("mode") == "noninteractive-v1"
+
+    def paseo_still_stopped():
+        return _paseo_cli_execution_ready({**service, "runtime": paseo_service.runtime(
+            paseo, paseo_home, service["mode"], service["run"])})
+
     if paseo_needed:
         try:
             if paseo.is_file():
@@ -1408,6 +1487,8 @@ def cmd_apply(args: argparse.Namespace) -> int:
                        and item["action"] in {"install", "adopt", "upgrade", "adopt-upgrade"}
                        and (active is None or item["status"] != "verified")), None)
     if paseo_step is not None:
+        if reviewed_paseo and not _paseo_cli_execution_ready(service):
+            raise CliError("Paseo 未证明同一目标 daemon 已停止；未继续更新")
         component = catalog["components"]["paseo-cli"]
         target = paseo_step["target"] or None
         try:
@@ -1425,10 +1506,11 @@ def cmd_apply(args: argparse.Namespace) -> int:
             paseo_step["target"] = candidate_target
     plugin_adoptions = {key: item["plugin_adoption"] for key, item in value["components"].items()
                         if item.get("selected") and item.get("plugin_adoption")}
-    if active is None and (value.get("side_effects", {}).get("system_upgrade") or getattr(args, 'all', False)):
+    if active is None and reviewed is None and (value.get("side_effects", {}).get("system_upgrade") or getattr(args, 'all', False)):
         _emit(value, args.json)
         if hasattr(args, 'update_review'):
-            _emit({'unified_review': args.update_review, 'updates': args.update_inventory}, args.json)
+            _emit({'unified_review': {key: val for key, val in args.update_review.items() if key != 'secrets_digest'},
+                   'updates': args.update_inventory}, args.json)
         if (not sys.stdin.isatty() or not sys.stdout.isatty()
                 or input("确认完整系统升级及本次 apply？输入 yes 继续: ").strip() != "yes"):
             return 1
@@ -1445,10 +1527,31 @@ def cmd_apply(args: argparse.Namespace) -> int:
             _verify_update_candidates(args, catalog)
         if hasattr(args, "config_snapshot") and _plan(args) != value:
             raise CliError("确认期间资源或归属已变化；请重新计划")
+        if reviewed is not None and _update_review_output(value, steps, args) != reviewed:
+            raise CliError("全量更新确认后写入步骤或已有身份改变；请重新审阅")
         active, _ = _journal_for_apply(args, value, steps, create=True)
     relay_home = paseo_home
     results: dict[str, str] = {}
     system_step = next((item for item in active["steps"] if item["id"] == "system-upgrade"), None)
+    if system_step is not None and reviewed is not None:
+        transaction, target = active["transaction"], system_step["target"]
+        frozen = args.update_review
+        digest = arch_recovery.receipt_digest(transaction, target)
+        if apply_journal.step(active, "update-review")["status"] != "verified":
+            active = apply_journal.verified(active, "update-review", {"inputs": "bound"})
+        active, _ = _journal_mutate(active, "system-upgrade",
+            lambda: arch_recovery.commit(transaction, target, frozen["arch_executor"]),
+            observed={"state": "native-commit-verified", "receipt_sha256": digest})
+        results["system-upgrade"] = "changed"
+        owner_engine._candidate.cache_clear()
+        if record := frozen.get("arch_record"):
+            active, results["system-upgrade:record"] = _journal_mutate(active, "system-upgrade:record",
+                lambda: _record_reviewed_arch(args, catalog, target, record))
+        value = _plan(args)
+        _, _, catalog = _load(args)
+        if _reviewed_update_steps(value, args, catalog) != steps:
+            raise CliError("Arch 提交后其他写入步骤或组件归属发生变化；保留记录，不执行其余步骤")
+        system_step = None  # Confirmed native work must not enter the legacy writer or replanner.
     if system_step is not None and system_step["status"] == "started":
         raise CliError("pacman -Syu 的副作用状态未知；保留 journal，不能自动重试")
     if system_step is not None and system_step["status"] != "verified":
@@ -1516,12 +1619,17 @@ def cmd_apply(args: argparse.Namespace) -> int:
                         active = apply_journal.set_target(active, step_id, candidate_target)
                         target = candidate_target
                     component["_candidate_target"] = candidate_target
+                    check_paseo = reviewed_paseo and component_id == "paseo-cli"
+                    if check_paseo and not paseo_still_stopped():
+                        raise CliError("Paseo 停止状态自审阅后发生变化；未更新 CLI")
                     def install(candidate=candidate, component_id=component_id, component=component, target=target):
                         result = _run_component(args, catalog, component_id, operation, candidate=candidate)
                         args.component_lock = component_lock.set_entry(args.component_lock, component_id, target, args.component_lock_sources)
                         _write_lock(args)
                         if component_id == "pnpm":
                             pnpm_migration.finish(component, target)
+                        if check_paseo and not paseo_still_stopped():
+                            raise CliError("Paseo CLI 已写入，但 daemon 停止状态无法继续证明；保留事务")
                         return result
                     active, results[component_id] = _journal_mutate(active, step_id, install)
             else:
@@ -1909,7 +2017,8 @@ def _updates(args):
     kconf, _, catalog = _load(args)
     report = update_inventory.inspect(catalog, config_model.selected_components(kconf),
         args.component_lock['components'], value,
-        system_upgrade=config_model.config_value(kconf, 'PENNIX_SYSTEM_UPGRADE') == 'y')
+        system_upgrade=config_model.config_value(kconf, 'PENNIX_SYSTEM_UPGRADE') == 'y',
+        reviewed=getattr(args, 'plan', False) or getattr(args, 'confirm', None) is not None)
     report['paseo_plugins'] = paseo_plugins.inventory(kconf, catalog, args.component_lock['components'])
     return report, value, catalog
 
@@ -1924,23 +2033,151 @@ def cmd_updates(args):
 
 def _verify_update_candidates(args, catalog):
     review = args.update_review
-    system = update_inventory.arch()
+    native = review['system'].get('native_review')
+    if native is not None or (getattr(args, 'noninteractive_review', None) is not None
+                              and args.update_inventory['system_upgrade_enabled']):
+        system = update_inventory.arch(include_packages=native['requested'] if native else (), review_full=True)
+    else:
+        system = update_inventory.arch()
     if system['state'] != 'current' or any(system[key] != review['system'][key] for key in ('installed', 'upgrades')):
         raise CliError('确认期间完整系统升级清单改变；未开始事务，请重新审阅')
+    recomputed = system.get('native_review')
+    if native and native.get("local"):
+        recomputed = _with_aur_artifacts(system, native["local"])["native_review"]
+    if (recomputed != native or native
+            and system.get('real_sync_sha256') != review['system'].get('real_sync_sha256')):
+        raise CliError('确认期间 Arch 包工件或原生配置改变；未开始事务，请重新审阅')
     for key, available in review['available'].items():
-        current = update_inventory.available(catalog['components'][key], args.component_lock['components'].get(key), system)
+        try:
+            current = update_inventory.available(catalog['components'][key], args.component_lock['components'].get(key), system)
+        except update_inventory.CANDIDATE_FAILURES as error:
+            detail = update_inventory.candidate_failure(error)
+            raise CliError(f"{key}: {detail['detail']}；{detail['next']}") from error
         if current != available:
             raise CliError(f'{key} 来源候选在确认期间改变；请重新审阅')
 
 
+def _paseo_cli_execution_ready(service):
+    runtime = service["runtime"]
+    return (runtime.get("state") == "current" and runtime.get("running") is False
+            and runtime.get("stopped_verified") is True and not service["run"])
+
+
+def _with_aur_artifacts(system, local):
+    native = system.get("native_review") or {"requested": [], "transaction": [], "policy": update_inventory._arch_policy()}
+    rows = [*native["transaction"]]
+    for name, approval in local.items():
+        if any(row["name"] == name for row in rows):
+            raise CliError("AUR 工件与原生同步包计划重名；未开始升级")
+        rows.append({"repo": None, "name": name, "installed": system["installed"].get(name), "target": approval["version"],
+                     "filename": approval["filename"], "sha256": approval["sha256"]})
+    return {**system, "native_review": {**native, "transaction": sorted(rows, key=lambda item: item["name"]), "local": local}}
+
+
+def _reviewed_update_steps(value, args, catalog):
+    review = args.update_review
+    system = review["system"]
+    native = system.get("native_review")
+    if (native and not review.get("arch_executor")) or (
+            not native and system["upgrades"] and value["side_effects"].get("system_upgrade")):
+        raise CliError("需要经审阅的特权 Arch 事务；本入口未取得可用的固定执行器")
+    for key, item in value["components"].items():
+        action = item.get("action")
+        if action in {"keep", "ignored"} and item.get("native_action", "keep") == "keep":
+            continue
+        if (action == "system-refresh" and key in review.get("arch_owners", {})
+                and item.get("native_action", "keep") == "keep"):
+            continue
+        if action not in {"install", "upgrade"} or item.get("native_action", "keep") != "keep":
+            raise CliError(f"{key} 涉及 {action} 或原生配置变更；无 TTY 全量未执行")
+    service = value["components"]["paseo-autostart"]
+    paseo_update = "paseo-cli" in args.update_targets
+    steps = _apply_steps(value, args, catalog)
+    exact = []
+    owners, local = review.get("arch_owners", {}), (native or {}).get("local", {})
+    for step in steps:
+        key = step["component"]
+        if key == "system":
+            if native:
+                exact.append(step)
+                if record := review.get("arch_record"):
+                    exact.append({"id": "system-upgrade:record", "component": "system", "action": "record",
+                                  "target": record})
+            continue
+        if ((key == "paseo-config" and service.get("paseo_config", {}).get("state") == "current") or
+                (key == "paseo-autostart" and service["action"] == "keep" and not service["run"]
+                 and (not step["target"]["restart_daemon"] or
+                      paseo_update and not service.get("paseo_config", {}).get("restart_required"))) or
+                (key == "path-env" and value["side_effects"].get("path", {}).get("action") == "keep")):
+            continue
+        if key == "paseo-autostart" and step["target"]["restart_daemon"]:
+            raise CliError("本次更新需要重启 Paseo，但尚无经核验的维护边界；未执行写入")
+        if key != 'update-review':
+            component = catalog['components'].get(key, {})
+            if key == "aur-helper":
+                if all(owners.get(item["component"]) in local for item in steps
+                       if catalog["components"].get(item["component"], {}).get("package", {}).get("source") == "aur"):
+                    continue
+            if (step["action"] == "install" and component.get("package", {}).get("source") == "official"
+                    and owners.get(key) in (native or {}).get("requested", [])):
+                continue  # The fixed system step and its record step own this exact installation.
+            if step["action"] == "install" and owners.get(key) in local:
+                continue
+            if component.get("package", {}).get("source") in {"official", "aur"} or key == "aur-helper":
+                raise CliError(f"{key} 需要固定特权包执行器；无 TTY 全量未执行")
+            if (step["action"] not in {"install", "upgrade"} or not value["components"].get(key, {}).get("selected")
+                    or not step["target"].get("sha256") or step["target"] != args.update_targets.get(key)):
+                raise CliError(f"{key} 需要独立原生审阅或缺少精确候选；无 TTY 全量未执行")
+        exact.append(step)
+    return exact
+
+
+def _update_review_output(value, steps, args):
+    binding = _review_target()
+    public_steps = [{"component": item["component"], "action": item["action"],
+                     "candidate": ({"owners": item["target"]["owners"]}
+                                   if item["id"] == "system-upgrade:record" else item["target"])}
+                    for item in steps if item["id"] != "update-review"]
+    public = {"operation": "update-all", "target_id": binding[:16], "steps": public_steps,
+              "system_upgrade": any(item["id"] == "system-upgrade" for item in steps), "service_restart": False,
+              "status": "review-required" if public_steps else "no-op"}
+    if not public_steps:
+        return public
+    preconditions = []
+    plan = value
+    if any(item["component"] == "paseo-cli" for item in public_steps):
+        preconditions.append("paseo-daemon-stopped")
+        service = value["components"]["paseo-autostart"]
+        public.update(execution_preconditions=preconditions, execution_ready=_paseo_cli_execution_ready(service))
+        # Stopping the daemon satisfies the bound condition; it does not change the approved writes.
+        stable_service = {**service, "runtime": {
+            key: service["runtime"].get(key) for key in ("enabled", "linger")
+        }}
+        if "paseo_config" in service:
+            config = service["paseo_config"]
+            stable_service["paseo_config"] = {**config, "versions": {"cli": config["versions"]["cli"]}}
+        plan = {**value, "components": {**value["components"], "paseo-autostart": stable_service}}
+    payload = {"schema": 2, "binding": binding, "config": apply_journal.digest(args.config_path),
+               "config_path": str(args.config_path), "lock": apply_journal.digest(args.component_lock_path),
+               "runtime": release_owner._runtime_digest(ROOT), "plan": plan, "steps": steps,
+               "execution_preconditions": preconditions}
+    return {**public, "review_sha256": hashlib.sha256(owned_files.json_bytes(payload)).hexdigest()}
+
+
 def cmd_update_all(args):
     active = apply_journal.read()
+    explicit = getattr(args, "plan", False) or getattr(args, "confirm", None) is not None
     if active is not None:
+        if explicit:
+            raise CliError("已有未完成事务；先使用 pennix recover 核对，不签发或重放审阅摘要")
         if active['command'] != 'update-all':
             raise CliError('存在其他未完成事务；先使用原入口恢复')
         review = next((step['target'] for step in active['steps'] if step['id'] == 'update-review'), None)
         if not review:
             raise CliError('统一更新缺少冻结审阅；保留现场')
+        # A reviewed transaction must never resume through legacy interactive apply.
+        if review.get('mode') == 'noninteractive-v1':
+            raise CliError('已有非交互审阅事务；使用 pennix recover 核对同一事务，不通过旧入口重放')
         args.update_targets = review['targets']
         args.update_review = review
         args.update_inventory = {'state': 'resume-frozen-journal'}
@@ -1967,17 +2204,21 @@ def cmd_update_all(args):
     if args.review_system_changes:
         raise CliError('没有可重审的统一更新事务')
     report, value, catalog = _updates(args)
-    _emit(report, args.json)
+    if not explicit:
+        _emit(report, args.json)
     if report['components'].get(ponytail.KEY, {}).get('state') == 'migration-required':
         raise CliError('Ponytail 旧登记必须先经专用单项更新迁移；未执行统一更新')
     if report['system']['state'] != 'current':
+        if explicit and report['system'].get('detail'):
+            raise CliError(f"完整 Arch 影响尚不可核验：{report['system']['detail']}；未执行统一更新")
         raise CliError('完整 Arch 影响尚不可核验；未执行统一更新')
-    unknown = [key for key, item in report['components'].items() if item['state'] in {'unknown', 'unmanaged'}]
+    unknown = [f"{key}: {item.get('detail', '无法核验当前组件')}；{item.get('next', '先运行 pennix plan 核对受管身份')}"
+               for key, item in report['components'].items() if item['state'] in {'unknown', 'unmanaged'}]
     if unknown:
-        raise CliError('先核验来源、归属和 reconcile：' + ', '.join(unknown))
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise CliError('全量更新未执行：' + '；'.join(unknown))
+    if not explicit and (not sys.stdin.isatty() or not sys.stdout.isatty()):
         raise CliError('统一更新必须在真实终端审阅并确认；清单为只读，未执行变更')
-    targets = {}
+    targets, aur = {}, {}
     for key, item in report['components'].items():
         if item['state'] != 'update':
             continue
@@ -1986,16 +2227,109 @@ def cmd_update_all(args):
             if not report['system_upgrade_enabled']:
                 raise CliError('官方包更新必须选择完整系统升级；拒绝部分升级')
             continue
-        with tempfile.TemporaryDirectory(prefix='pennix-update-freeze-') as directory:
-            candidate = candidates.resolve(component, Path(directory), item['available'])
-            targets[key] = candidates.lock_entry(candidate)
+        if explicit and component.get('package', {}).get('source') == 'aur':
+            if not report["system_upgrade_enabled"]:
+                raise CliError("AUR 工件需要完整系统事务；拒绝部分升级")
+            name = component["package"]["name"]
+            if any(package == name for package, _ in aur.values()):
+                raise CliError("多个组件不能共享同一 AUR 安装归属")
+            try:
+                with tempfile.TemporaryDirectory(prefix="pennix-aur-source-") as directory:
+                    candidates.resolve(component, Path(directory), item["available"])
+            except update_inventory.CANDIDATE_FAILURES as error:
+                failure = update_inventory.candidate_failure(error)
+                raise CliError(f"{key}: {failure['detail']}；{failure['next']}") from error
+            aur[key] = (name, arch_recovery.aur_candidate(name, item["available"]))
+            continue
+        try:
+            with tempfile.TemporaryDirectory(prefix='pennix-update-freeze-') as directory:
+                candidate = candidates.resolve(component, Path(directory), item['available'])
+                targets[key] = candidates.lock_entry(candidate)
+        except update_inventory.CANDIDATE_FAILURES as error:
+            failure = update_inventory.candidate_failure(error)
+            raise CliError(f"{key}: {failure['detail']}；{failure['next']}") from error
+    if aur:
+        report = {**report, "system": _with_aur_artifacts(report["system"], dict(aur.values()))}
     args.update_targets = targets
     args.update_inventory = report
     args.update_review = {'targets': targets,
         'available': {key: item['available'] for key, item in report['components'].items() if item['available'] is not None},
         'system': report['system'], 'catalog_digest': apply_journal.digest(CATALOG),
         'secrets_digest': apply_journal.digest(Path(config_model.config_value(args.kconf, 'PENNIX_SECRETS_FILE')))}
+    if explicit:
+        args.update_review['mode'] = 'noninteractive-v1'
+        value = _plan(args)
+        _verify_inputs(args)
+        native = report["system"].get("native_review")
+        if native:
+            if not value["side_effects"].get("system_upgrade"):
+                raise CliError("固定 Arch 事务需要选择完整系统升级；拒绝部分升级")
+            new = {key: package["name"] for key, item in value["components"].items()
+                   if key in APPLY_ORDER and item.get("selected") and item["action"] == "install"
+                   and (package := catalog["components"].get(key, {}).get("package", {})).get("source") == "official"}
+            if set(new.values()) != set(native["requested"]):
+                raise CliError("Arch 明确安装请求与选定组件不一致；未开始升级")
+            for key, (name, _) in aur.items():
+                item = value["components"][key]
+                expected = "keep" if name in report["system"]["installed"] else "install"
+                if not item["selected"] or item["action"] != expected or item.get("native_action", "keep") != "keep":
+                    raise CliError(f"{key} 的归属或原生配置不能并入本次 AUR 工件事务")
+                if expected == "install":
+                    new[key] = name
+            args.update_review["arch_executor"] = arch_recovery.review_executor(report["system"])
+            try:
+                owners = _arch_owner_changes(args, catalog, report["system"], new)
+            except owner_engine.BootstrapError as error:
+                raise CliError("Arch 组件原有归属回执不可核验；未开始升级") from error
+            if any(owners.get(key) != name for key, (name, _) in aur.items()):
+                raise CliError("AUR 工件缺少与选定组件匹配的归属；未开始升级")
+            args.update_review["arch_owners"] = owners
+            if owners:
+                args.update_review["arch_record"] = _arch_record_target(args, catalog, report["system"], owners)
+        steps = _reviewed_update_steps(value, args, catalog)
+        review = _update_review_output(value, steps, args)
+        if args.plan:
+            _emit(review, args.json)
+            return 0
+        if review.get("review_sha256") != args.confirm:
+            raise CliError("全量更新审阅摘要不匹配；请重新执行 pennix update --all --plan")
+        if review.get("execution_ready") is False:
+            raise CliError("审阅摘要匹配，但写入前必须证明同一目标 Paseo daemon 已停止；未执行升级")
+        args.noninteractive_review = review
     return cmd_apply(args)
+
+
+def cmd_aur_prepare(args):
+    if apply_journal.read() is not None:
+        raise CliError("已有未完成事务；先通过 recover 核对")
+    kconf, _, catalog = _load(args)
+    component = catalog["components"].get(args.component, {})
+    if (component.get("package", {}).get("source") != "aur"
+            or args.component not in config_model.selected_components(kconf)):
+        raise CliError("只准备 workflow.config 已选、来源已登记的 AUR 组件")
+    try:
+        with tempfile.TemporaryDirectory(prefix="pennix-aur-build-") as directory:
+            checkout, data = aur_build.inspect(component, Path(directory))
+            target = _review_target()
+            review = {"operation": "aur-prepare", "component": args.component, "target_id": target[:16], **data}
+            binding = {"review": review, "config": apply_journal.digest(args.config_path),
+                       "catalog": apply_journal.digest(CATALOG), "runtime": release_owner._runtime_digest(ROOT),
+                       "target": target}
+            digest = hashlib.sha256(owned_files.json_bytes(binding)).hexdigest()
+            _verify_inputs(args)
+            if args.plan:
+                _emit({**review, "review_sha256": digest, "installs_packages": False}, args.json)
+                return 0
+            if args.confirm != digest:
+                raise CliError("AUR 构建审阅摘要不匹配；没有执行配方")
+            result = aur_build.build(checkout, data)
+    except candidates.CandidateError:
+        raise
+    except update_inventory.CANDIDATE_FAILURES + (arch_recovery.ArchCommitError,) as error:
+        raise CliError("AUR 构建材料或隔离环境无法核验；没有安装软件") from error
+    _emit({"operation": "aur-prepare", "component": args.component, "artifact": result,
+           "installs_packages": False, "next": "由管理员核对工件并独立签署审批，再审阅全量安装"}, args.json)
+    return 0
 
 
 def _ponytail_update(args, component):
@@ -2130,6 +2464,8 @@ def _ponytail_recover(args, component, active, step):
 
 
 def cmd_update(args: argparse.Namespace) -> int:
+    if getattr(args, "plan", False) and not args.all:
+        raise CliError("--plan 仅适用于 update --all")
     if getattr(args, "takeover", False):
         if (args.component != copilot_takeover.COMPONENT or args.version
                 or args.all or args.review_system_changes):
@@ -2143,8 +2479,9 @@ def cmd_update(args: argparse.Namespace) -> int:
         except owner_engine.BootstrapError as error:
             raise CliError(str(error)) from error
     if getattr(args, 'all', False):
-        if args.component or args.version or getattr(args, "confirm", None):
-            raise CliError('--all 不接受 component、--version 或 --confirm')
+        if args.component or args.version or (args.review_system_changes and
+                (getattr(args, "plan", False) or getattr(args, "confirm", None) is not None)):
+            raise CliError('--all 不接受 component、--version；重审已有事务不能与 --plan 或 --confirm 混用')
         return cmd_update_all(args)
     if not args.component:
         raise CliError('必须指定组件或 --all')
@@ -2707,15 +3044,26 @@ def cmd_tool(args: argparse.Namespace) -> int:
     elif args.tool_command == 'update':
         target = release_owner.latest()
         current = release_owner._version(ROOT)
-        _emit({'installed': current, 'available': target, 'next': '切换后以新进程运行 pennix updates --json'}, args.json)
-        if target['version'] == current:
-            return 0
         if tuple(map(int, target['version'].split('.'))) < tuple(map(int, current.split('.'))):
             raise CliError('latest 比当前工具更旧；拒绝隐式降级')
-        if not sys.stdin.isatty() or not sys.stdout.isatty() or input('确认升级 Lifecycle 工具？输入 yes: ').strip() != 'yes':
+        if args.plan or args.confirm is not None:
+            review = _tool_update_review(target, current)
+            if args.plan:
+                _emit(review, args.json)
+                return 0
+            if review.get("review_sha256") != args.confirm:
+                raise CliError("Lifecycle 审阅摘要不匹配；请重新执行 pennix tool update --plan")
+        else:
+            _emit({'installed': current, 'available': target, 'next': '切换后以新进程运行 pennix updates --json'}, args.json)
+            if target['version'] == current:
+                return 0
+        if args.confirm is None and (
+                not sys.stdin.isatty() or not sys.stdout.isatty() or input('确认升级 Lifecycle 工具？输入 yes: ').strip() != 'yes'):
             return 1
         if release_owner.latest() != target:
             raise CliError('确认期间公开发行改变；请重新审阅')
+        if args.confirm is not None and _tool_update_review(target, current) != review:
+            raise CliError('确认期间 Lifecycle 目标或实装身份改变；请重新审阅')
         result = release_owner.update(target)
     else:
         if not args.yes:
@@ -2725,10 +3073,49 @@ def cmd_tool(args: argparse.Namespace) -> int:
     return 0
 
 
+def _review_target() -> str:
+    def identifier(path, pattern):
+        value = Path(path).read_text(encoding="ascii").strip()
+        if not re.fullmatch(pattern, value):
+            raise CliError("非交互审阅需要可核验的宿主身份")
+        return value
+
+    return hashlib.sha256(owned_files.json_bytes({
+        "machine": identifier("/etc/machine-id", r"[0-9a-f]{32}"),
+        "boot": identifier("/proc/sys/kernel/random/boot_id", r"[0-9a-f-]{36}"),
+        "namespace": Path("/proc/self/ns/mnt").stat().st_ino,
+        "uid": os.getuid(), "home": str(Path.home()),
+        "state_root": str(owned_files.state_root()),
+    })).hexdigest()
+
+
+def _tool_update_review(target, current):
+    if apply_journal.read() is not None or owned_files.read(release_owner._switch_path(), private=True) is not None:
+        raise CliError("已有 Lifecycle 事务或发行切换未结束；沿原入口核验恢复")
+    releases, entry = release_owner._locations()
+    active = release_owner._active_target(entry, releases)
+    if active is None or active != ROOT or active.name != current:
+        raise CliError("请从已安装且归属可核验的 pennix 入口审阅与确认")
+    binding = _review_target()
+    review = {"operation": "tool-update", "installed": current, "available": target,
+              "target_id": binding[:16], "impact": "仅切换当前用户的 Lifecycle 发行；不升级系统包",
+              "next": "切换后以新进程运行 pennix updates --json"}
+    if target['version'] == current:
+        return {**review, "status": "no-op"}
+    payload = {"schema": 1, "review": review, "binding": binding, "entry": str(entry),
+               "active_digest": release_owner._installed_digest(active)}
+    return {**review, "status": "review-required",
+            "review_sha256": hashlib.sha256(owned_files.json_bytes(payload)).hexdigest()}
+
+
 def cmd_recover(args: argparse.Namespace) -> int:
     active = apply_journal.read()
     if not args.resolve:
-        _emit({"transaction": active, "state": "pending" if active else "idle"}, args.json)
+        public = None if active is None else {**active, "steps": [
+            {**step, "target": {key: val for key, val in step["target"].items() if key != "secrets_digest"}}
+            if step["id"] == "update-review" else step for step in active["steps"]
+        ]}
+        _emit({"transaction": public, "state": "pending" if active else "idle"}, args.json)
         return 0
     if not active or active.get("schema") != 2 or active.get("transaction") != args.transaction:
         raise CliError("恢复必须匹配当前可识别的事务；旧 journal 保留现场")
@@ -2744,7 +3131,15 @@ def cmd_recover(args: argparse.Namespace) -> int:
             and len(active["steps"]) == 1 and step["component"] == ponytail.KEY
             and step["id"] == f"{ponytail.KEY}:release" and step["action"] == "pin-release"):
         return _ponytail_recover(args, catalog["components"][ponytail.KEY], active, step)
-    if active["lock_digest"] != apply_journal.digest(args.component_lock_path):
+    review = next((item["target"] for item in active["steps"] if item["id"] == "update-review"), {})
+    reviewed_all = active["command"] == "update-all" and review.get("mode") == "noninteractive-v1"
+    arch_record = (reviewed_all and args.resolve == "completed" and step["id"] == "system-upgrade:record"
+                   and step["component"] == "system" and step["action"] == "record")
+    lock_digest = apply_journal.digest(args.component_lock_path)
+    lock_checked = (arch_record and step["status"] in {"started", "unknown"}
+                    and bool(step["target"].get("lock_after"))
+                    and step["target"] == review.get("arch_record") and lock_digest == step["target"]["lock_after"])
+    if active["lock_digest"] != lock_digest and not lock_checked:
         raise CliError("锁文件与事务最后已证实的检查点不同；保留现场，不推断外部修改归属")
     if active["command"] == "apply" and active["component"] == system_devel_tools.SCOPE:
         return _recover_scoped_tools(args, catalog, active, step)
@@ -2786,6 +3181,25 @@ def cmd_recover(args: argparse.Namespace) -> int:
         component = catalog["components"].get(step["component"])
         if step["status"] == "verified":
             pass
+        elif (active["command"] == "update-all" and step["id"] == "system-upgrade"
+              and step["component"] == "system" and step["action"] == "upgrade"):
+            evidence = (arch_recovery.observe(active["transaction"], step["target"])
+                        if reviewed_all and review.get("system") == step["target"]
+                        and step["status"] in {"started", "unknown"} else None)
+            if evidence is None:
+                raise CliError("缺少同一 Arch 提交的原生完成回执或当前包状态不符；保留现场，不重跑包事务")
+            active = apply_journal.verified(active, step["id"], evidence)
+        elif arch_record:
+            package = apply_journal.step(active, "system-upgrade")
+            if (not review.get("arch_record") or step["target"] != review["arch_record"]
+                    or package["target"] != review.get("system")
+                    or package["status"] != "verified"
+                    or (package.get("observed") or {}).get("state") != "native-commit-verified"
+                    or review.get("catalog_digest") != apply_journal.digest(CATALOG)
+                    or arch_recovery.observe(active["transaction"], package["target"]) is None):
+                raise CliError("没有同一 Arch 提交及组件归属的证据；不补写记录或重跑包事务")
+            _record_reviewed_arch(args, catalog, package["target"], step["target"])
+            active = apply_journal.verified(apply_journal.read(), step["id"], {"recovered": True})
         elif step["component"] == "paseo-relay" and step["action"] == "adopt-current" and active["command"] == "repair":
             record = relay_owner._record()
             paseo_home = Path(config_model.config_value(kconf, "PENNIX_PASEO_HOME"))
@@ -2876,7 +3290,8 @@ def cmd_recover(args: argparse.Namespace) -> int:
         elif component and step["action"] in {"install", "upgrade", "adopt", "adopt-upgrade"} and step["target"]:
             component["_lock_target"] = step["target"]
             args.kconf, args.codex_home = kconf, home
-            retry_arch = (step["action"] == "install" and component.get("package", {}).get("source") in {"official", "aur"}
+            retry_arch = (not reviewed_all and step["action"] == "install"
+                          and component.get("package", {}).get("source") in {"official", "aur"}
                           and owner_engine.package_absent(component))
             retry_plugin = (
                 active["command"] == "apply" and step["action"] == "install"
@@ -3031,10 +3446,20 @@ def parser() -> argparse.ArgumentParser:
     update.add_argument('--review-system-changes', action='store_true', help='重审同一 --all 事务中已证实系统升级的额外变化；不释放 unknown')
     update.add_argument("--version", help="指定 npm 组件的精确版本；默认仍跟踪登记通道")
     update.add_argument("--takeover", action="store_true", help="仅预览或确认接管已审阅的外部 Copilot CLI 安装")
-    update.add_argument("--confirm", help="确认 Ponytail、Paseo 插件更新或 Copilot 接管预览返回的摘要")
+    update_review = update.add_mutually_exclusive_group()
+    update_review.add_argument("--plan", action="store_true", help="只读审阅 --all 的精确写入步骤")
+    update_review.add_argument("--confirm", help="执行全量升级、Ponytail、Paseo 插件或 Copilot 接管的审阅摘要")
     update.add_argument("--config")
     update.add_argument("--json", action="store_true")
     update.set_defaults(function=cmd_update)
+    aur = sub.add_parser("aur-prepare", help="审阅及隔离构建已选 AUR 工件，不安装软件")
+    aur.add_argument("component")
+    aur_mode = aur.add_mutually_exclusive_group(required=True)
+    aur_mode.add_argument("--plan", action="store_true")
+    aur_mode.add_argument("--confirm", help="精确构建审阅摘要")
+    aur.add_argument("--config")
+    aur.add_argument("--json", action="store_true")
+    aur.set_defaults(function=cmd_aur_prepare)
     updates = sub.add_parser('updates', help='只读查询安装、锁、登记来源候选及完整系统升级影响')
     updates.add_argument('--config')
     updates.add_argument('--json', action='store_true')
@@ -3053,6 +3478,9 @@ def parser() -> argparse.ArgumentParser:
     install_tool.set_defaults(function=cmd_tool)
     update_tool = tool_sub.add_parser('update', help='从固定公开发行更新自身；切换后必须重新审阅组件')
     update_tool.add_argument('--json', action='store_true')
+    tool_review = update_tool.add_mutually_exclusive_group()
+    tool_review.add_argument("--plan", action="store_true", help="只读审阅当前工具发行候选")
+    tool_review.add_argument("--confirm", help="执行同一目标与候选的审阅摘要")
     update_tool.set_defaults(function=cmd_tool)
     uninstall_tool = tool_sub.add_parser("uninstall", help="卸载生命周期工具自身")
     uninstall_tool.add_argument("--yes", action="store_true")
@@ -3114,14 +3542,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
         mutating = (
-            args.command in {"apply", "repair", "update", "reconcile", "uninstall", "tool"}
+            args.command in {"apply", "repair", "update", "aur-prepare", "reconcile", "uninstall", "tool"}
             or args.command == "secrets" and args.secrets_command in {"edit", "import-ssh"}
             or args.command == "recover" and args.resolve is not None
             or (args.command == "config" and args.config_command in {"init", "edit"})
             or (args.command == "cache" and args.cache_command == "clean" and args.yes)
             or args.command == "paseo-plugins" and bool(getattr(args, "confirm", None))
         )
-        if mutating:
+        if mutating and not getattr(args, "plan", False):
             with owned_files.locked():
                 if args.command in {"apply", "repair", "update", "reconcile", "uninstall", "paseo-plugins"} or args.command == "tool" and args.tool_command in {"install", "update"}:
                     current_host = owner_engine.host.detect_host()
@@ -3131,7 +3559,7 @@ def main(argv: list[str] | None = None) -> int:
                     raise CliError("存在未完成 lifecycle 事务；先从原入口或 recover 恢复")
                 return args.function(args)
         return args.function(args)
-    except (CliError, update_inventory.UpdateError, system_devel_tools.ToolError, base_environment.BaseError, candidates.CandidateError, apply_journal.JournalError, connection_owners.ConnectionError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, paseo_plugins.PluginError, ponytail.PonytailError, relay_owner.RelayError, release_owner.ReleaseError, skill_collections.CollectionError, owner_engine.local_clients.ClientError, secret_store.SecretError, owned_files.OwnershipError, native_integrations.NativeIntegrationError, native_integrations.hook_integrations.HookError, OSError) as error:
+    except (CliError, arch_recovery.ArchCommitError, update_inventory.UpdateError, system_devel_tools.ToolError, base_environment.BaseError, candidates.CandidateError, apply_journal.JournalError, connection_owners.ConnectionError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, paseo_plugins.PluginError, ponytail.PonytailError, relay_owner.RelayError, release_owner.ReleaseError, skill_collections.CollectionError, owner_engine.local_clients.ClientError, secret_store.SecretError, owned_files.OwnershipError, native_integrations.NativeIntegrationError, native_integrations.hook_integrations.HookError, OSError) as error:
         print(f"pennix: {error}", file=sys.stderr)
         try:
             active = apply_journal.read()

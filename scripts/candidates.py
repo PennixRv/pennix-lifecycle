@@ -20,6 +20,10 @@ class CandidateError(ValueError):
     pass
 
 
+class SourceQueryError(CandidateError):
+    """The registered source could not provide a candidate."""
+
+
 SHA = re.compile(r"^[0-9a-f]{40}$")
 STABLE_VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 
@@ -172,13 +176,18 @@ def _gh_release(repo: str, tag: str | None) -> dict:
     if tag:
         command.append(tag)
     command += ["--repo", repo, "--json", "tagName,assets"]
-    result = _run(command)
+    try:
+        result = _run(command)
+    except CandidateError as error:
+        raise SourceQueryError(f"GitHub Release metadata unavailable: {repo}") from error
+    if result.returncode:
+        raise SourceQueryError(f"GitHub Release metadata unavailable: {repo}; verify gh authentication")
     try:
         value = json.loads(result.stdout)
     except (ValueError, TypeError) as error:
-        raise CandidateError(f"GitHub Release metadata unavailable: {repo}") from error
-    if result.returncode or not isinstance(value, dict) or not isinstance(value.get("tagName"), str):
-        raise CandidateError(f"GitHub Release metadata unavailable: {repo}; verify gh authentication")
+        raise CandidateError(f"GitHub Release metadata invalid: {repo}") from error
+    if not isinstance(value, dict) or not isinstance(value.get("tagName"), str):
+        raise CandidateError(f"GitHub Release metadata invalid: {repo}")
     return value
 
 
@@ -242,10 +251,15 @@ def resolve_release(component: dict, workspace: Path, target: dict | None = None
 
 def _git_head(repo: str, *, aur: bool = False) -> str:
     url = f"https://aur.archlinux.org/{repo}.git" if aur else f"https://github.com/{repo}.git"
-    result = _run(["git", "ls-remote", url, "HEAD"], timeout=45)
+    try:
+        result = _run(["git", "ls-remote", url, "HEAD"], timeout=45)
+    except CandidateError as error:
+        raise SourceQueryError(f"cannot query default branch: {repo}") from error
     head = result.stdout.split()
-    if result.returncode or not head or not SHA.fullmatch(head[0]):
-        raise CandidateError(f"cannot resolve default branch HEAD: {repo}")
+    if result.returncode or not head:
+        raise SourceQueryError(f"cannot resolve default branch HEAD: {repo}")
+    if not SHA.fullmatch(head[0]):
+        raise CandidateError(f"default branch HEAD is invalid: {repo}")
     return head[0]
 
 
@@ -285,7 +299,10 @@ def resolve_aur(component: dict, workspace: Path, target: dict | None = None) ->
     if not isinstance(version, str) or not isinstance(ref, str) or not SHA.fullmatch(ref):
         raise CandidateError(f"AUR candidate identity is incomplete: {name}")
     checkout = _checkout_aur(name, ref, workspace)
-    srcinfo = (checkout / ".SRCINFO").read_text(encoding="utf-8")
+    metadata = checkout / ".SRCINFO"
+    if metadata.is_symlink() or not metadata.is_file() or metadata.stat().st_size > 128 * 1024:
+        raise CandidateError(f"AUR metadata is not a bounded regular file: {name}")
+    srcinfo = metadata.read_text(encoding="utf-8")
     fields = {}
     package_names = set()
     for line in srcinfo.splitlines():

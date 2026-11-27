@@ -187,10 +187,22 @@ class AuditRegressions(unittest.TestCase):
                 paseo_service.preflight_candidate({"version": "wrong", "path": "/synthetic.tgz"})
             environment = run.call_args.kwargs["env"]
             self.assertNotEqual(environment["HOME"], str(self.root))
+            self.assertEqual(Path(environment["HOME"]).parent, Path.home())
+            self.assertEqual(environment["TMPDIR"], environment["HOME"])
             self.assertTrue(environment["CODEX_HOME"].startswith(environment["HOME"] + "/"))
             self.assertEqual(environment["NPM_CONFIG_USERCONFIG"], "/dev/null")
             self.assertIn("--ignore-scripts", run.call_args.args[0])
             self.assertEqual(probe.call_args.kwargs["environment"], environment)
+        for error in ("npm error code ENOSPC", "npm warn tar TAR_ENTRY_ERROR ENOSPC: no space left on device"):
+            with self.subTest(error=error), \
+                 patch.object(paseo_service.shutil, "which", return_value="/usr/bin/npm"), \
+                 patch.object(paseo_service.subprocess, "run", return_value=SimpleNamespace(
+                     returncode=1, stderr=error + "\nnpm error secret-message\n")), \
+                 patch.object(paseo_service, "skills") as probe:
+                with self.assertRaisesRegex(paseo_service.PaseoServiceError, "暂存空间不足.*ENOSPC") as result:
+                    paseo_service.preflight_candidate({"version": "0.18.0", "path": "/synthetic.tgz"})
+                self.assertNotIn("secret-message", str(result.exception))
+                probe.assert_not_called()
 
     def test_malformed_journal_is_a_diagnostic_failure(self):
         value = {"schema": 2, "command": [], "component": None, "config_digest": None,
