@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import tempfile
@@ -17,8 +18,10 @@ class UpdateError(ValueError):
     pass
 
 
-def run(command, *, timeout=120):
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+def run(command, *, timeout=120, noninteractive=False):
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+                               **({"stdin": subprocess.DEVNULL, "env": {**os.environ, "LC_ALL": "C"}}
+                                  if noninteractive else {}))
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except BaseException:
@@ -33,8 +36,8 @@ def run(command, *, timeout=120):
     return subprocess.CompletedProcess(command, process.returncode, stdout.decode(), stderr.decode())
 
 
-def installed_arch():
-    result = run(['pacman', '-Q'])
+def installed_arch(*, pacman="pacman"):
+    result = run([pacman, '-Q'])
     if result.returncode:
         raise UpdateError("无法读取已安装 Arch 包身份")
     return dict(line.split() for line in result.stdout.splitlines())
@@ -49,30 +52,35 @@ def sync_digest(directory):
     return digest.hexdigest()
 
 
-def arch():
+def arch(*, include_packages=()):
     """Use the pacman-contrib checkupdates procedure; never refresh the real DB."""
+    # The host-tool scope must not resolve package manager helpers from a
+    # project-controlled PATH. Keep the older update inventory API intact.
+    def native(command):
+        return f"/usr/bin/{command}" if include_packages else command
+
     try:
-        result = run(['pacman-conf', 'DBPath'])
+        result = run([native('pacman-conf'), 'DBPath'])
         if result.returncode or not result.stdout.strip():
             raise UpdateError('无法解析 pacman DBPath')
         real = Path(result.stdout.strip())
         before = sync_digest(real / 'sync')
-        installed = installed_arch()
+        installed = installed_arch(pacman=native('pacman')) if include_packages else installed_arch()
         with tempfile.TemporaryDirectory(prefix='pennix-checkupdates-') as directory:
             temporary = Path(directory)
             (temporary / 'local').symlink_to(real / 'local', target_is_directory=True)
-            result = run(['fakeroot', '--', 'pacman', '-Sy', '--disable-sandbox-filesystem',
+            result = run([native('fakeroot'), '--', native('pacman'), '-Sy', '--disable-sandbox-filesystem',
                           '--dbpath', directory, '--logfile', '/dev/null'])
             if result.returncode:
                 raise UpdateError('临时 Arch 数据库同步失败；真实数据库未作为同步目标')
-            result = run(['pacman', '-Sl', '--dbpath', directory])
+            result = run([native('pacman'), '-Sl', '--dbpath', directory])
             if result.returncode:
                 raise UpdateError('临时 Arch 数据库查询失败')
             available = {}
             for line in result.stdout.splitlines():
                 _repo, name, version, *_ = line.split()
                 available.setdefault(name, version)
-            result = run(['pacman', '-Qu', '--dbpath', directory])
+            result = run([native('pacman'), '-Qu', '--dbpath', directory])
             if result.returncode not in {0, 1} or result.returncode == 1 and result.stdout.strip():
                 raise UpdateError('Arch 可更新包查询失败')
             upgrades = []
@@ -81,13 +89,38 @@ def arch():
                 if arrow != '->' or installed.get(name) != old:
                     raise UpdateError('Arch 更新清单与安装身份不一致')
                 upgrades.append({'name': name, 'installed': old, 'available': new})
-        if sync_digest(real / 'sync') != before or installed_arch() != installed:
+            transaction = _arch_transaction(directory, installed, upgrades, include_packages) if include_packages else None
+        current = installed_arch(pacman=native('pacman')) if include_packages else installed_arch()
+        if sync_digest(real / 'sync') != before or current != installed:
             raise UpdateError('查询期间真实 Arch 数据库或已安装包发生变化；须重新审阅')
         return {'state': 'current', 'installed': installed, 'available': available, 'upgrades': upgrades,
-                'real_sync_sha256': before}
+                'real_sync_sha256': before, **({'transaction': transaction} if transaction is not None else {})}
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         return {'state': 'blocked', 'detail': str(error) if isinstance(error, UpdateError)
                 else 'Arch 只读查询失败或前置程序不可用', 'upgrades': []}
+
+
+def _arch_transaction(directory, installed, upgrades, requested):
+    # A print-only plan cannot accept replacements, removals or conflicts. Reject
+    # interactive questions and ambiguous output instead of assuming an add/upgrade.
+    fmt = "%r\t%n\t%v"
+    result = run(["/usr/bin/pacman", "-Sup", "--needed", "--dbpath", directory, "--print-format", fmt,
+                  "--", *requested], noninteractive=True)
+    if result.returncode or result.stderr.strip():
+        raise UpdateError("Arch 包计划含无法安全审阅的冲突、替换或诊断；不执行包事务")
+    rows = {}
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if (len(parts) != 3 or parts[0] not in {"core", "extra", "multilib"}
+                or not re.fullmatch(r"[a-z0-9][a-z0-9@._+-]*", parts[1])
+                or not re.fullmatch(r"[^\s/]+", parts[2]) or parts[1] in rows):
+            raise UpdateError("Arch 包计划格式、来源或目标不明确；不执行包事务")
+        repo, name, version = parts
+        rows[name] = {"repo": repo, "name": name, "installed": installed.get(name), "target": version}
+    if (not set(requested) <= rows.keys()
+            or any(rows.get(item["name"], {}).get("target") != item["available"] for item in upgrades)):
+        raise UpdateError("Arch 包计划未覆盖全部明确要求和系统升级；不执行包事务")
+    return sorted(rows.values(), key=lambda row: row["name"])
 
 
 def available(component, locked, system):

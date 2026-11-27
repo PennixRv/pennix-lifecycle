@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "packages": {
+    "gcc": ["gcc", "g++", "cc", "c++"],
+    "clang": ["clang", "clang++", "clang-tidy"],
+    "binutils": ["as", "ld", "ar", "ranlib", "nm", "readelf", "objdump", "objcopy", "size", "addr2line"],
+    "lld": ["ld.lld"],
+    "cmake": ["cmake", "ctest"],
+    "ninja": ["ninja"],
+    "make": ["make"],
+    "meson": ["meson"],
+    "pkgconf": ["pkg-config"],
+    "gdb": ["gdb"],
+    "valgrind": ["valgrind"],
+    "strace": ["strace"],
+    "procps-ng": ["ps"],
+    "iproute2": ["ss"],
+    "lsof": ["lsof"],
+    "perf": ["perf"],
+    "trace-cmd": ["trace-cmd"],
+    "bash": ["bash", "sh"],
+    "dash": ["dash"],
+    "busybox": ["busybox"],
+    "shellcheck": ["shellcheck"],
+    "python": ["python3"],
+    "git": ["git"],
+    "patch": ["patch"],
+    "file": ["file"],
+    "coreutils": ["mktemp", "sort"],
+    "findutils": ["find", "xargs"],
+    "grep": ["grep"],
+    "sed": ["sed"],
+    "gawk": ["awk"],
+    "diffutils": ["diff", "cmp"],
+    "util-linux": ["flock"]
+  },
+  "conditional": {
+    "perf": "离线可读不证明目标内核、硬件事件或采集权限可用",
+    "trace-cmd": "离线可读不证明 tracefs 或实时采集权限可用",
+    "busybox": "宿主 BusyBox 不证明目标镜像启用相同小程序",
+    "valgrind": "Arch 剥离的动态加载器可能需要匹配 Build ID 的调试符号；包已安装不代表 Memcheck 已运行"
+  }
+}

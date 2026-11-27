@@ -337,6 +337,9 @@ class ScopedCollectionTests(unittest.TestCase):
         emitter = patch.object(pennix, "_emit")
         self.emit = emitter.start()
         self.addCleanup(emitter.stop)
+        tools = patch.object(pennix.system_devel_tools, "inspect", return_value={"state": "ready", "missing": []})
+        self.tools = tools.start()
+        self.addCleanup(tools.stop)
         self.target = self.root / ".agents/skills" / self.key
 
     def archive(self, ref, text, *, commands=None):
@@ -432,6 +435,21 @@ class ScopedCollectionTests(unittest.TestCase):
         self.assertIsNone(pennix.apply_journal.read())
         self.assertFalse(self.target.exists())
         self.assertFalse((self.root / ".local/bin/unwanted").exists())
+
+    def test_missing_tools_block_collection_writes_without_starting_package_transaction(self):
+        self.select("y")
+        self.tools.return_value = {"state": "missing", "missing": ["meson"]}
+        self.cmd("plan")
+        value = self.emit.call_args.args[0]
+        self.assertEqual(value["components"][self.key]["state"], "missing")
+        self.assertEqual(value["components"][self.key]["action"], "blocked")
+        self.assertFalse(value["side_effects"]["system_upgrade"])
+        for action, words in [("apply", ()), ("update", (self.key,))]:
+            with self.subTest(action=action), self.assertRaisesRegex(pennix.CliError, "system-devel-tools"):
+                self.cmd(action, *words)
+        self.download_mock.assert_not_called()
+        self.assertFalse(self.target.exists())
+        self.assertIsNone(pennix.apply_journal.read())
 
     def test_recover_proven_restore_and_preserve_unknown(self):
         self.select("y")

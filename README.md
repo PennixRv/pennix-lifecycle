@@ -255,7 +255,9 @@ AoE 的 Codex Hook 由 Lifecycle 按归属管理。NAS 与其他主机上的服�
 
 日常维护先运行只读 `pennix updates --json`，分别查看实际安装、锁定身份、登记来源候选、配置接入与重启影响，以及全部 Arch 系统包的可更新清单。Arch 查询复用官方 checkupdates 的临时数据库原则，使用 pacman-conf、fakeroot 和 pacman，核对真实同步库及已安装包前后不变；不写真实同步库。缺少能力或来源查询失败显示 blocked/unknown，不当作最新。固定集合仍跟踪 catalog 中的固定提交；允许保持外部归属的官方依赖单独标记 external。
 
-`pennix-system-devel-skills` 默认关闭。只首装这一集合时，先在 `workflow.config` 选择它，再审阅 `pennix plan --component pennix-system-devel-skills --json`，随后执行 `pennix apply --component pennix-system-devel-skills`。定向入口只处理一个固定文档型集合，已精确匹配时不变更，不运行全局升级、服务或其他组件；锁、归属或事务不符时停止。升级仍用 `pennix update pennix-system-devel-skills`。取消选择不删除共享集合；显式卸载使用 `pennix uninstall pennix-system-devel-skills --confirm pennix-system-devel-skills`。配置仍选择时，日后再次 `apply` 可重装。新建 Codex 会话检查用户共享目录 `$HOME/.agents/skills/pennix-system-devel-skills` 是否被发现，不需要执行 Paseo 官方 Skills 安装。
+`pennix-system-devel-skills` 默认关闭；选择它同时启用宿主工具要求。先用 `pennix plan --scope system-devel-tools` 审阅完整工具基线及缺项。缺包时用 `pennix apply --scope system-devel-tools` 进入仅限官方包的原生审阅；Arch 补包可能需要完整系统升级，实际事务不同就拒绝。工具已齐或未选集合时，该作用域不升级系统、不安装或接管已有包。`pennix check --scope system-devel-tools` 检查包和实际 PATH，不代替代表操作测试。
+
+工具就绪后，首装用 `pennix plan --component pennix-system-devel-skills --json` 和 `pennix apply --component pennix-system-devel-skills`，升级用 `pennix update pennix-system-devel-skills`。这些定向入口不隐式执行系统升级、服务或其他组件动作；锁、归属或事务不符时停止。取消选择不删除共享集合或已装的系统包；显式卸载集合使用 `pennix uninstall pennix-system-devel-skills --confirm pennix-system-devel-skills`，也不撤回共享系统包。新建 Codex 会话检查共享集合发现与工具实际操作，不需要执行 Paseo 官方 Skills 安装。
 
 需要更新时使用 `pennix update --all`，在真实终端统一审阅并确认。原生执行复用单一 journal 冻结候选、配置、锁、中央秘密摘要和 catalog，确认期间变化即停止。官方包必须处于完整系统升级边界内；清单包含非工作流包。实际系统包集合超出清单、配置漂移或副作用 unknown 时保留事务并停止，不自动接管或盲目重放。仅对同一事务已证实完成的系统升级，可用 `pennix update --all --review-system-changes` 展示额外实际差异并明确重新接受，原审阅仍保留；该入口不释放 unknown。已证实步骤续跑时跳过。`pennix update <component>` 保持原有单组件行为；`reconcile` 仍负责接受可证明的同源外部更新。
 

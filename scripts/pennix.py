@@ -41,11 +41,13 @@ import owned_files
 import secret_store
 import native_integrations
 import update_inventory
+import system_devel_tools
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "references" / "catalog.json"
 SCOPED_COLLECTION = "pennix-system-devel-skills"
+TOOLS_NEXT = f"先运行 pennix plan --scope {system_devel_tools.SCOPE} 核对工具；缺包使用同作用域 apply"
 APPLY_ORDER = [
     "codex-cli", "copilot-cli", "trellis-cli", "pnpm", "context-mode", "codegraph-cli", "paseo-cli", "trellis-paseo-adapter",
     "ponytail-plugin", "cch-status", "tmux", "tmux-config", "aoe", "uv", "yazi",
@@ -521,6 +523,11 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             if not owner_engine._plugin_owned(component_id, component, args.codex_home):
                 action = "blocked"
                 status["detail"] = "lock 不代表归属；plugin 需要独立可信 receipt 和专用接管确认"
+        if component_id == SCOPED_COLLECTION:
+            status["tooling"] = system_devel_tools.inspect(component_id in selected)
+            if component_id in selected and status["tooling"]["state"] != "ready":
+                status["tooling"]["next"] = TOOLS_NEXT
+                action = "blocked"
         components[component_id] = {**status, "selected": component_id in selected, "action": action}
     for key, target in getattr(args, 'update_targets', {}).items():
         item = components[key]
@@ -640,6 +647,28 @@ def _emit(value: Any, as_json: bool) -> None:
     if as_json:
         print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
         return
+    if isinstance(value, dict) and value.get("scope") == system_devel_tools.SCOPE and "tooling" in value:
+        tooling = value["tooling"]
+        print(f"系统开发工具: {tooling['state']}；要求 {len(tooling['packages'])} 个包提供项")
+        if tooling["missing"]:
+            print(f"直接缺包: {', '.join(tooling['missing'])}")
+        for row in tooling["packages"].values():
+            for name, entry in row["entries"].items():
+                if entry["state"] != "system-command":
+                    print(f"入口 {name}: {entry['state']}（{entry['visible'] or 'PATH 未找到'}）")
+        if value.get("packages_in_transaction"):
+            print(f"待审阅的完整 Arch 事务：{len(value['packages_in_transaction'])} 项")
+            for row in value["packages_in_transaction"]:
+                print(f"  {row['repo']}/{row['name']}: {row['installed'] or '新增'} → {row['target']}")
+        if value["transaction_pending"]:
+            print("存在未结束事务；使用 pennix recover 核对")
+        if value.get("blocked"):
+            print(value["blocked"])
+        if tooling.get("next"):
+            print(tooling["next"])
+        if tooling["selected"]:
+            print("仅核对包、执行入口和预览；未运行工具功能验证。")
+        return
     if isinstance(value, dict) and "components" in value and "config" in value:
         print(f"配置: {value['config']}")
         print(f"Codex: {value['codex_home']}")
@@ -647,6 +676,13 @@ def _emit(value: Any, as_json: bool) -> None:
             print(f"{key}: {item['action']} ({item['state']})")
             if item.get("detail"):
                 print(f"  {item['detail']}")
+            if item.get("tooling"):
+                tooling = item["tooling"]
+                print(f"  工具预设: {tooling['state']}")
+                if tooling["missing"]:
+                    print(f"  缺包: {', '.join(tooling['missing'])}")
+                if tooling.get("next"):
+                    print(f"  {tooling['next']}")
             if key == "base-environment":
                 print(f"  template: {item.get('template_source')} @ {item.get('template_version')}")
                 for change in item.get("files", []):
@@ -695,6 +731,8 @@ def _ensure_connection_dependencies(selected: set[str], connections: dict[str, A
 def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_id: str, operation: str, *, repair: bool = False,
                    candidate: dict[str, Any] | None = None) -> str:
     _verify_inputs(args)
+    if component_id == SCOPED_COLLECTION and operation in {"install", "upgrade"}:
+        _require_system_devel_tools()
     if operation in {"install", "upgrade", "uninstall"}:
         _delegation_preflight(args, component_id, operation)
     component = catalog["components"][component_id]
@@ -832,9 +870,14 @@ def _scoped_collection_plan(args: argparse.Namespace) -> tuple[dict, dict, dict]
         action = "none"
     else:
         raise CliError(f"定向首装拒绝 {key} 的现有状态 {state} 或不匹配的锁；保留现场，不升级或修复（{detail}）")
+    tooling = system_devel_tools.inspect(True)
+    if tooling["state"] != "ready":
+        action = "blocked"
+        tooling["next"] = TOOLS_NEXT
     return ({"operation": "plan", "scope": "component", "component": key, "config": str(config),
              "codex_home": str(args.codex_home),
-             "components": {key: {"selected": True, "state": state, "action": action, "target": target}},
+             "components": {key: {"selected": True, "state": state, "action": action, "target": target,
+                                  "tooling": tooling}},
              "side_effects": {"system_upgrade": False}}, catalog, step)
 
 
@@ -854,6 +897,8 @@ def _check_scoped_collection_transaction(args: argparse.Namespace, active: dict,
 def _apply_scoped_collection(args: argparse.Namespace) -> int:
     value, catalog, step = _scoped_collection_plan(args)
     key, target = step["component"], step["target"]
+    if value["components"][key]["action"] == "blocked":
+        raise CliError(TOOLS_NEXT)
     if value["components"][key]["action"] == "none":
         _verify_inputs(args)
         active = apply_journal.read()
@@ -887,7 +932,95 @@ def _apply_scoped_collection(args: argparse.Namespace) -> int:
     return 0
 
 
+def _require_system_devel_tools():
+    if system_devel_tools.inspect(True)["state"] != "ready":
+        raise CliError(TOOLS_NEXT)
+
+
+def _tools_projection(args, *, preview=False):
+    kconf, _, catalog = _load(args)
+    args.kconf = kconf
+    tooling = system_devel_tools.inspect(SCOPED_COLLECTION in config_model.selected_components(kconf))
+    output = {"operation": args.command, "scope": system_devel_tools.SCOPE, "tooling": tooling,
+              "side_effects": {"system_upgrade": False}, "transaction_pending": apply_journal.read() is not None}
+    target = None
+    if tooling["state"] == "missing":
+        tooling["next"] = TOOLS_NEXT
+        if preview and not output["transaction_pending"]:
+            try:
+                target = system_devel_tools.review(tooling["missing"])
+            except system_devel_tools.ToolError as error:
+                output["blocked"] = str(error)
+            else:
+                output["packages_in_transaction"] = target["transaction"]
+                output["side_effects"]["system_upgrade"] = True
+    return output, target, catalog
+
+
+def _finish_scoped_tools(args, catalog, target):
+    _verify_inputs(args)
+    if not _scope_tools_complete(target):
+        raise CliError("包版本、工具入口或数据库一致性未证明；保留事务，不重新执行升级")
+    _refresh_arch_receipts(args, catalog, changed={
+        row["name"]: (row["installed"], row["target"]) for row in target["transaction"]
+        if row["installed"] is not None and row["installed"] != row["target"]})
+
+
+def _scope_tools_complete(target):
+    return (system_devel_tools.manifest_digest() == target["manifest_sha256"]
+            and system_devel_tools.installed_packages() == system_devel_tools.expected_packages(target)
+            and update_inventory.run(["/usr/bin/pacman", "-Dk"], noninteractive=True).returncode == 0
+            and system_devel_tools.inspect(True)["state"] == "ready")
+
+
+def _apply_system_devel_tools(args):
+    scope, step = system_devel_tools.SCOPE, system_devel_tools.STEP
+    output, target, catalog = _tools_projection(args, preview=sys.stdin.isatty() and sys.stdout.isatty())
+    if output["transaction_pending"]:
+        raise CliError("存在未完成的生命周期事务；先使用 pennix recover 核验，不重放包事务")
+    state = output["tooling"]["state"]
+    if state in {"ready", "not-selected"}:
+        _emit({"operation": "apply", "scope": scope, "result": "no-op", "state": state}, args.json)
+        return 0
+    if target is None:
+        raise CliError(output.get("blocked", "包事务需要可核验的工具状态、包候选和原生 TTY；" + TOOLS_NEXT))
+    _emit(output, args.json)
+    print("下一步会刷新真实 Arch 同步库。请在 pacman 的最终提示核对实际包事务，若与审阅清单不同，必须拒绝。")
+    if input("允许进入原生包审阅？输入 yes 继续: ").strip() != "yes":
+        return 1
+    _verify_inputs(args)
+    if system_devel_tools.review(output["tooling"]["missing"]) != target:
+        raise CliError("候选在确认期间变化；请重新审阅，未写入包事务")
+    active = _start_transaction(args, "apply", scope, [
+        {"id": step, "component": scope, "action": "provision", "target": target},
+        {"id": f"{step}:record", "component": scope, "action": "record", "target": {}},
+    ])
+
+    active = apply_journal.started(active, step)
+    result = subprocess.run(["/usr/bin/sudo", "/usr/bin/pacman", "-Syu", "--needed", "--", *target["requested"]],
+                            check=False)
+    actual = system_devel_tools.installed_packages()
+    if actual == target["before"]:
+        active = apply_journal.verified(active, step, {"exit_code": result.returncode, "effect": "no-package-change"})
+        apply_journal.verified(active, f"{step}:record", {"effect": "not-required"})
+        apply_journal.clear()
+        _emit({"operation": "apply", "scope": scope, "result": "no-package-change",
+               "sync_database_may_have_changed": True}, args.json)
+        return 1
+    if result.returncode or actual != system_devel_tools.expected_packages(target):
+        apply_journal.unknown(active, step)
+        raise CliError("原生包事务未报告成功或偏离已审阅范围；保留现场，不重新执行升级")
+    active = apply_journal.verified(active, step, {"exit_code": 0, "effect": "reviewed-packages-installed"})
+    active, _ = _journal_mutate(active, f"{step}:record", lambda: _finish_scoped_tools(args, catalog, target))
+    apply_journal.clear()
+    _emit({"operation": "apply", "scope": scope, "result": "packages-verified"}, args.json)
+    return 0
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
+    if getattr(args, "scope", None) == system_devel_tools.SCOPE:
+        _emit(_tools_projection(args, preview=True)[0], args.json)
+        return 0
     if getattr(args, "component", None):
         _emit(_scoped_collection_plan(args)[0], True)
         return 0
@@ -897,12 +1030,19 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    if getattr(args, "scope", None) == system_devel_tools.SCOPE:
+        _emit(_tools_projection(args)[0], args.json)
+        return 0
     value = _plan(args)
     _emit(value, args.json)
     return 0
 
 
 def cmd_check(args: argparse.Namespace) -> int:
+    if getattr(args, "scope", None) == system_devel_tools.SCOPE:
+        output, _, _ = _tools_projection(args)
+        _emit(output, args.json)
+        return int(output["transaction_pending"] or output["tooling"]["state"] not in {"ready", "not-selected"})
     value = _plan(args)
     bad = []
     for item in value["components"].values():
@@ -1068,7 +1208,7 @@ def _retry_unknown_update(active: dict, step_id: str, state: str) -> dict:
     raise CliError("update 的副作用未知；版本相同不能证明完整恢复，需使用 recover 核验后置条件")
 
 
-def _refresh_arch_receipts(args: argparse.Namespace, catalog: dict[str, Any]) -> None:
+def _refresh_arch_receipts(args: argparse.Namespace, catalog: dict[str, Any], *, changed=None) -> None:
     updates = []
     for component_id, component in catalog["components"].items():
         if getattr(args, "scope", None) == "base" and component_id not in base_environment.SCOPE:
@@ -1078,9 +1218,20 @@ def _refresh_arch_receipts(args: argparse.Namespace, catalog: dict[str, Any]) ->
         package = component.get("package") if component else None
         if not isinstance(package, dict) or package.get("source") != "official":
             continue
-        if owner_engine._package_receipt(component_id, component) is None:
+        if changed is not None and package["name"] not in changed:
+            continue
+        receipt = owner_engine._package_receipt(component_id, component)
+        if receipt is None:
             continue
         identity = owner_engine.package_identity(component)
+        if changed is not None:
+            before, after = changed[package["name"]]
+            locked = args.component_lock["components"].get(component_id, {})
+            if (identity["version"] != after or receipt["version"] not in {before, after}
+                    or locked.get("source") != component["lock_source"] or locked.get("version") not in {before, after}):
+                raise CliError(f"{component_id} 的原生包回执或锁与已审阅事务不一致；不确认归属")
+            if receipt["version"] == after and locked["version"] == after:
+                continue
         updates.append((component_id, component, identity["version"]))
     for component_id, component, version in updates:
         owner_engine._write_package_receipt(component_id, component, version)
@@ -1167,6 +1318,8 @@ def _preflight_pending_owners(args: argparse.Namespace, value: dict, catalog: di
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
+    if getattr(args, "scope", None) == system_devel_tools.SCOPE:
+        return _apply_system_devel_tools(args)
     if getattr(args, "component", None):
         return _apply_scoped_collection(args)
     value = _plan(args)
@@ -1538,6 +1691,8 @@ def cmd_repair(args: argparse.Namespace) -> int:
     component = catalog["components"][args.component]
     if args.component not in config_model.selected_components(kconf):
         raise CliError(f"组件未在 workflow.config 中选择: {args.component}")
+    if args.component == SCOPED_COLLECTION:
+        _require_system_devel_tools()
     if args.expected_sha256 is not None and args.component not in {"codex-agents", "codex-config"} and component.get("delivery") != "client":
         raise CliError("--expected-sha256 只用于审阅后的配置、relay 当前登记或固定本地客户端升级")
     if component.get("delivery") in {"package", "plugin", "client", "collection"}:
@@ -2014,6 +2169,8 @@ def cmd_update(args: argparse.Namespace) -> int:
         raise CliError(f"不支持更新的组件: {args.component}")
     if args.component not in config_model.selected_components(kconf):
         raise CliError(f"组件未在 workflow.config 中选择: {args.component}")
+    if args.component == SCOPED_COLLECTION:
+        _require_system_devel_tools()
     version = getattr(args, "version", None)
     if version is not None:
         if component.get("package", {}).get("source") != "npm":
@@ -2589,6 +2746,8 @@ def cmd_recover(args: argparse.Namespace) -> int:
         return _ponytail_recover(args, catalog["components"][ponytail.KEY], active, step)
     if active["lock_digest"] != apply_journal.digest(args.component_lock_path):
         raise CliError("锁文件与事务最后已证实的检查点不同；保留现场，不推断外部修改归属")
+    if active["command"] == "apply" and active["component"] == system_devel_tools.SCOPE:
+        return _recover_scoped_tools(args, catalog, active, step)
     if args.resolve in {"not-started", "restored"}:
         required = "none" if args.resolve == "not-started" else "restored"
         if step['component'] == 'pnpm' and args.resolve == 'restored' and step['status'] != 'verified' and pnpm_migration.pending():
@@ -2784,6 +2943,37 @@ def cmd_recover(args: argparse.Namespace) -> int:
     return 0
 
 
+def _recover_scoped_tools(args, catalog, active, step):
+    package_step = system_devel_tools.STEP
+    record_step = f"{package_step}:record"
+    if [item["id"] for item in active["steps"]] != [package_step, record_step]:
+        raise CliError("宿主工具事务结构不匹配；保留现场")
+    provision, record = active["steps"]
+    target = provision["target"]
+    if (args.resolve == "not-started" and step["id"] == package_step
+            and provision["status"] == record["status"] == "pending"
+            and system_devel_tools.installed_packages() == target["before"]):
+        active = apply_journal.verified(active, package_step, {"effect": "not-started"})
+        active = apply_journal.verified(active, record_step, {"effect": "not-required"})
+    elif args.resolve == "completed" and step["id"] == record_step and provision["status"] == "verified":
+        effect = (provision["observed"] or {}).get("effect")
+        if effect == "reviewed-packages-installed":
+            _finish_scoped_tools(args, catalog, target)
+            active = apply_journal.verified(apply_journal.read(), record_step, {"recovered": True})
+        elif (effect in {"not-started", "no-package-change"}
+                and system_devel_tools.installed_packages() == target["before"]):
+            active = apply_journal.verified(active, record_step, {"effect": "not-required"})
+        else:
+            raise CliError("未证明原生包事务结果；保留现场")
+    else:
+        raise CliError("原生包事务未留下可核验的成功回执；不重放、不凭版本推断，按已验收恢复点处置")
+    if not apply_journal.complete(active):
+        raise CliError("宿主工具事务仍有未核验步骤；保留现场")
+    apply_journal.clear()
+    _emit({"operation": "recover", "scope": system_devel_tools.SCOPE, "state": "idle"}, args.json)
+    return 0
+
+
 def cmd_paseo_plugins(args: argparse.Namespace) -> int:
     try:
         return paseo_plugins.command(args, _load, _verify_inputs, _write_lock, _start_transaction, _emit)
@@ -2822,7 +3012,8 @@ def parser() -> argparse.ArgumentParser:
         child.add_argument("--config")
         child.add_argument("--json", action="store_true")
         scope = child.add_mutually_exclusive_group()
-        scope.add_argument("--scope", choices=["base"], help="仅处理基础能力和共享依赖，不撤回范围外组件")
+        scope.add_argument("--scope", choices=["base", system_devel_tools.SCOPE],
+                           help="仅处理基础能力，或只处理随系统开发 Skill 选择启用的宿主工具")
         if name in {"plan", "apply"}:
             scope.add_argument("--component", choices=[SCOPED_COLLECTION], help="只计划或首装指定文档型集合")
         child.set_defaults(function=function)
@@ -2940,7 +3131,7 @@ def main(argv: list[str] | None = None) -> int:
                     raise CliError("存在未完成 lifecycle 事务；先从原入口或 recover 恢复")
                 return args.function(args)
         return args.function(args)
-    except (CliError, update_inventory.UpdateError, base_environment.BaseError, candidates.CandidateError, apply_journal.JournalError, connection_owners.ConnectionError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, paseo_plugins.PluginError, ponytail.PonytailError, relay_owner.RelayError, release_owner.ReleaseError, skill_collections.CollectionError, owner_engine.local_clients.ClientError, secret_store.SecretError, owned_files.OwnershipError, native_integrations.NativeIntegrationError, native_integrations.hook_integrations.HookError, OSError) as error:
+    except (CliError, update_inventory.UpdateError, system_devel_tools.ToolError, base_environment.BaseError, candidates.CandidateError, apply_journal.JournalError, connection_owners.ConnectionError, config_model.ConfigError, codex_config.CodexConfigError, path_env.PathEnvError, paseo_service.PaseoServiceError, paseo_plugins.PluginError, ponytail.PonytailError, relay_owner.RelayError, release_owner.ReleaseError, skill_collections.CollectionError, owner_engine.local_clients.ClientError, secret_store.SecretError, owned_files.OwnershipError, native_integrations.NativeIntegrationError, native_integrations.hook_integrations.HookError, OSError) as error:
         print(f"pennix: {error}", file=sys.stderr)
         try:
             active = apply_journal.read()
