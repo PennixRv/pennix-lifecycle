@@ -233,17 +233,22 @@ def receipt(component):
         raise PonytailError("读取期间 Ponytail 回执改变")
     if raw is None:
         return None, None
+    identity = owned_files.target_identity()
     if (not isinstance(record, dict) or record.get("component") != KEY or
             record.get("id") != component["plugin"]["id"]
-            or record.get("target") != owned_files.target_identity()):
+            or ("target" in record and record["target"] != identity)):
         raise PonytailError("Ponytail 回执与当前目标不符")
     entry = {k: record[k] for k in ("source", "version", "ref", "sha256") if k in record}
     if type(record.get("schema")) is int and record["schema"] == 2 and formal(entry, component):
         if record == receipt_record(component, entry):
             return record, raw
     if (type(record.get("schema")) is int and record["schema"] == 1 and
-            set(record) == {"schema", "component", "id", "target", "source", "version", "ref"}
+            set(record) - {"target"} == {"schema", "component", "id", "source", "version", "ref"}
             and record["source"] == component["lock_source"] and version(record["version"]) and commit(record["ref"])):
+        if "target" not in record:
+            if raw != owned_files.json_bytes(record):
+                raise PonytailError("无目标的 Ponytail 旧回执格式不一致；保留现场")
+            owned_files.bind_target(Path(identity["codex_home"]), require_existing=True)
         return record, raw
     raise PonytailError("Ponytail 回执格式无效")
 
@@ -259,6 +264,12 @@ def matches_receipt(lock, record):
     return lock == entry if record["schema"] == 2 else candidates.matches(lock, entry)
 
 
+def matches_legacy(state, record):
+    return (state["market"] == {"kind": "legacy", "ref": record["ref"]}
+            and state["file"] is None and state["payload"] is not None
+            and ("target" in record or state["payload"] == {"version": record["version"], "ref": record["ref"]}))
+
+
 def inspect(component, home):
     native = Native(component, home)
     state = native.observe()
@@ -270,8 +281,7 @@ def inspect(component, home):
     if record and record["schema"] == 2 and native.matches(state, entry):
         return {**result, "state": "match" if entry == target else "outdated", "detail": entry["version"],
                 "ownership": "lifecycle", "release_tag": record["tag"]}
-    if (record and record["schema"] == 1 and state["market"] == {"kind": "legacy", "ref": record["ref"]}
-            and state["payload"] and state["file"] is None and matches_receipt(target, record)):
+    if record and record["schema"] == 1 and matches_legacy(state, record) and matches_receipt(target, record):
         return {**result, "state": "plugin-migration-required",
                 "detail": "旧登记待迁移：pennix update ponytail-plugin --json"}
     if record is None and native.empty(state):

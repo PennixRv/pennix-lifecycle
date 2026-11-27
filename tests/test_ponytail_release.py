@@ -97,13 +97,18 @@ class LifecycleTests(unittest.TestCase):
         self.args.config_path.write_bytes(b"isolated config\n")
         self.args.config_snapshot = self.args.config_path.read_bytes()
 
-    def set_legacy_records(self):
+    def set_legacy_records(self, *, bound_receipt=True):
         record = {"schema": 1, "component": ponytail.KEY, "id": COMPONENT["plugin"]["id"],
-                  "target": owned_files.target_identity(), **OLD}
+                  **OLD}
+        if bound_receipt:
+            record["target"] = owned_files.target_identity()
+        else:
+            owned_files.bind_target(self.home, register=True)
         owned_files.replace(ponytail.receipt_path(), owned_files.json_bytes(record), None)
-        self.args.component_lock = {"schema": 1, "components": {ponytail.KEY: OLD_LOCK}}
+        self.args.component_lock = {"schema": 1, "components": {ponytail.KEY: OLD_LOCK if bound_receipt else OLD}}
         self.args.component_lock_snapshot = owned_files.json_bytes(self.args.component_lock)
-        owned_files.replace(self.args.component_lock_path, self.args.component_lock_snapshot, None)
+        owned_files.replace(self.args.component_lock_path, self.args.component_lock_snapshot,
+                            owned_files.read(self.args.component_lock_path, private=True))
         return record
 
     def sync_args(self):
@@ -155,6 +160,69 @@ class LifecycleTests(unittest.TestCase):
             native.observe()
         call.assert_not_called()
 
+    def test_targetless_legacy_requires_exact_receipt_and_existing_local_binding(self):
+        record = self.set_legacy_records(bound_receipt=False)
+        receipt_path = ponytail.receipt_path()
+        binding = owned_files.shared_root() / "target.json"
+        raw_binding = binding.read_bytes()
+        for wrong_binding in (None, {**json.loads(raw_binding), "codex_home": str(self.root / "other")}):
+            with self.subTest(wrong_binding=wrong_binding):
+                owned_files.replace(binding, None if wrong_binding is None else owned_files.json_bytes(wrong_binding), raw_binding)
+                with self.assertRaises(owned_files.OwnershipError):
+                    ponytail.receipt(COMPONENT)
+                owned_files.replace(binding, raw_binding, owned_files.read(binding, private=True))
+        original = owned_files.json_bytes(record)
+        for invalid in (owned_files.json_bytes({**record, "target": None}),
+                        owned_files.json_bytes({**record, "target": {}}),
+                        owned_files.json_bytes({**record, "foreign": True}),
+                        owned_files.json_bytes({**record, "source": "external"}),
+                        owned_files.json_bytes({**TARGET, **{k: record[k] for k in ("component", "id")},
+                                                "schema": 2, "tag": "v5.3.3"}),
+                        b" " + original):
+            with self.subTest(invalid=invalid):
+                owned_files.replace(receipt_path, invalid, original)
+                with self.assertRaises(ponytail.PonytailError):
+                    ponytail.receipt(COMPONENT)
+                owned_files.replace(receipt_path, original, invalid)
+        receipt_path.chmod(0o644)
+        with self.assertRaises(owned_files.OwnershipError):
+            ponytail.receipt(COMPONENT)
+        receipt_path.chmod(0o600)
+        self.assertEqual(ponytail.receipt(COMPONENT), (record, original))
+
+    def test_targetless_legacy_status_and_update_require_matching_payload_without_adoption(self):
+        record = self.set_legacy_records(bound_receipt=False)
+        component = {**COMPONENT, "_lock_target": OLD}
+        before = {"market": {"kind": "legacy", "ref": OUTER}, "file": None,
+                  "payload": {"version": "5.3.3", "ref": OUTER}}
+        with patch.object(ponytail.Native, "observe", return_value=before) as observe, \
+                patch.object(ponytail.Native, "call") as call, \
+                patch.object(candidates, "resolve", return_value={**TARGET, "tag": "v5.3.3"}) as resolve, \
+                patch.object(ponytail, "prove_retrievable"), patch.object(pennix, "_emit") as emit:
+            self.assertEqual(ponytail.status(component, self.home)[0], "plugin-migration-required")
+            self.assertFalse(ponytail.owned(component, self.home))
+            for operation in ("install", "upgrade", "uninstall"):
+                with self.subTest(operation=operation), self.assertRaises(ponytail.PonytailError):
+                    ponytail.operate(component, self.home, operation, None)
+            for altered in ({**before, "payload": {**before["payload"], "ref": DRIFT}},
+                            {**before, "payload": {**before["payload"], "version": "5.3.2"}},
+                            {**before, "market": {"kind": "legacy", "ref": DRIFT}}):
+                observe.return_value = altered
+                self.assertEqual(ponytail.status(component, self.home)[0], "blocked")
+                with self.assertRaisesRegex(pennix.CliError, "不符合迁移条件"):
+                    pennix._ponytail_update(self.args, component)
+            observe.return_value = before
+            self.args.component_lock["components"][ponytail.KEY] = {**OLD_LOCK, "ref": DRIFT}
+            with self.assertRaisesRegex(pennix.CliError, "回执不完整"):
+                pennix._ponytail_update(self.args, component)
+            resolve.assert_not_called()
+            self.sync_args()
+            self.assertEqual(pennix._ponytail_update(self.args, component), 0)
+            self.assertEqual(emit.call_args.args[0]["status"], "review-required")
+            self.assertEqual(ponytail.receipt(COMPONENT)[0], record)
+            self.assertIsNone(apply_journal.read())
+            call.assert_not_called()
+
     @unittest.skipUnless(os.environ.get("PENNIX_PONYTAIL_NATIVE") == "1", "需要显式允许隔离 Codex 和公开 Git 访问")
     def test_native_both_legacy_payloads_and_forward_or_rollback(self):
         native = ponytail.Native(COMPONENT, self.home)
@@ -165,9 +233,13 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(ponytail.status({**COMPONENT, "_lock_target": desired}, self.home)[0], "match")
         ponytail.operate(COMPONENT, self.home, "uninstall", None)
         self.assertTrue(native.empty(native.observe()))
-        record = self.set_legacy_records()
-        for old, resolution in ((OUTER, "restored"), (DRIFT, "restored"), (DRIFT, "completed")):
-            with self.subTest(old=old, resolution=resolution):
+        for old, resolution, bound in ((OUTER, "restored", True), (DRIFT, "restored", True),
+                                       (DRIFT, "completed", True), (OUTER, "restored", False),
+                                       (OUTER, "completed", False), (OUTER, "update", False)):
+            with self.subTest(old=old, resolution=resolution, bound=bound):
+                record = self.set_legacy_records(bound_receipt=bound)
+                previous = self.args.component_lock["components"][ponytail.KEY]
+                original_receipt = ponytail.receipt_path().read_bytes()
                 native.write(old, None)
                 native.call("marketplace", "add", str(native.root))
                 native.install({"ref": old, "version": "5.3.3"})
@@ -176,9 +248,21 @@ class LifecycleTests(unittest.TestCase):
                 native.call("marketplace", "add", native.url, "--ref", OUTER)
                 before = native.observe()
                 self.assertEqual(before["payload"]["ref"], old)
-                self.assertEqual(ponytail.status({**COMPONENT, "_lock_target": OLD_LOCK}, self.home)[0], "plugin-migration-required")
+                self.assertEqual(ponytail.status({**COMPONENT, "_lock_target": previous}, self.home)[0], "plugin-migration-required")
                 proposed = {"schema": 1, "components": {ponytail.KEY: desired}}
-                target = {"before": before, "previous": OLD_LOCK, "receipt_before": record, "desired": desired,
+                if resolution == "update":
+                    with patch.object(pennix, "_emit") as emit:
+                        self.args.confirm = None
+                        self.assertEqual(pennix._ponytail_update(self.args, COMPONENT), 0)
+                        self.args.confirm = emit.call_args.args[0]["review_sha256"]
+                        self.assertEqual(pennix._ponytail_update(self.args, COMPONENT), 0)
+                    self.sync_args()
+                    self.assertIsNone(apply_journal.read())
+                    self.assertTrue(native.matches(native.observe(), desired))
+                    self.assertEqual(ponytail.receipt(COMPONENT)[0], ponytail.receipt_record(COMPONENT, desired))
+                    self.assertEqual(self.args.component_lock["components"][ponytail.KEY], desired)
+                    continue
+                target = {"before": before, "previous": previous, "receipt_before": record, "desired": desired,
                           "lock_before": apply_journal.digest(self.args.component_lock_path),
                           "lock_after": hashlib.sha256(owned_files.json_bytes(proposed)).hexdigest()}
                 step = {"id": f"{ponytail.KEY}:release", "component": ponytail.KEY, "action": "pin-release", "target": target}
@@ -202,10 +286,13 @@ class LifecycleTests(unittest.TestCase):
                 if resolution == "restored":
                     self.assertEqual(native.observe(), before)
                     self.assertEqual(ponytail.receipt(COMPONENT)[0], record)
-                    self.assertEqual(self.args.component_lock["components"][ponytail.KEY], OLD_LOCK)
+                    self.assertEqual(ponytail.receipt_path().read_bytes(), original_receipt)
+                    self.assertEqual(self.args.component_lock["components"][ponytail.KEY], previous)
                     native.call("remove", native.plugin)
                     native.call("marketplace", "remove", native.market)
+                    owned_files.replace(ponytail.receipt_path(), None, original_receipt)
                 else:
                     self.assertTrue(native.matches(native.observe(), desired))
                     self.assertEqual(self.args.component_lock["components"][ponytail.KEY], desired)
                     self.assertEqual(ponytail.receipt_entry(ponytail.receipt(COMPONENT)[0]), desired)
+                    ponytail.operate(COMPONENT, self.home, "uninstall", None)

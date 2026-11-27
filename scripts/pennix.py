@@ -151,9 +151,9 @@ def _write_lock(args: argparse.Namespace) -> None:
     apply_journal.checkpoint_lock(hashlib.sha256(output).hexdigest())
 
 
-def _start_transaction(args, command, component, steps):
+def _start_transaction(args, command, component, steps, *, require_bound_target=False):
     _verify_inputs(args)
-    owned_files.bind_target(args.codex_home, register=True)
+    owned_files.bind_target(args.codex_home, register=True, require_existing=require_bound_target)
     os.environ["CODEX_HOME"] = str(args.codex_home)
     return apply_journal.start(command, component, apply_journal.digest(args.config_path),
                                apply_journal.digest(args.component_lock_path), steps)
@@ -1857,8 +1857,8 @@ def _ponytail_update(args, component):
             or not before["payload"] or not before["market"]):
         raise CliError("Ponytail 当前锁、载荷或可信回执不完整；未开始更新")
     if record["schema"] == 1:
-        if before["market"] != {"kind": "legacy", "ref": record["ref"]} or before["file"] is not None:
-            raise CliError("Ponytail 旧外层登记与锁定登记不同；保留现场")
+        if not ponytail.matches_legacy(before, record):
+            raise CliError("Ponytail 旧登记或载荷不符合迁移条件；保留现场")
     elif not native.matches(before, previous):
         raise CliError("Ponytail 正式登记或实际载荷发生漂移；保留现场")
     with tempfile.TemporaryDirectory(prefix="pennix-ponytail-review-") as directory:
@@ -1892,7 +1892,8 @@ def _ponytail_update(args, component):
         raise CliError("Ponytail 预览期间原生登记、载荷或回执改变")
     step_id = f"{ponytail.KEY}:release"
     active = _start_transaction(args, "update", ponytail.KEY, [
-        {"id": step_id, "component": ponytail.KEY, "action": "pin-release", "target": frozen}])
+        {"id": step_id, "component": ponytail.KEY, "action": "pin-release", "target": frozen}],
+        require_bound_target="target" not in record)
     active, _ = _journal_mutate(active, step_id, lambda: _ponytail_apply(args, component, frozen, restore=False))
     apply_journal.clear()
     _emit({"operation": "update", "component": ponytail.KEY, "status": "changed", "target": target}, args.json)
@@ -1901,6 +1902,8 @@ def _ponytail_update(args, component):
 
 def _ponytail_apply(args, component, frozen, *, restore):
     _verify_inputs(args)
+    if "target" not in frozen["receipt_before"]:
+        owned_files.bind_target(args.codex_home, require_existing=True)
     native = ponytail.Native(component, args.codex_home)
     before, desired = frozen["before"], frozen["desired"]
     old_record = owned_files.json_bytes(frozen["receipt_before"])

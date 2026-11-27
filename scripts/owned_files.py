@@ -122,7 +122,7 @@ def shared_root() -> Path:
     return path
 
 
-def bind_target(codex_home: Path, *, register: bool = False) -> None:
+def bind_target(codex_home: Path, *, register: bool = False, require_existing: bool = False) -> None:
     safe_path(codex_home)
     path = shared_root() / "target.json"
     before = read(path, private=True)
@@ -131,6 +131,8 @@ def bind_target(codex_home: Path, *, register: bool = False) -> None:
     if before is not None:
         if read_json(path) != expected:
             raise OwnershipError("本用户已绑定其他 Lifecycle 目标或状态目录；保留现有部署，不自动迁移")
+    elif require_existing:
+        raise OwnershipError("缺少既有 Lifecycle 目标登记；保留旧回执")
     elif register:
         replace(path, json_bytes(expected), None)
 
