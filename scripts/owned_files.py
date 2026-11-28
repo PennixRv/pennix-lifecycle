@@ -33,7 +33,16 @@ def safe_path(path: Path) -> None:
 
 def ensure_parent(path: Path) -> None:
     safe_path(path)
-    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    missing = []
+    parent = path.parent
+    while not parent.exists():
+        missing.append(parent)
+        parent = parent.parent
+    for parent in reversed(missing):
+        parent.mkdir(mode=0o700, exist_ok=True)
+        safe_path(parent)
+        sync_directory(parent)
+        sync_directory(parent.parent)
     safe_path(path)
     if path.parent.stat().st_uid != os.getuid():
         raise OwnershipError("目标目录不属于当前用户")
@@ -61,6 +70,7 @@ def replace(path: Path, content: bytes | None, before: bytes | None, *, mode: in
         return
     if content is None:
         path.unlink()
+        sync_directory(path.parent)
         return
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(name)
@@ -68,15 +78,24 @@ def replace(path: Path, content: bytes | None, before: bytes | None, *, mode: in
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(content)
             stream.flush()
+            os.fchmod(stream.fileno(), mode)
             os.fsync(stream.fileno())
-        temporary.chmod(mode)
         if read(path) != before:
             raise OwnershipError(f"目标在提交前发生变化: {path}")
         os.replace(temporary, path)
+        sync_directory(path.parent)
         if read(path) != content:
             raise OwnershipError(f"目标写入核验失败: {path}")
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def unique_pairs(pairs):

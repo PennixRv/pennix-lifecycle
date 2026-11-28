@@ -141,7 +141,8 @@ def _verify_inputs(args: argparse.Namespace) -> None:
         review = args.update_review
         secret_path = Path(config_model.config_value(args.kconf, 'PENNIX_SECRETS_FILE'))
         if (apply_journal.digest(secret_path) != review['secrets_digest']
-                or apply_journal.digest(CATALOG) != review['catalog_digest']):
+                or apply_journal.digest(CATALOG) != review['catalog_digest']
+                or "runtime_digest" in review and release_owner._runtime_digest(ROOT) != review["runtime_digest"]):
             raise CliError('秘密输入或 catalog 与统一审阅不一致；保留事务，不继续执行')
 
 
@@ -195,7 +196,26 @@ def _component_status(args: argparse.Namespace, component_id: str, component: di
         return base_environment.inspect(args.kconf)
     if component_id == "codex-config":
         values = config_model.values(args.kconf)
-        status = codex_config.inspect(args.codex_home / "config.toml", values)
+        active = apply_journal.read()
+        checkpoint = next((step for step in (active or {}).get("steps", [])
+                           if step["id"] == "codex-config:catalog-review"), None)
+        defer = (getattr(args, "all", False)
+                 and (checkpoint is None or checkpoint["status"] != "verified"))
+        try:
+            status = codex_config.inspect(args.codex_home / "config.toml", values, defer_catalog=defer)
+        except (codex_config.CodexConfigError, OSError) as error:
+            status = {"state": "blocked", "target": str(args.codex_home / "config.toml"),
+                      "detail": str(error) if isinstance(error, codex_config.CodexConfigError) else "Codex 配置或目录读取失败"}
+            try:
+                repair = codex_config.catalog_repair_review(args.codex_home / "config.toml")
+                if repair:
+                    desired = {"derived.json": repair["catalog"]["files"]["derived.json"],
+                               "manifest.json": hashlib.sha256(owned_files.json_bytes(repair["catalog"])).hexdigest()}
+                    if repair["observed"] != desired:
+                        status.update(state="drifted", catalog_repair_sha256=repair["catalog_repair_sha256"],
+                                      catalog=repair["catalog"], catalog_observed=repair["observed"])
+            except (codex_config.CodexConfigError, OSError):
+                pass  # An invalid fixed source cannot be laundered through asset repair.
         if (component_id in config_model.selected_components(args.kconf)
                 and values.get("PENNIX_CODEX_AUTH_API_KEY") == "y"):
             path = Path(config_model.config_value(args.kconf, "PENNIX_SECRETS_FILE"))
@@ -767,6 +787,14 @@ def _run_component(args: argparse.Namespace, catalog: dict[str, Any], component_
         if operation == "uninstall":
             return codex_config.uninstall(args.codex_home / "config.toml")
         values = config_model.values(args.kconf)
+        if repair:
+            review = codex_config.catalog_repair_review(args.codex_home / "config.toml")
+            if review:
+                desired = {"derived.json": review["catalog"]["files"]["derived.json"],
+                           "manifest.json": hashlib.sha256(owned_files.json_bytes(review["catalog"])).hexdigest()}
+                if review["observed"] != desired:
+                    return codex_config.repair_catalog(args.codex_home / "config.toml",
+                                                      getattr(args, "expected_sha256", None))
         return codex_config.apply(args.codex_home / "config.toml", values,
             expected_sha256=getattr(args, "expected_sha256", None))
     engine_args = _args_for_engine(args, operation)
@@ -1111,6 +1139,13 @@ def _apply_steps(value: dict[str, Any], args: argparse.Namespace, catalog: dict[
         if not item:
             continue
         action = item.get("action")
+        if key == "codex-config" and item.get("selected"):
+            existing = next((step for step in (apply_journal.read() or {}).get("steps", [])
+                             if step["id"] == "codex-config:catalog-review"), None)
+            if item.get("catalog_checkpoint") or existing:
+                steps.append({"id": "codex-config:catalog-review", "component": key, "action": "catalog-review",
+                              "target": existing["target"] if existing else {"source": "after-approved-dependencies"}})
+                continue
         if item.get("selected") and action in {"install", "adopt", "upgrade", "adopt-upgrade"}:
             steps.append({"id": f"{key}:{action}", "component": key, "action": action,
                           "target": {"packages": item["packages"]} if key == "base-environment" else {} if item.get("source_migration") else item.get("candidate_target") or args.component_lock["components"].get(key, {})})
@@ -1196,6 +1231,8 @@ def _journal_mutate(value: dict, step_id: str, action, *, observed=None):
         return value, "resumed"
     if step["status"] in {"started", "unknown"}:
         raise CliError(f"步骤 {step_id} 的副作用状态未知；保留 journal，需人工核验")
+    if step["component"] == "codex-config":
+        value = codex_config.prepare_journal(value, step_id)
     value = apply_journal.started(value, step_id)
     try:
         result = action()
@@ -1583,6 +1620,13 @@ def cmd_apply(args: argparse.Namespace) -> int:
         if step_id == 'update-review':
             active = apply_journal.verified(active, step_id, {'inputs': 'bound'})
             continue
+        if component_id == "codex-config" and action == "catalog-review":
+            result = _catalog_checkpoint(args, active, step)
+            if result is not None:
+                return result
+            active = apply_journal.read()
+            results[component_id] = "verified-current"
+            continue
         if action == "prepare" and component_id == "aur-helper":
             active, results["aur-helper"] = _journal_mutate(
                 active, step_id, lambda: owner_engine.host.ensure_aur_helper(catalog["aur_helper"]))
@@ -1879,7 +1923,8 @@ def cmd_repair(args: argparse.Namespace) -> int:
         active = _open_transaction(args, "repair", args.component,
             [{"id": f"{args.component}:repair", "component": args.component, "action": "upgrade", "target": {}}])
         active, result = _journal_mutate(active, f"{args.component}:repair",
-            lambda: _run_component(args, catalog, args.component, operation))
+            lambda: _run_component(args, catalog, args.component, operation,
+                                   repair=args.component == "codex-config"))
     native = component.get("native_config")
     if native and config_model.config_value(kconf, native["select"]) == "y":
         active, configured = _journal_mutate(active, f"{args.component}:configure",
@@ -2020,6 +2065,21 @@ def _updates(args):
         system_upgrade=config_model.config_value(kconf, 'PENNIX_SYSTEM_UPGRADE') == 'y',
         reviewed=getattr(args, 'plan', False) or getattr(args, 'confirm', None) is not None)
     report['paseo_plugins'] = paseo_plugins.inventory(kconf, catalog, args.component_lock['components'])
+    if ("codex-config" in config_model.selected_components(kconf)
+            and config_model.config_value(kconf, "PENNIX_CODEX_MANAGED_CATALOG") == "y"):
+        if getattr(args, "all", False):
+            result = {"state": "native", "available": None,
+                      "catalog_source_state": "deferred-after-approved-dependencies",
+                      "next": "same-journal native catalog review; not an assertion of freshness"}
+        else:
+            try:
+                result = codex_config.catalog_inventory(args.codex_home / "config.toml",
+                    config_model.values(kconf), args.component_lock_path)
+            except (codex_config.CodexConfigError, OSError, ValueError, subprocess.SubprocessError):
+                result = {"state": "unknown", "available": None, "catalog_source_state": "unverified",
+                          "detail": "原生模型目录的新鲜度或现有归属无法核验；未修改活动资产",
+                          "next": "pennix update codex-config --plan"}
+        report["components"]["codex-config"] = {**report["components"]["codex-config"], **result}
     return report, value, catalog
 
 
@@ -2114,6 +2174,9 @@ def _reviewed_update_steps(value, args, catalog):
             raise CliError("本次更新需要重启 Paseo，但尚无经核验的维护边界；未执行写入")
         if key != 'update-review':
             component = catalog['components'].get(key, {})
+            if key == "codex-config" and step["action"] == "catalog-review":
+                exact.append(step)
+                continue
             if key == "aur-helper":
                 if all(owners.get(item["component"]) in local for item in steps
                        if catalog["components"].get(item["component"], {}).get("package", {}).get("source") == "aur"):
@@ -2167,6 +2230,8 @@ def _update_review_output(value, steps, args):
 def cmd_update_all(args):
     active = apply_journal.read()
     explicit = getattr(args, "plan", False) or getattr(args, "confirm", None) is not None
+    if getattr(args, "resume", False) and (active is None or explicit or args.review_system_changes):
+        raise CliError("--resume 仅用于同一未结全量事务，不能与新审阅或系统重审混用")
     if active is not None:
         if explicit:
             raise CliError("已有未完成事务；先使用 pennix recover 核对，不签发或重放审阅摘要")
@@ -2175,9 +2240,16 @@ def cmd_update_all(args):
         review = next((step['target'] for step in active['steps'] if step['id'] == 'update-review'), None)
         if not review:
             raise CliError('统一更新缺少冻结审阅；保留现场')
+        if getattr(args, "resume", False) and (review.get("mode") != "noninteractive-v1"
+                or not any(step["id"] == "codex-config:catalog-review" for step in active["steps"])):
+            raise CliError("--resume 仅用于包含目录检查点的同一已审阅全量事务；其他现场按原入口或 recover")
         # A reviewed transaction must never resume through legacy interactive apply.
         if review.get('mode') == 'noninteractive-v1':
-            raise CliError('已有非交互审阅事务；使用 pennix recover 核对同一事务，不通过旧入口重放')
+            if not getattr(args, "resume", False):
+                raise CliError('已有非交互审阅事务；使用 recover 核对，不通过旧入口重放；已核验检查点用 update --all --resume')
+            if any(step["status"] in {"started", "unknown"} for step in active["steps"]):
+                raise CliError("全量事务有未知副作用；先使用同次 recover，不能通过 --resume 重试")
+            args.noninteractive_review = {"resume": True}
         args.update_targets = review['targets']
         args.update_review = review
         args.update_inventory = {'state': 'resume-frozen-journal'}
@@ -2256,6 +2328,8 @@ def cmd_update_all(args):
         'available': {key: item['available'] for key, item in report['components'].items() if item['available'] is not None},
         'system': report['system'], 'catalog_digest': apply_journal.digest(CATALOG),
         'secrets_digest': apply_journal.digest(Path(config_model.config_value(args.kconf, 'PENNIX_SECRETS_FILE')))}
+    if value["components"].get("codex-config", {}).get("catalog_checkpoint"):
+        args.update_review["runtime_digest"] = release_owner._runtime_digest(ROOT)
     if explicit:
         args.update_review['mode'] = 'noninteractive-v1'
         value = _plan(args)
@@ -2464,8 +2538,10 @@ def _ponytail_recover(args, component, active, step):
 
 
 def cmd_update(args: argparse.Namespace) -> int:
-    if getattr(args, "plan", False) and not args.all:
-        raise CliError("--plan 仅适用于 update --all")
+    if getattr(args, "resume", False) and not args.all:
+        raise CliError("--resume 仅用于同一 update --all 事务")
+    if getattr(args, "plan", False) and not args.all and args.component != "codex-config":
+        raise CliError("--plan 仅适用于 update --all 或 codex-config")
     if getattr(args, "takeover", False):
         if (args.component != copilot_takeover.COMPONENT or args.version
                 or args.all or args.review_system_changes):
@@ -2497,6 +2573,8 @@ def cmd_update(args: argparse.Namespace) -> int:
         if args.component not in config_model.selected_components(kconf):
             raise CliError("Ponytail 未在 workflow.config 中选择")
         return _ponytail_update(args, catalog["components"][args.component])
+    if args.component == "codex-config":
+        return _update_codex_catalog(args, kconf)
     if getattr(args, "confirm", None):
         raise CliError("--confirm 仅用于 Paseo 插件的更新摘要")
     args.kconf = kconf
@@ -2686,6 +2764,90 @@ def cmd_update(args: argparse.Namespace) -> int:
     apply_journal.clear()
     _emit({"operation": "update", "component": args.component, "status": result, "target": target}, args.json)
     return 0
+
+
+def _update_codex_catalog(args, kconf):
+    args.kconf = kconf
+    if args.version is not None or args.review_system_changes:
+        raise CliError("静态 Codex 配置不接受包版本或系统事务重审")
+    if "codex-config" not in config_model.selected_components(kconf):
+        raise CliError("Codex 配置未在 workflow.config 中选择")
+    active = apply_journal.read()
+    checkpoint = None
+    if active is not None:
+        checkpoint = next((step for step in active["steps"] if step["id"] == "codex-config:catalog-review"), None)
+        if (active["command"] != "update-all" or checkpoint is None or checkpoint["status"] != "pending"
+                or any(step["status"] != "verified" for step in active["steps"][:active["steps"].index(checkpoint)])
+                or any(step["status"] in {"started", "unknown"} for step in active["steps"])):
+            raise CliError("未结事务不是已就绪的目录审阅检查点；先按同次 journal 核验，不重放")
+        if (active["config_digest"] != apply_journal.digest(args.config_path)
+                or active["lock_digest"] != apply_journal.digest(args.component_lock_path)):
+            raise CliError("目录检查点的配置或锁改变；保留同次事务")
+        parent = next((step["target"] for step in active["steps"] if step["id"] == "update-review"), None)
+        if parent is None:
+            raise CliError("目录检查点缺少原始全量审阅")
+        args.update_review = parent
+        _verify_inputs(args)
+    path = args.codex_home / "config.toml"
+    values = config_model.values(kconf)
+    digest = getattr(args, "confirm", None)
+    if getattr(args, "plan", False) and digest is not None:
+        raise CliError("静态配置 --plan 与 --confirm 互斥")
+    if digest is None:
+        review = codex_config.prepare_catalog_review(path, values, args.component_lock_path)
+        if getattr(args, "plan", False):
+            _emit(review, args.json)
+            return 0
+        if review["status"] == "no-op":
+            codex_config.reviewed_catalog(path, values, args.component_lock_path, review["review_sha256"])
+            if checkpoint:
+                finished = apply_journal.verified(active, step_id=checkpoint["id"], observed={
+                    "catalog_source": "fresh-native-verified", "source_sha256": review["source_sha256"]})
+                if apply_journal.complete(finished):
+                    apply_journal.clear()
+                else:
+                    review.update(transaction=active["transaction"], next="pennix update --all --resume")
+            _emit(review, args.json)
+            return 0
+        _emit(review, args.json)
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            raise CliError("静态配置更新需精确确认；使用 update codex-config --plan 后 --confirm <摘要>")
+        if input("输入上面的 review_sha256 以提交模型目录: ").strip() != review["review_sha256"]:
+            return 1
+        digest = review["review_sha256"]
+    candidate = codex_config.reviewed_catalog(path, values, args.component_lock_path, digest)
+    target = {"review_sha256": digest, "catalog": candidate["descriptor"]}
+    step_id = checkpoint["id"] if checkpoint else "codex-config:configure"
+    journal = (apply_journal.set_target(active, step_id, target) if checkpoint else
+               _start_transaction(args, "update", "codex-config", [{
+                   "id": step_id, "component": "codex-config", "action": "configure", "target": target}]))
+    journal, result = _journal_mutate(journal, step_id,
+        lambda: codex_config.apply(path, values, catalog_candidate=candidate))
+    complete = apply_journal.complete(journal)
+    if complete:
+        apply_journal.clear()
+    _emit({"operation": "update", "component": "codex-config", "status": result,
+           "review_sha256": digest, "catalog": candidate["descriptor"],
+           **({"transaction": journal["transaction"], "next": "pennix update --all --resume"}
+              if not complete else {})}, args.json)
+    return 0
+
+
+def _catalog_checkpoint(args, journal, step):
+    if (journal["command"] != "update-all" or step["status"] != "pending"
+            or any(item["status"] != "verified" for item in journal["steps"][:journal["steps"].index(step)])):
+        raise CliError("目录源审阅必须在同次已批准依赖核验后，且尚无目录写入副作用")
+    values = config_model.values(args.kconf)
+    review = codex_config.prepare_catalog_review(args.codex_home / "config.toml", values, args.component_lock_path)
+    if review["status"] == "no-op":
+        codex_config.reviewed_catalog(args.codex_home / "config.toml", values, args.component_lock_path,
+                                     review["review_sha256"])
+        apply_journal.verified(journal, step["id"], {"catalog_source": "fresh-native-verified",
+                                                 "source_sha256": review["source_sha256"]})
+        return None
+    _emit({**review, "status": "catalog-review-required", "transaction": journal["transaction"],
+           "step": step["id"], "next": "pennix update codex-config --confirm <review_sha256>"}, args.json)
+    return 2
 
 
 def _reverse_uninstall_order(catalog: dict[str, Any]) -> list[str]:
@@ -3143,6 +3305,13 @@ def cmd_recover(args: argparse.Namespace) -> int:
         raise CliError("锁文件与事务最后已证实的检查点不同；保留现场，不推断外部修改归属")
     if active["command"] == "apply" and active["component"] == system_devel_tools.SCOPE:
         return _recover_scoped_tools(args, catalog, active, step)
+    if step["component"] == "codex-config" and step["target"].get("codex_config_protocol") == 1:
+        evidence = codex_config.recover(home / "config.toml", active, step, args.resolve)
+        active = apply_journal.verified(apply_journal.read(), step["id"], evidence)
+        if apply_journal.complete(active):
+            apply_journal.clear()
+        _emit({"operation": "recover", "component": "codex-config", **evidence}, args.json)
+        return 0
     if args.resolve in {"not-started", "restored"}:
         required = "none" if args.resolve == "not-started" else "restored"
         if step['component'] == 'pnpm' and args.resolve == 'restored' and step['status'] != 'verified' and pnpm_migration.pending():
@@ -3443,12 +3612,13 @@ def parser() -> argparse.ArgumentParser:
     update = sub.add_parser("update", help="明确升级一个已选择且受管的组件")
     update.add_argument("component", nargs='?')
     update.add_argument('--all', action='store_true', help='统一审阅并在同一 native journal 更新所选组件')
+    update.add_argument('--resume', action='store_true', help='继续同一已核验全量事务，不重试 unknown')
     update.add_argument('--review-system-changes', action='store_true', help='重审同一 --all 事务中已证实系统升级的额外变化；不释放 unknown')
     update.add_argument("--version", help="指定 npm 组件的精确版本；默认仍跟踪登记通道")
     update.add_argument("--takeover", action="store_true", help="仅预览或确认接管已审阅的外部 Copilot CLI 安装")
     update_review = update.add_mutually_exclusive_group()
-    update_review.add_argument("--plan", action="store_true", help="只读审阅 --all 的精确写入步骤")
-    update_review.add_argument("--confirm", help="执行全量升级、Ponytail、Paseo 插件或 Copilot 接管的审阅摘要")
+    update_review.add_argument("--plan", action="store_true", help="审阅 --all 精确步骤或 codex-config 冻结候选，不写活动资产")
+    update_review.add_argument("--confirm", help="执行全量升级、静态 Codex 目录、Ponytail、Paseo 插件或 Copilot 接管的精确摘要")
     update.add_argument("--config")
     update.add_argument("--json", action="store_true")
     update.set_defaults(function=cmd_update)

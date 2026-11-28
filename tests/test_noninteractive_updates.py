@@ -540,6 +540,9 @@ class NoninteractiveReviews(unittest.TestCase):
     def test_all_preview_and_confirmation_only_write_frozen_user_steps(self):
         self._check_full_review("trellis-cli")
 
+    def test_catalog_review_and_resume_keep_one_frozen_journal_without_replaying_dependencies(self):
+        self._check_full_review("trellis-cli", with_catalog=True)
+
     def test_running_paseo_does_not_block_preview_but_blocks_execution(self):
         self._check_full_review("paseo-cli")
 
@@ -694,7 +697,7 @@ class NoninteractiveReviews(unittest.TestCase):
             self.assertEqual(observer.call_count, 2)
             legacy.assert_not_called()
 
-    def _check_full_review(self, key):
+    def _check_full_review(self, key, *, with_catalog=False):
         conf, lock = self.root / 'workflow.config', self.root / 'components.lock.json'
         conf.write_text('original config')
         component = {'id': key, 'delivery': 'package', 'lock_source': f'npm:{key}',
@@ -706,9 +709,21 @@ class NoninteractiveReviews(unittest.TestCase):
         report = {'components': {key: {'state': 'update', 'available': target}},
                   'system': systems, 'system_upgrade_enabled': True}
         sources = {key: component['lock_source']}
-        component_lock.write(lock, {'schema': 1, 'components': {key: previous}}, sources)
+        entries = {key: previous}
+        after_key = "pennix-skills"
+        after_target = {"source": "github:PennixRv/pennix-skills", "ref": "b" * 40, "sha256": "c" * 64}
+        if with_catalog:
+            catalog["components"].update({
+                "codex-config": {"id": "codex-config", "delivery": "static"},
+                after_key: {"id": after_key, "delivery": "collection", "lock_source": after_target["source"]}})
+            sources[after_key] = after_target["source"]
+            entries[after_key] = {**after_target, "ref": "a" * 40, "sha256": "a" * 64}
+            report["components"][after_key] = {"state": "update", "available": after_target}
+        component_lock.write(lock, {'schema': 1, 'components': entries}, sources)
         codex = self.root / 'codex'
         kconf = SimpleNamespace(syms={})
+        if with_catalog:
+            kconf.syms["PENNIX_CODEX_AUTH_API_KEY"] = SimpleNamespace(tri_value=0)
         is_paseo = key == "paseo-cli"
         running = is_paseo
         unit_enabled = is_paseo
@@ -728,7 +743,7 @@ class NoninteractiveReviews(unittest.TestCase):
         def plan(args):
             load(args)
             targets = getattr(args, 'update_targets', {})
-            return {'config': str(conf), 'connections': {}, 'components': {
+            value = {'config': str(conf), 'connections': {}, 'components': {
                 key: {'selected': True, 'state': 'match', 'action': 'upgrade' if targets else 'keep',
                       'candidate_target': targets.get(key)},
                 'paseo-autostart': {'selected': is_paseo, 'action': 'keep',
@@ -741,6 +756,17 @@ class NoninteractiveReviews(unittest.TestCase):
                                                      'state': 'current' if running else 'not_run'}}}
                                        if is_paseo else {})},
             }, 'side_effects': {'system_upgrade': True, 'path': {'action': 'keep'}}}
+            if with_catalog:
+                checkpoint = next((step for step in (pennix.apply_journal.read() or {}).get("steps", [])
+                                   if step["id"] == "codex-config:catalog-review"), None)
+                ready = checkpoint is not None and checkpoint["status"] == "verified"
+                value["components"].update({
+                    "codex-cli": {"selected": True, "state": "match", "action": "keep"},
+                    "codex-config": {"selected": True, "state": "current" if ready else "pending",
+                                     "action": "keep" if ready else "install", "catalog_checkpoint": not ready},
+                    after_key: {"selected": True, "state": "match", "action": "upgrade" if targets else "keep",
+                                "candidate_target": targets.get(after_key)}})
+            return value
 
         with ExitStack() as stack:
             for obj, name, effect in [(pennix, '_load', load), (pennix, '_plan', plan),
@@ -748,7 +774,8 @@ class NoninteractiveReviews(unittest.TestCase):
                     (pennix.config_model, 'config_value', lambda *_: str(self.root / 'secrets')),
                     (pennix.owner_engine.host, 'detect_host', lambda: {'supported': True}),
                     (pennix.paseo_service, 'runtime', runtime),
-                    (candidates, 'resolve', lambda *_: target)]:
+                    (candidates, 'resolve', lambda component, *_:
+                     after_target if component["id"] == after_key else target)]:
                 stack.enter_context(patch.object(obj, name, side_effect=effect))
             stack.enter_context(patch.object(pennix, '_review_target', return_value='a' * 64))
             stack.enter_context(patch.object(pennix, '_verify_update_candidates'))
@@ -756,13 +783,29 @@ class NoninteractiveReviews(unittest.TestCase):
             for fn in ('skills', 'preflight', 'preflight_candidate', 'assert_no_active_work'):
                 stack.enter_context(patch.object(pennix.paseo_service, fn))
             native = stack.enter_context(patch.object(pennix, '_run_component', return_value='changed'))
+            if with_catalog:
+                stack.enter_context(patch.object(pennix.config_model, "values", return_value={"PENNIX_CODEX_MANAGED_CATALOG": "y"}))
+                stack.enter_context(patch.object(pennix.config_model, "selected_components",
+                                                return_value={key, after_key, "codex-cli", "codex-config"}))
+                candidate = {"descriptor": {"fixture": "frozen-catalog"}}
+                stack.enter_context(patch.object(pennix.codex_config, "prepare_catalog_review", return_value={
+                    "status": "review", "review_sha256": "d" * 64, "source_sha256": "e" * 64,
+                    "catalog": candidate["descriptor"]}))
+                stack.enter_context(patch.object(pennix.codex_config, "reviewed_catalog", return_value=candidate))
+                catalog_apply = stack.enter_context(patch.object(pennix.codex_config, "apply", return_value="changed"))
             system = stack.enter_context(patch.object(pennix.subprocess, 'run', side_effect=AssertionError('unexpected subprocess')))
             command = ['update', '--all', '--json']
             with patch.object(pennix.owned_files, 'locked', side_effect=AssertionError('preview locked')), \
                     patch('sys.stdout', new_callable=io.StringIO) as output:
                 self.assertEqual(pennix.main([*command, '--plan']), 0)
             preview = json.loads(output.getvalue())
-            self.assertEqual(preview['steps'], [{'component': key, 'action': 'upgrade', 'candidate': target}])
+            expected_steps = [{'component': key, 'action': 'upgrade', 'candidate': target}]
+            if with_catalog:
+                expected_steps.extend([
+                    {"component": "codex-config", "action": "catalog-review",
+                     "candidate": {"source": "after-approved-dependencies"}},
+                    {"component": after_key, "action": "upgrade", "candidate": after_target}])
+            self.assertEqual(preview['steps'], expected_steps)
             self.assertFalse(preview['system_upgrade'])
             self.assertNotIn('secrets_digest', json.dumps(preview))
             self.assertIsNone(pennix.apply_journal.read())
@@ -801,7 +844,25 @@ class NoninteractiveReviews(unittest.TestCase):
                 self.assertIsNone(pennix.apply_journal.read())
                 revert()
             with patch('sys.stdout', new_callable=io.StringIO):
-                self.assertEqual(pennix.main(confirm), 0)
+                self.assertEqual(pennix.main(confirm), 2 if with_catalog else 0)
+            if with_catalog:
+                journal = pennix.apply_journal.read()
+                transaction = journal["transaction"]
+                self.assertEqual([step["status"] for step in journal["steps"]],
+                                 ["verified", "verified", "pending", "pending"])
+                self.assertEqual([call.args[2] for call in native.call_args_list], [key])
+                with patch('sys.stdout', new_callable=io.StringIO):
+                    self.assertEqual(pennix.main(["update", "codex-config", "--confirm", "d" * 64, "--json"]), 0)
+                self.assertEqual(pennix.apply_journal.read()["transaction"], transaction)
+                catalog_apply.assert_called_once_with(codex / "config.toml", {"PENNIX_CODEX_MANAGED_CATALOG": "y"},
+                                                     catalog_candidate=candidate)
+                with patch('sys.stdout', new_callable=io.StringIO):
+                    self.assertEqual(pennix.main([*command, "--resume"]), 0)
+                self.assertEqual([call.args[2] for call in native.call_args_list], [key, after_key])
+                self.assertEqual(component_lock.read(lock, sources)["components"], {key: target, after_key: after_target})
+                self.assertIsNone(pennix.apply_journal.read())
+                system.assert_not_called()
+                return
             self.assertEqual(component_lock.read(lock, sources)['components'], {key: target})
             self.assertIsNone(pennix.apply_journal.read())
             self.assertEqual(native.call_args.args[2:4], (key, 'upgrade'))

@@ -12,6 +12,17 @@ import owned_files as files
 
 
 class OwnedFilesTests(unittest.TestCase):
+    def test_new_directory_chain_is_synced_before_file_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "first/second/file"
+            with patch.object(files, "sync_directory", wraps=files.sync_directory) as sync:
+                files.replace(path, b"new", None)
+            self.assertEqual([call.args[0] for call in sync.call_args_list],
+                             [root / "first", root, root / "first/second",
+                              root / "first", root / "first/second"])
+            self.assertEqual(path.read_bytes(), b"new")
+
     def test_symlink_parent_and_concurrent_write_are_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

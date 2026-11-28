@@ -265,4 +265,23 @@ AoE 的 Codex Hook 由 Lifecycle 按归属管理。NAS 与其他主机上的服�
 
 已有 Codex 会话绑定 provider ID，切换网关时应保留该身份；由用户直接维护的既有 provider 选择 PRESERVE。若旧受管 provider 字段已人工恢复首次基线，可在审阅完整配置后使用 `pennix repair codex-config --expected-sha256 <完整文件摘要>` 释放不再选择的归属。未知漂移、仍被选择的漂移字段、缺少可信记录或摘要不符仍拒绝。普通 apply/inspect/uninstall 不放宽漂移保护。已移除的 remote_compaction_v2 feature 不再生成，旧 Kconfig 选项仅作兼容输入；原生配置迁移只清除可证明归属的旧 feature，保留 provider 的 capabilities.remote_compaction。
 
+### 受管模型目录与 Default 规则
+
+`PENNIX_CODEX_MANAGED_CATALOG` 默认关闭，并依赖已选择的 Codex CLI 和 `codex-config`。开启后只替换各模型的 `model_messages.collaboration_modes.default`；Plan、权限文本、模型集合及其余元数据保持不变。源规则随 Lifecycle 发行维护，完整源、派生目录及首次字段基线保存在本机私有状态中，不随发行公开，也不放在会被工具卸载删除的程序目录内。
+
+目前来源协议只接受已核验的 Codex **0.172.0**、明确的 Responses provider 和既有外部认证命令。工具在独立临时 HOME 中执行原生目录查询，移除静态目录入口，并同时检查本次缓存的新鲜度、版本及作用域；不拿端点投影代替原生有效目录。未知 Codex 版本、刷新失败、回退来源、外部漂移或不安全路径均拒绝，不把旧目录标为最新。
+
+1. 在 `workflow.config` 中明确开启该选项。若已有外部 `model_catalog_json`，先审阅 `plan` 的 `catalog_adoption_sha256`，再将精确摘要填入 `PENNIX_CODEX_CATALOG_ADOPT_SHA256`；接纳只管理引用，不取得原目录文件的所有权。
+2. 运行 `pennix update codex-config --plan --json`。它取得隔离候选并返回 `review_sha256`，但不改变活动配置、目录归属、锁或 journal。候选材料只保存在私有暂存目录。
+3. 核对候选后，运行 `pennix update codex-config --confirm <review_sha256>`。确认只消费已冻结候选；配置、锁、归属、生成器、二进制或 provider 身份变化会使摘要失效，不能沿旧摘要继续。
+4. 后续 `apply` 只复用固定源，规则升级也只从固定源重新派生；它不自动刷新远端目录。显式 `updates` 重新查询原生源，区分配置当前、源已验证和来源 unknown。源及规则均未变化时，显式更新返回 no-op，不另建代际或重复要求确认。
+
+`update --all` 将目录更新放在依赖核验之后：源候选尚未知时，不提前批准配置写入。执行抵达目录检查点后，返回 `catalog-review-required`，同一 journal 保留为 pending；按返回的精确摘要执行上述单项确认，再使用 `pennix update --all --resume` 继续该事务的其余已批准步骤。`--resume` 不创建新计划，不重试 started／unknown，也不重放已经 verified 的步骤。上游源、二进制或当前身份不能证明时，只停在对应检查点，保留已完成的包事务证据。
+
+代际先完整写入并验证，随后切换配置引用和归属；首次字段基线不因更新、取消选择或重装而重置。取消选择恢复安全的首次引用，保留可证明归属的目录供回退及退出；显式卸载先撤回引用，再删除精确自有资产。旧工具不识别 schema 4 记录时必须拒绝接手。工具自身卸载保留这些组件数据，不能留下依赖已删除程序目录的引用。
+
+固定源、规则与来源证明完整时，`plan` 可给出损坏派生目录／清单的 `catalog_repair_sha256`。使用 `pennix repair codex-config --expected-sha256 <该摘要>` 只重建已登记产物，不刷新来源，不覆盖未知相邻文件，也不放宽配置字段漂移保护。该摘要与上文释放旧字段归属的完整配置摘要用途不同。来源材料本身丢失或漂移时，修复拒绝；不能通过重新计算摘要把未知来源变成可信源。
+
+进程终止、取消或磁盘失败后，先用 `recover --json` 核对同一 transaction／step，再按 owner 可证明的结果处置。目录修复可在同次 `completed` 恢复中完成已审阅输出，但不能把未知损坏内容重新写回活动目录；第三方新值保留 unknown。文件存在或版本相同都不能替代来源与后置条件证明。
+
 发行 tag 和资产不可覆盖。同版本失败重试只复用摘要完全匹配的已暂存发行；工具卸载保留其他 CLI 仍需的 PATH、共享 linger、用户数据、组件归属及未结事务元数据。`tests/test_release_payload.py` 以实际构建载荷验证隔离 bootstrap、入口恢复和重装；Arch 包、下载使用明确替身，不代表真实新机、跨登录、PAM 或所有外部服务已经实测。

@@ -272,6 +272,19 @@ config PENNIX_CODEX_MANAGED_TEMPLATE
 		显式选择的值与原生默认缺席均纳管，清理已审定旧项及说明注释。
 		未选择时保留已有 NATIVE／PRESERVE 兼容语义。
 
+config PENNIX_CODEX_MANAGED_CATALOG
+	bool "用受管模型目录提供 Default 模式连续协作规则"
+	default n
+	depends on PENNIX_COMPONENT_CODEX_CONFIG && PENNIX_COMPONENT_CODEX_CLI
+	help
+		通过显式 update codex-config 采集和审阅原生目录；apply 不隐式刷新。
+		仅替换 Default 规则，保留 Plan、权限及其他模型元数据。
+
+config PENNIX_CODEX_CATALOG_ADOPT_SHA256
+	string "已有外部模型目录的精确接纳摘要（不取得原文件归属）"
+	default ""
+	depends on PENNIX_CODEX_MANAGED_CATALOG
+
 choice PENNIX_CODEX_PROVIDER
 	prompt "Provider 配置"
 	default PENNIX_CODEX_PROVIDER_PRESERVE
