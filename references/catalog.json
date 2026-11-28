@@ -14,6 +14,7 @@
       "user_markdown_migration": {
         "from": "ceb74fb6408b6636109fed635a5dafd3cb2b59de",
         "to": "308b3e4f401222b797cec6a37ff4bbc2c2f81e9e",
+        "compatible_to": ["e4a0b37f60d1f20a8cc9571f81e7093ab95624a7"],
         "settings_contract": {
           "index.server.ts": "e3c886e87a84960556052e04008e439faac7d025",
           "shared/theme.ts": "c119d3804719cf7c2f813256c07cbd6a1918847f",

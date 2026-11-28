@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,6 +17,75 @@ import pennix
 
 
 class PaseoPluginsTests(unittest.TestCase):
+    def test_native_bridge_checks_blobs_for_exact_compatible_refs(self):
+        bridge = Path(__file__).resolve().parents[1] / "scripts/paseo-plugins.mjs"
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            checkout = home / "plugins/fixture-plugin/source"
+            checkout.mkdir(parents=True)
+            def git(*args):
+                return subprocess.check_output(["git", "-C", str(checkout), *args], text=True).strip()
+            git("init", "-q")
+            (checkout / "settings.ts").write_text("reviewed settings\n")
+            git("add", "settings.ts")
+            git("-c", "user.name=fixture", "-c", "user.email=fixture@example.test",
+                "commit", "-qm", "fixture")
+            revision = git("rev-parse", "HEAD")
+            blob = git("rev-parse", "HEAD:settings.ts")
+            program = (
+                "import {managePlugins} from " + json.dumps(bridge.as_uri()) + ";"
+                "const plugin=" + json.dumps({"id": "fixture-plugin", "path": str(checkout),
+                    "enabled": True, "status": "running", "installation": {"currentRevision": revision,
+                    "identity": {"kind": "git", "remote": "https://example.test/plugin.git", "pluginPath": "."}}}) + ";"
+                "const client={getDaemonConfig:async()=>({config:{pluginsEnabled:true}}),"
+                "listPlugins:async()=>[plugin]};"
+                "for(const name of ['invokePluginRpc','installPluginSource','previewPluginUpdates',"
+                "'applyPluginUpdates','removePlugin','enablePlugin','disablePlugin'])"
+                "client[name]=()=>{throw Error('inspect must not mutate')};"
+                "console.log(JSON.stringify(await managePlugins(client," + json.dumps(str(home)) +
+                ",{serverId:'fixture'})));")
+            request = {"id": "fixture-plugin", "action": "inspect",
+                       "url": "https://example.test/plugin.git", "blocks": [],
+                       "settingsContract": {"settings.ts": "0" * 40},
+                       "settingsUpgrade": {"ref": "a" * 40, "refs": [revision],
+                                           "contract": {"settings.ts": blob}}}
+            def invoke():
+                return subprocess.run(["node", "--input-type=module", "-e", program],
+                    input=json.dumps(request), capture_output=True, text=True, timeout=15)
+            result = invoke()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["plugin"]["ref"], revision)
+            request["settingsUpgrade"]["refs"] = ["b" * 40]
+            result = invoke()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("plugin settings contract changed", result.stderr)
+            request["settingsUpgrade"] = {"ref": revision, "contract": {"settings.ts": blob}}
+            self.assertEqual(invoke().returncode, 0)
+
+    def test_exact_compatible_polish_ref_preserves_settings_and_rollback(self):
+        catalog = json.loads((Path(__file__).resolve().parents[1] / "references/catalog.json").read_bytes())
+        spec = catalog["paseo_plugins"]["paseo-chat-polish"]
+        migration = spec["user_markdown_migration"]
+        previous, current = migration["to"], migration["compatible_to"][0]
+        self.assertEqual(paseo_plugins.settings_shape(spec, previous),
+                         paseo_plugins.settings_shape(spec, current))
+        for source, target in ((previous, current), (current, previous)):
+            self.assertIsNone(paseo_plugins.migration_direction(spec, source, target))
+        self.assertEqual(paseo_plugins.migration_direction(spec, migration["from"], current),
+                         "introduce-user-markdown")
+        self.assertEqual(paseo_plugins.migration_direction(spec, current, migration["from"]),
+                         "remove-user-markdown")
+        with self.assertRaises(paseo_plugins.PluginError):
+            paseo_plugins.migration_direction(spec, "f" * 40, current)
+        self.assertNotIn("userMarkdown", paseo_plugins.settings_shape(spec, "f" * 40)["timeline"])
+        with patch.object(paseo_plugins.subprocess, "run") as native:
+            native.return_value = SimpleNamespace(stdout='{"plugin":null}')
+            with patch.object(paseo_plugins.shutil, "which", side_effect=lambda name: "/usr/bin/" + name):
+                paseo_plugins.Native(Path("/fixture"), catalog["paseo_plugins"])("paseo-chat-polish")
+            request = json.loads(native.call_args.kwargs["input"])
+            self.assertEqual(set(request["settingsUpgrade"]["refs"]), {previous, current})
+            self.assertEqual(request["settingsUpgrade"]["contract"], migration["settings_contract"])
+
     def test_chat_polish_transition_accepts_only_reviewed_ref_pair_and_preserved_settings(self):
         catalog = json.loads((Path(__file__).resolve().parents[1] / "references/catalog.json").read_bytes())
         spec = catalog["paseo_plugins"]["paseo-chat-polish"]

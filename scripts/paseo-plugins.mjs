@@ -56,7 +56,9 @@ export async function managePlugins(client, home, daemonStatus) {
         || (await git(['status', '--porcelain', '--untracked-files=normal'])).stdout) {
       throw new Error('plugin checkout drift');
     }
-    const contract = settingsUpgrade?.ref === installation.currentRevision ? settingsUpgrade.contract : settingsContract;
+    const upgraded = settingsUpgrade?.ref === installation.currentRevision
+      || settingsUpgrade?.refs?.includes(installation.currentRevision);
+    const contract = upgraded ? settingsUpgrade.contract : settingsContract;
     const contractPaths = Object.keys(contract);
     const blobs = (await git(['rev-parse', ...contractPaths.map(path => `HEAD:${path}`)])).stdout.trim().split('\n');
     if (contractPaths.some((path, index) => blobs[index] !== contract[path])) {

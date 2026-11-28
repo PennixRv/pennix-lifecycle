@@ -42,20 +42,27 @@ def valid_values(value, shape):
     return type(value) is (bool if shape == "bool" else str)
 
 
-def settings_shape(spec, ref):
+def upgraded_refs(spec):
     migration = spec.get("user_markdown_migration", {})
-    if migration.get("to") == ref and ref is not None:
+    return {migration["to"], *migration.get("compatible_to", [])} if migration else set()
+
+
+def settings_shape(spec, ref):
+    if ref in upgraded_refs(spec):
         return {**spec["settings"], "timeline": {**spec["settings"]["timeline"], "userMarkdown": "on-off"}}
     return spec["settings"]
 
 
 def migration_direction(spec, source_ref, target_ref):
     migration = spec.get("user_markdown_migration", {})
-    if not migration or source_ref == target_ref or migration["to"] not in (source_ref, target_ref):
+    upgraded = upgraded_refs(spec)
+    if (not migration or source_ref == target_ref
+            or source_ref in upgraded and target_ref in upgraded
+            or not upgraded.intersection((source_ref, target_ref))):
         return None
-    if (source_ref, target_ref) == (migration["from"], migration["to"]):
+    if source_ref == migration["from"] and target_ref in upgraded:
         return "introduce-user-markdown"
-    if (source_ref, target_ref) == (migration["to"], migration["from"]):
+    if source_ref in upgraded and target_ref == migration["from"]:
         return "remove-user-markdown"
     raise PluginError("Chat Polish 设置迁移不支持这一对提交；未更改插件")
 
@@ -109,7 +116,8 @@ class Native:
                    "settingsContract": spec["settings_contract"], "blocks": list(spec["settings"]), **data}
         migration = spec.get("user_markdown_migration")
         if migration:
-            request["settingsUpgrade"] = {"ref": migration["to"], "contract": migration["settings_contract"]}
+            request["settingsUpgrade"] = {"ref": migration["to"], "refs": sorted(upgraded_refs(spec)),
+                                          "contract": migration["settings_contract"]}
         if before is not None:
             request.update(before=before, server=before["server"])
         try:
@@ -185,7 +193,7 @@ def preflight_install(key, spec, ref):
             if not isinstance(manifest, dict) or manifest.get("id") != key:
                 raise PluginError("候选的 Paseo 插件 ID 与登记不符")
             migration = spec.get("user_markdown_migration", {})
-            contract = migration["settings_contract"] if migration.get("to") == ref else spec["settings_contract"]
+            contract = migration["settings_contract"] if ref in upgraded_refs(spec) else spec["settings_contract"]
             files = list(contract)
             blobs = git("rev-parse", *(f"FETCH_HEAD:{name}" for name in files)).splitlines()
             if blobs != list(contract.values()):
